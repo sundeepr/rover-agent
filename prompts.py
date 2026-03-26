@@ -12,7 +12,10 @@ MISSION_GOAL = (
     "Stay on the brown path surface at all times and avoid grass or obstacles."
 )
 
-SYSTEM_PROMPT = f"""You are a rover navigation assistant analysing a forward-facing camera image.
+SYSTEM_PROMPT = f"""You are a rover navigation assistant analysing a sequence of forward-facing camera images.
+
+You will receive up to 4 images in chronological order (oldest → newest, left to right).
+Use all images together to understand how the scene is changing over time.
 
 The rover must complete a two-phase mission:
   Phase 1 — follow the LEFT-MOST brown path forward until the path ends.
@@ -64,26 +67,38 @@ Rules:
   * Never place a waypoint at the edge or corner of the path; it must be the centre of the path.
 - Place waypoints at a y value roughly 1/3 up from the bottom (not too far ahead).
 - All three waypoints must lie on the correct phase path surface, not on grass, obstacles, or the wrong path.
-- END-OF-PATH DETECTION (phase 1) — declare "phase1_complete" if ANY of these are true:
-  * The brown path surface disappears or ends within the top half of the image (y < 240).
-  * Grass, vegetation, or a solid obstacle fills the view ahead with no brown surface visible forward.
-  * The path narrows to less than ~30 pixels wide at the furthest visible point.
-  * You are uncertain whether any forward brown path exists — when in doubt at the end, declare complete.
-  * DO NOT keep reporting "in_progress" if there is no clear brown path ahead — declare "phase1_complete".
+- END-OF-PATH DETECTION (phase 1) — use ALL provided images together:
+  * If across the sequence the brown path is getting shorter, narrower, or disappearing — the path is ending.
+  * If the most recent image shows no clear brown path ahead (grass/obstacle fills the view) — declare "phase1_complete".
+  * If the trajectory data shows the rover x/y has barely changed across recent steps — the rover is stuck at the end.
+  * When in doubt with no clear path forward — declare "phase1_complete" so the rover can turn and find the next path.
+  * DO NOT keep reporting "in_progress" if there is no clear brown path ahead.
 - Set goal_status "mission_complete" when the rover has returned to the start on the second path.
 - Set waypoints to an empty list only when goal_status is not "in_progress".
 - Do NOT wrap the response in markdown fences."""
 
 
-def build_user_prompt(phase: int, step: int, history: list[str]) -> str:
-    recent = history[-4:] if history else []
-    history_text = "\n".join(f"  {i+1}. {h}" for i, h in enumerate(recent)) or "  (first step)"
+def build_user_prompt(phase: int, step: int,
+                      trajectory: list[dict]) -> str:
+    """
+    trajectory: list of dicts with keys step, phase, x, y, description — all steps so far.
+    """
+    if trajectory:
+        rows = "\n".join(
+            f"  step {t['step']:>3d} | phase {t['phase']} | x={t['x']:>3d} y={t['y']:>3d} | {t['description']}"
+            for t in trajectory[-10:]   # last 10 steps
+        )
+    else:
+        rows = "  (no steps yet — this is the first query)"
 
     return f"""Mission: {MISSION_GOAL}
 
 Current phase: {phase}  |  Step: {step}
 
-Recent waypoints:
-{history_text}
+Rover trajectory (last {min(len(trajectory), 10)} steps, oldest first):
+{rows}
 
-Analyse the image and give the next three most probable waypoints to continue the mission."""
+The images provided are in chronological order (oldest → newest).
+Use the trajectory and the image sequence together to understand where the rover is and where the path is going.
+
+Analyse the images and give the next three most probable waypoints to continue the mission."""

@@ -45,18 +45,24 @@ _RESPONSE_SCHEMA = {
 }
 
 
-def get_waypoint(image_bytes: bytes, system_prompt: str, user_prompt: str) -> dict:
+def get_waypoint(image_frames: list[bytes], system_prompt: str, user_prompt: str) -> dict:
     """
-    Send an image + prompts to Gemini and return the parsed JSON response dict.
+    Send one or more images + prompts to Gemini and return the parsed JSON response dict.
+
+    image_frames: JPEG bytes in chronological order, oldest first, newest last.
     """
-    log.debug("Sending request to %s (%d byte image)", MODEL, len(image_bytes))
+    log.debug("Sending request to %s (%d frames, newest %d bytes)",
+              MODEL, len(image_frames), len(image_frames[-1]))
+
+    contents = [
+        types.Part.from_bytes(data=frame, mime_type="image/jpeg")
+        for frame in image_frames
+    ]
+    contents.append(types.Part.from_text(text=user_prompt))
 
     response = _client.models.generate_content(
         model=MODEL,
-        contents=[
-            types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
-            types.Part.from_text(text=user_prompt),
-        ],
+        contents=contents,
         config=types.GenerateContentConfig(
             system_instruction=system_prompt,
             max_output_tokens=4096,

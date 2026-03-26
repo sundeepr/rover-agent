@@ -15,6 +15,7 @@ Usage:
 """
 
 import argparse
+import collections
 import logging
 import threading
 import time
@@ -65,9 +66,13 @@ _result_lock = threading.Lock()
 _raw_frame = None          # numpy BGR array, updated at ~30 fps
 _llm_frame = None          # numpy BGR array, last frame sent to Gemini + overlay
 _latest_result: dict = {}
-_history: list[str] = []
+_trajectory: list[dict] = []          # structured per-step record: step, phase, x, y, description
 _step = 0
 _phase = 1
+
+# Rolling buffer of JPEG bytes for the last 3 query frames (oldest first)
+_FRAME_BUFFER_SIZE = 3
+_frame_buffer: collections.deque = collections.deque(maxlen=_FRAME_BUFFER_SIZE)
 
 # LLM query timing (seconds since epoch)
 _llm_query_start: float = 0.0    # set when query is sent; 0 = idle
@@ -140,13 +145,19 @@ def draw_overlay(frame, result: dict, step: int):
 def _gemini_query(step: int, phase: int, query_frame, captures_dir: Path,
                    roomba_ctrl):
     """Runs in its own thread — sends frame to Gemini and updates shared state."""
-    global _phase, _llm_query_start, _llm_response_s
+    global _phase, _llm_query_start, _llm_response_s, _frame_buffer
 
     _, jpeg_buf = cv2.imencode(".jpg", query_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
     image_bytes = jpeg_buf.tobytes()
-    user_prompt = prompts.build_user_prompt(phase, step, list(_history))
 
-    log.info("--- Step %d | Phase %d ---", step, phase)
+    # Build image list: up to last 3 prior frames + current frame
+    image_frames = list(_frame_buffer) + [image_bytes]
+    # Add current frame to buffer for future queries
+    _frame_buffer.append(image_bytes)
+
+    user_prompt = prompts.build_user_prompt(phase, step, list(_trajectory))
+
+    log.info("--- Step %d | Phase %d | %d image(s) sent ---", step, phase, len(image_frames))
 
     # Save the raw frame sent to Gemini
     cv2.imwrite(str(captures_dir / f"step_{step:04d}_raw.jpg"), query_frame)
@@ -155,7 +166,7 @@ def _gemini_query(step: int, phase: int, query_frame, captures_dir: Path,
     _llm_query_start = t0
     try:
         result = gemini_client.get_waypoint(
-            image_bytes, prompts.SYSTEM_PROMPT, user_prompt
+            image_frames, prompts.SYSTEM_PROMPT, user_prompt
         )
         elapsed = time.time() - t0
         _llm_response_s = elapsed
@@ -182,9 +193,11 @@ def _gemini_query(step: int, phase: int, query_frame, captures_dir: Path,
 
         top = next((w for w in result.get("waypoints", []) if w.get("rank") == 1), None)
         if top:
-            _history.append(
-                f"Step {step}: ({top['x']},{top['y']}) {top.get('description','')}"
-            )
+            _trajectory.append({
+                "step": step, "phase": phase,
+                "x": top["x"], "y": top["y"],
+                "description": top.get("description", ""),
+            })
 
         if roomba_ctrl and status == "in_progress" and top:
             try:
@@ -471,9 +484,12 @@ def video_llm():
 def status():
     result = get_result()
     result["step"] = _step
-    result["history"] = list(_history)
-    result["llm_query_start"] = _llm_query_start   # unix ts if querying, else 0
-    result["llm_response_s"] = _llm_response_s     # elapsed s of last response
+    result["history"] = [
+        f"Step {t['step']}: ({t['x']},{t['y']}) {t['description']}"
+        for t in _trajectory
+    ]
+    result["llm_query_start"] = _llm_query_start
+    result["llm_response_s"] = _llm_response_s
     return jsonify(result)
 
 
