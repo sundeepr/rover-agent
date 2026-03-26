@@ -22,6 +22,7 @@ from datetime import datetime
 from pathlib import Path
 
 import cv2
+import numpy as np
 from flask import Flask, Response, jsonify, render_template_string
 
 import gemini_client
@@ -57,40 +58,35 @@ log = setup_logging()
 
 # ── Shared state (written by agent thread, read by Flask) ──────────────────────
 
-_lock = threading.Lock()
-_raw_frame: bytes = b""        # live camera JPEG, updated at ~30 fps
-_llm_frame: bytes = b""        # last frame sent to Gemini + waypoint overlay
+_raw_lock = threading.Lock()
+_llm_lock = threading.Lock()
+_result_lock = threading.Lock()
+
+_raw_frame = None          # numpy BGR array, updated at ~30 fps
+_llm_frame = None          # numpy BGR array, last frame sent to Gemini + overlay
 _latest_result: dict = {}
 _history: list[str] = []
 _step = 0
 _phase = 1
 
 
-def set_raw_frame(frame_bytes: bytes):
+def set_raw_frame(frame):
     global _raw_frame
-    with _lock:
-        _raw_frame = frame_bytes
+    with _raw_lock:
+        _raw_frame = frame.copy()
 
-def get_raw_frame() -> bytes:
-    with _lock:
-        return _raw_frame
-
-def set_llm_frame(frame_bytes: bytes):
+def set_llm_frame(frame):
     global _llm_frame
-    with _lock:
-        _llm_frame = frame_bytes
-
-def get_llm_frame() -> bytes:
-    with _lock:
-        return _llm_frame
+    with _llm_lock:
+        _llm_frame = frame.copy()
 
 def set_result(result: dict):
     global _latest_result
-    with _lock:
+    with _result_lock:
         _latest_result = result
 
 def get_result() -> dict:
-    with _lock:
+    with _result_lock:
         return dict(_latest_result)
 
 
@@ -170,8 +166,7 @@ def agent_loop(device: int, interval: float, roomba_port: str | None = None, dry
             break
 
         # ── Always push raw frame to realtime stream ───────────────────────────
-        _, jpeg_buf = cv2.imencode(".jpg", frame)
-        set_raw_frame(jpeg_buf.tobytes())
+        set_raw_frame(frame)
 
         now = time.time()
 
@@ -182,6 +177,7 @@ def agent_loop(device: int, interval: float, roomba_port: str | None = None, dry
 
             # Capture the exact frame being sent to Gemini
             query_frame = frame.copy()
+            _, jpeg_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
             image_bytes = jpeg_buf.tobytes()
             user_prompt = prompts.build_user_prompt(_phase, _step, list(_history))
 
@@ -198,8 +194,7 @@ def agent_loop(device: int, interval: float, roomba_port: str | None = None, dry
 
                 # Draw waypoints onto the frozen query frame and publish
                 annotated = draw_overlay(query_frame, result, _step)
-                _, ann_buf = cv2.imencode(".jpg", annotated)
-                set_llm_frame(ann_buf.tobytes())
+                set_llm_frame(annotated)
 
                 status     = result.get("goal_status", "unknown")
                 reasoning  = result.get("reasoning", "")
@@ -375,13 +370,28 @@ _HTML = """<!DOCTYPE html>
 </html>"""
 
 
-def _mjpeg_stream(get_frame_fn):
-    """Generator that yields MJPEG frames from the given frame-getter function."""
+_BLANK_FRAME = np.zeros((480, 640, 3), dtype=np.uint8)
+
+
+def _stream(frame_lock, get_frame_fn, placeholder_text: str):
+    """MJPEG generator — matches momanip_navigation.py pattern exactly."""
+    blank = _BLANK_FRAME.copy()
+    cv2.putText(blank, placeholder_text, (30, 240),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (100, 100, 100), 2)
+
     while True:
-        frame = get_frame_fn()
-        if frame:
-            yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
-        time.sleep(0.033)
+        with frame_lock:
+            frame = get_frame_fn()
+            if frame is None:
+                ret, buf = cv2.imencode(".jpg", blank)
+            else:
+                ret, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if not ret:
+                continue
+            frame_bytes = buf.tobytes()
+
+        yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n")
+        time.sleep(0.05)
 
 
 @app.route("/")
@@ -391,13 +401,13 @@ def index():
 
 @app.route("/video/realtime")
 def video_realtime():
-    return Response(_mjpeg_stream(get_raw_frame),
+    return Response(_stream(_raw_lock, lambda: _raw_frame, "Waiting for camera..."),
                     mimetype="multipart/x-mixed-replace; boundary=frame")
 
 
 @app.route("/video/llm")
 def video_llm():
-    return Response(_mjpeg_stream(get_llm_frame),
+    return Response(_stream(_llm_lock, lambda: _llm_frame, "Waiting for first Gemini query..."),
                     mimetype="multipart/x-mixed-replace; boundary=frame")
 
 
@@ -437,7 +447,7 @@ def main():
     )
     t.start()
 
-    app.run(host="0.0.0.0", port=args.port, debug=False, use_reloader=False)
+    app.run(host="0.0.0.0", port=args.port, debug=False, use_reloader=False, threaded=True)
 
 
 if __name__ == "__main__":
