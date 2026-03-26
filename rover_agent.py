@@ -4,12 +4,14 @@ Rover navigation agent — web UI.
 
 Opens the camera, queries Gemini for navigation waypoints, and serves
 a live webpage at http://localhost:5000 showing:
-  - MJPEG video feed with waypoint overlay
+  - Real-time MJPEG camera feed (raw, 30 fps)
+  - Frozen frame that was sent to Gemini with waypoint overlay
   - Mission status, reasoning, confidence and history panel
 
 Usage:
     python rover_agent.py
     python rover_agent.py --device 1 --interval 5 --port 5000
+    python rover_agent.py --roomba-port /dev/ttyUSB0
 """
 
 import argparse
@@ -56,21 +58,31 @@ log = setup_logging()
 # ── Shared state (written by agent thread, read by Flask) ──────────────────────
 
 _lock = threading.Lock()
-_latest_frame: bytes = b""      # JPEG bytes with overlays drawn
+_raw_frame: bytes = b""        # live camera JPEG, updated at ~30 fps
+_llm_frame: bytes = b""        # last frame sent to Gemini + waypoint overlay
 _latest_result: dict = {}
 _history: list[str] = []
 _step = 0
 _phase = 1
 
 
-def set_frame(frame_bytes: bytes):
-    global _latest_frame
+def set_raw_frame(frame_bytes: bytes):
+    global _raw_frame
     with _lock:
-        _latest_frame = frame_bytes
+        _raw_frame = frame_bytes
 
-def get_frame() -> bytes:
+def get_raw_frame() -> bytes:
     with _lock:
-        return _latest_frame
+        return _raw_frame
+
+def set_llm_frame(frame_bytes: bytes):
+    global _llm_frame
+    with _lock:
+        _llm_frame = frame_bytes
+
+def get_llm_frame() -> bytes:
+    with _lock:
+        return _llm_frame
 
 def set_result(result: dict):
     global _latest_result
@@ -94,7 +106,6 @@ def draw_overlay(frame, result: dict, step: int):
 
     out = frame.copy()
 
-    # Draw all three waypoints
     for wp in result.get("waypoints", []):
         rank = wp.get("rank", 1)
         color = _WP_COLORS.get(rank, (255, 255, 255))
@@ -108,7 +119,6 @@ def draw_overlay(frame, result: dict, step: int):
         cv2.putText(out, label, (x + 16, y - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
 
-    # Status bar at top
     lines = [
         f"Step {step}  Phase {result.get('phase','?')}  {result.get('goal_status','')}",
         f"Confidence: {result.get('confidence', 0):.0%}",
@@ -159,6 +169,10 @@ def agent_loop(device: int, interval: float, roomba_port: str | None = None, dry
             log.error("Failed to grab frame")
             break
 
+        # ── Always push raw frame to realtime stream ───────────────────────────
+        _, jpeg_buf = cv2.imencode(".jpg", frame)
+        set_raw_frame(jpeg_buf.tobytes())
+
         now = time.time()
 
         # ── Query Gemini on interval ───────────────────────────────────────────
@@ -166,7 +180,8 @@ def agent_loop(device: int, interval: float, roomba_port: str | None = None, dry
             last_query_time = now
             _step += 1
 
-            _, jpeg_buf = cv2.imencode(".jpg", frame)
+            # Capture the exact frame being sent to Gemini
+            query_frame = frame.copy()
             image_bytes = jpeg_buf.tobytes()
             user_prompt = prompts.build_user_prompt(_phase, _step, list(_history))
 
@@ -181,9 +196,13 @@ def agent_loop(device: int, interval: float, roomba_port: str | None = None, dry
                 elapsed = time.time() - t0
                 set_result(result)
 
-                status    = result.get("goal_status", "unknown")
-                wp        = result.get("waypoint")
-                reasoning = result.get("reasoning", "")
+                # Draw waypoints onto the frozen query frame and publish
+                annotated = draw_overlay(query_frame, result, _step)
+                _, ann_buf = cv2.imencode(".jpg", annotated)
+                set_llm_frame(ann_buf.tobytes())
+
+                status     = result.get("goal_status", "unknown")
+                reasoning  = result.get("reasoning", "")
                 confidence = result.get("confidence", 0)
 
                 log.info("Status     : %s", status)
@@ -197,7 +216,6 @@ def agent_loop(device: int, interval: float, roomba_port: str | None = None, dry
                              wp.get("description", ""))
                 log.debug("Full response: %s", result)
 
-                # Record the top-ranked waypoint in history
                 top = next((w for w in result.get("waypoints", []) if w.get("rank") == 1), None)
                 if top:
                     _history.append(
@@ -220,13 +238,7 @@ def agent_loop(device: int, interval: float, roomba_port: str | None = None, dry
             except Exception as e:
                 log.error("Gemini error after %.2fs: %s", time.time() - t0, e, exc_info=True)
 
-        # ── Draw overlay and push to shared frame buffer ───────────────────────
-        result = get_result()
-        display = draw_overlay(frame, result, _step)
-        _, jpeg_buf = cv2.imencode(".jpg", display)
-        set_frame(jpeg_buf.tobytes())
-
-        time.sleep(0.033)   # ~30 fps capture rate
+        time.sleep(0.033)   # ~30 fps
 
     cap.release()
     log.info("Camera released")
@@ -249,20 +261,24 @@ _HTML = """<!DOCTYPE html>
     body { background: #0f0f0f; color: #e0e0e0; font-family: monospace;
            display: flex; flex-direction: column; height: 100vh; }
     header { padding: 10px 16px; background: #1a1a1a; border-bottom: 1px solid #333;
-             font-size: 1.1em; letter-spacing: 0.05em; color: #7ecfff; }
+             font-size: 1.1em; letter-spacing: 0.05em; color: #7ecfff; flex-shrink: 0; }
     .main { display: flex; flex: 1; overflow: hidden; }
 
-    /* Video panel */
-    .video-panel { flex: 1; display: flex; align-items: center;
-                   justify-content: center; background: #000; }
-    .video-panel img { max-width: 100%; max-height: 100%; object-fit: contain; }
+    /* Video column — two stacked feeds */
+    .video-column { flex: 1; display: flex; flex-direction: column; background: #000;
+                    gap: 2px; overflow: hidden; }
+    .video-box { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+    .video-box .label { background: #111; color: #555; font-size: 0.68em;
+                        text-transform: uppercase; letter-spacing: 0.1em;
+                        padding: 4px 10px; flex-shrink: 0; }
+    .video-box img { flex: 1; width: 100%; object-fit: contain; display: block; min-height: 0; }
 
     /* Status panel */
-    .status-panel { width: 320px; background: #141414; border-left: 1px solid #2a2a2a;
-                    display: flex; flex-direction: column; overflow: hidden; }
+    .status-panel { width: 300px; background: #141414; border-left: 1px solid #2a2a2a;
+                    display: flex; flex-direction: column; overflow: hidden; flex-shrink: 0; }
     .status-panel h2 { padding: 10px 12px; font-size: 0.8em; text-transform: uppercase;
                        letter-spacing: 0.1em; color: #555; border-bottom: 1px solid #2a2a2a; }
-    .kv { padding: 10px 12px; border-bottom: 1px solid #1e1e1e; }
+    .kv { padding: 8px 12px; border-bottom: 1px solid #1e1e1e; }
     .kv .label { font-size: 0.7em; color: #555; text-transform: uppercase;
                  letter-spacing: 0.08em; margin-bottom: 3px; }
     .kv .value { font-size: 0.9em; word-break: break-word; }
@@ -270,7 +286,6 @@ _HTML = """<!DOCTYPE html>
     .status-done { color: #2196f3; }
     .status-err  { color: #f44336; }
 
-    /* History */
     .history { flex: 1; overflow-y: auto; padding: 8px 12px; }
     .history-item { font-size: 0.78em; color: #666; padding: 3px 0;
                     border-bottom: 1px solid #1a1a1a; }
@@ -281,8 +296,15 @@ _HTML = """<!DOCTYPE html>
   <header>&#x25B6; Rover Navigation Agent</header>
   <div class="main">
 
-    <div class="video-panel">
-      <img src="/video" alt="camera feed">
+    <div class="video-column">
+      <div class="video-box">
+        <div class="label">&#x1F534; Live camera</div>
+        <img src="/video/realtime" alt="live feed">
+      </div>
+      <div class="video-box">
+        <div class="label">&#x1F9E0; Last Gemini query — with waypoints</div>
+        <img src="/video/llm" alt="LLM frame">
+      </div>
     </div>
 
     <div class="status-panel">
@@ -353,20 +375,30 @@ _HTML = """<!DOCTYPE html>
 </html>"""
 
 
+def _mjpeg_stream(get_frame_fn):
+    """Generator that yields MJPEG frames from the given frame-getter function."""
+    while True:
+        frame = get_frame_fn()
+        if frame:
+            yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
+        time.sleep(0.033)
+
+
 @app.route("/")
 def index():
     return render_template_string(_HTML)
 
 
-@app.route("/video")
-def video_feed():
-    def generate():
-        while True:
-            frame = get_frame()
-            if frame:
-                yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
-            time.sleep(0.033)
-    return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
+@app.route("/video/realtime")
+def video_realtime():
+    return Response(_mjpeg_stream(get_raw_frame),
+                    mimetype="multipart/x-mixed-replace; boundary=frame")
+
+
+@app.route("/video/llm")
+def video_llm():
+    return Response(_mjpeg_stream(get_llm_frame),
+                    mimetype="multipart/x-mixed-replace; boundary=frame")
 
 
 @app.route("/status")
