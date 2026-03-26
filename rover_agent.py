@@ -1,0 +1,412 @@
+#!/usr/bin/env python3
+"""
+Rover navigation agent — web UI.
+
+Opens the camera, queries Gemini for navigation waypoints, and serves
+a live webpage at http://localhost:5000 showing:
+  - MJPEG video feed with waypoint overlay
+  - Mission status, reasoning, confidence and history panel
+
+Usage:
+    python rover_agent.py
+    python rover_agent.py --device 1 --interval 5 --port 5000
+"""
+
+import argparse
+import logging
+import threading
+import time
+from datetime import datetime
+from pathlib import Path
+
+import cv2
+from flask import Flask, Response, jsonify, render_template_string
+
+import gemini_client
+import prompts
+import roomba_controller
+
+# ── Logging ────────────────────────────────────────────────────────────────────
+
+def setup_logging() -> logging.Logger:
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+    log_file = log_dir / f"rover_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+
+    logger = logging.getLogger("rover")
+    logger.setLevel(logging.DEBUG)
+
+    fh = logging.FileHandler(log_file)
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter("%(asctime)s  %(levelname)-8s  %(message)s",
+                                       datefmt="%Y-%m-%d %H:%M:%S"))
+
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(logging.Formatter("%(levelname)-8s %(message)s"))
+
+    logger.addHandler(fh)
+    logger.addHandler(ch)
+    logger.info("Log file: %s", log_file.resolve())
+    return logger
+
+
+log = setup_logging()
+
+# ── Shared state (written by agent thread, read by Flask) ──────────────────────
+
+_lock = threading.Lock()
+_latest_frame: bytes = b""      # JPEG bytes with overlays drawn
+_latest_result: dict = {}
+_history: list[str] = []
+_step = 0
+_phase = 1
+
+
+def set_frame(frame_bytes: bytes):
+    global _latest_frame
+    with _lock:
+        _latest_frame = frame_bytes
+
+def get_frame() -> bytes:
+    with _lock:
+        return _latest_frame
+
+def set_result(result: dict):
+    global _latest_result
+    with _lock:
+        _latest_result = result
+
+def get_result() -> dict:
+    with _lock:
+        return dict(_latest_result)
+
+
+# ── Overlay drawing ────────────────────────────────────────────────────────────
+
+# Rank 1 = green (best), rank 2 = yellow, rank 3 = orange
+_WP_COLORS = {1: (0, 255, 0), 2: (0, 220, 255), 3: (0, 140, 255)}
+
+
+def draw_overlay(frame, result: dict, step: int):
+    if not result:
+        return frame
+
+    out = frame.copy()
+
+    # Draw all three waypoints
+    for wp in result.get("waypoints", []):
+        rank = wp.get("rank", 1)
+        color = _WP_COLORS.get(rank, (255, 255, 255))
+        x, y = int(wp["x"]), int(wp["y"])
+
+        cv2.drawMarker(out, (x, y), color, cv2.MARKER_CROSS, markerSize=26, thickness=2)
+        cv2.circle(out, (x, y), 14, color, 2)
+
+        prob = wp.get("probability", 0)
+        label = f"#{rank} {prob:.0%} {wp.get('description','')[:30]}"
+        cv2.putText(out, label, (x + 16, y - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
+
+    # Status bar at top
+    lines = [
+        f"Step {step}  Phase {result.get('phase','?')}  {result.get('goal_status','')}",
+        f"Confidence: {result.get('confidence', 0):.0%}",
+    ]
+    y_pos = 24
+    for line in lines:
+        cv2.putText(out, line, (11, y_pos + 1),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2, cv2.LINE_AA)
+        cv2.putText(out, line, (10, y_pos),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
+        y_pos += 22
+
+    return out
+
+
+# ── Agent loop (runs in background thread) ─────────────────────────────────────
+
+def agent_loop(device: int, interval: float, roomba_port: str | None = None, dry_run: bool = False):
+    global _step, _phase
+
+    # Optionally connect to the Roomba
+    roomba_ctrl: roomba_controller.RoombaController | None = None
+    roomba_ctx = None
+    if roomba_port:
+        roomba_ctrl = roomba_controller.RoombaController(port=roomba_port, dry_run=dry_run)
+        roomba_ctx = roomba_ctrl.connect()
+        roomba_ctx.__enter__()
+        log.info("Roomba controller active on %s%s", roomba_port, " (dry-run)" if dry_run else "")
+
+    cap = cv2.VideoCapture(device)
+    if not cap.isOpened():
+        log.error("Could not open camera at device %d", device)
+        if roomba_ctx:
+            roomba_ctx.__exit__(None, None, None)
+        return
+
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, prompts.IMAGE_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, prompts.IMAGE_HEIGHT)
+    log.info("Camera opened: %dx%d",
+             int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+             int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+
+    last_query_time = 0.0
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            log.error("Failed to grab frame")
+            break
+
+        now = time.time()
+
+        # ── Query Gemini on interval ───────────────────────────────────────────
+        if now - last_query_time >= interval:
+            last_query_time = now
+            _step += 1
+
+            _, jpeg_buf = cv2.imencode(".jpg", frame)
+            image_bytes = jpeg_buf.tobytes()
+            user_prompt = prompts.build_user_prompt(_phase, _step, list(_history))
+
+            log.info("--- Step %d | Phase %d ---", _step, _phase)
+            log.debug("Image size: %d bytes", len(image_bytes))
+
+            t0 = time.time()
+            try:
+                result = gemini_client.get_waypoint(
+                    image_bytes, prompts.SYSTEM_PROMPT, user_prompt
+                )
+                elapsed = time.time() - t0
+                set_result(result)
+
+                status    = result.get("goal_status", "unknown")
+                wp        = result.get("waypoint")
+                reasoning = result.get("reasoning", "")
+                confidence = result.get("confidence", 0)
+
+                log.info("Status     : %s", status)
+                log.info("Confidence : %.0f%%", confidence * 100)
+                log.info("Reasoning  : %s", reasoning)
+                log.info("Response time: %.2fs", elapsed)
+                for wp in result.get("waypoints", []):
+                    log.info("Waypoint #%d: (%d, %d) p=%.0f%% — %s",
+                             wp.get("rank"), wp["x"], wp["y"],
+                             wp.get("probability", 0) * 100,
+                             wp.get("description", ""))
+                log.debug("Full response: %s", result)
+
+                # Record the top-ranked waypoint in history
+                top = next((w for w in result.get("waypoints", []) if w.get("rank") == 1), None)
+                if top:
+                    _history.append(
+                        f"Step {_step}: ({top['x']},{top['y']}) {top.get('description','')}"
+                    )
+
+                # Drive the Roomba toward the rank-1 waypoint (if connected)
+                if roomba_ctrl and status == "in_progress" and top:
+                    try:
+                        roomba_ctrl.navigate_to_waypoint(top)
+                    except Exception as e:
+                        log.error("Roomba drive error: %s", e, exc_info=True)
+
+                if status == "phase1_complete":
+                    _phase = 2
+                    log.info(">> Phase 1 complete — switching to return path")
+                elif status == "mission_complete":
+                    log.info(">> Mission complete after %d steps!", _step)
+
+            except Exception as e:
+                log.error("Gemini error after %.2fs: %s", time.time() - t0, e, exc_info=True)
+
+        # ── Draw overlay and push to shared frame buffer ───────────────────────
+        result = get_result()
+        display = draw_overlay(frame, result, _step)
+        _, jpeg_buf = cv2.imencode(".jpg", display)
+        set_frame(jpeg_buf.tobytes())
+
+        time.sleep(0.033)   # ~30 fps capture rate
+
+    cap.release()
+    log.info("Camera released")
+
+    if roomba_ctx:
+        roomba_ctx.__exit__(None, None, None)
+
+
+# ── Flask app ──────────────────────────────────────────────────────────────────
+
+app = Flask(__name__)
+
+_HTML = """<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Rover Agent</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0f0f0f; color: #e0e0e0; font-family: monospace;
+           display: flex; flex-direction: column; height: 100vh; }
+    header { padding: 10px 16px; background: #1a1a1a; border-bottom: 1px solid #333;
+             font-size: 1.1em; letter-spacing: 0.05em; color: #7ecfff; }
+    .main { display: flex; flex: 1; overflow: hidden; }
+
+    /* Video panel */
+    .video-panel { flex: 1; display: flex; align-items: center;
+                   justify-content: center; background: #000; }
+    .video-panel img { max-width: 100%; max-height: 100%; object-fit: contain; }
+
+    /* Status panel */
+    .status-panel { width: 320px; background: #141414; border-left: 1px solid #2a2a2a;
+                    display: flex; flex-direction: column; overflow: hidden; }
+    .status-panel h2 { padding: 10px 12px; font-size: 0.8em; text-transform: uppercase;
+                       letter-spacing: 0.1em; color: #555; border-bottom: 1px solid #2a2a2a; }
+    .kv { padding: 10px 12px; border-bottom: 1px solid #1e1e1e; }
+    .kv .label { font-size: 0.7em; color: #555; text-transform: uppercase;
+                 letter-spacing: 0.08em; margin-bottom: 3px; }
+    .kv .value { font-size: 0.9em; word-break: break-word; }
+    .status-ok   { color: #4caf50; }
+    .status-done { color: #2196f3; }
+    .status-err  { color: #f44336; }
+
+    /* History */
+    .history { flex: 1; overflow-y: auto; padding: 8px 12px; }
+    .history-item { font-size: 0.78em; color: #666; padding: 3px 0;
+                    border-bottom: 1px solid #1a1a1a; }
+    .history-item span { color: #999; }
+  </style>
+</head>
+<body>
+  <header>&#x25B6; Rover Navigation Agent</header>
+  <div class="main">
+
+    <div class="video-panel">
+      <img src="/video" alt="camera feed">
+    </div>
+
+    <div class="status-panel">
+      <h2>Mission Status</h2>
+      <div class="kv"><div class="label">Phase</div>
+        <div class="value" id="phase">—</div></div>
+      <div class="kv"><div class="label">Step</div>
+        <div class="value" id="step">—</div></div>
+      <div class="kv"><div class="label">Status</div>
+        <div class="value" id="status">—</div></div>
+      <div class="kv"><div class="label">Confidence</div>
+        <div class="value" id="confidence">—</div></div>
+      <div class="kv"><div class="label">Waypoints</div>
+        <div class="value" id="waypoints">—</div></div>
+      <div class="kv"><div class="label">Reasoning</div>
+        <div class="value" id="reasoning">—</div></div>
+
+      <h2 style="margin-top:4px">History</h2>
+      <div class="history" id="history"></div>
+    </div>
+
+  </div>
+
+  <script>
+    const statusColors = {
+      in_progress:      'status-ok',
+      phase1_complete:  'status-done',
+      mission_complete: 'status-done',
+      no_path:          'status-err',
+    };
+
+    async function poll() {
+      try {
+        const r = await fetch('/status');
+        const d = await r.json();
+
+        document.getElementById('phase').textContent      = d.phase ?? '—';
+        document.getElementById('step').textContent       = d.step  ?? '—';
+        document.getElementById('confidence').textContent =
+          d.confidence != null ? (d.confidence * 100).toFixed(0) + '%' : '—';
+        document.getElementById('reasoning').textContent  = d.reasoning ?? '—';
+
+        const statusEl = document.getElementById('status');
+        statusEl.textContent  = d.goal_status ?? '—';
+        statusEl.className    = 'value ' + (statusColors[d.goal_status] ?? '');
+
+        const wps = d.waypoints ?? [];
+        document.getElementById('waypoints').innerHTML = wps.length
+          ? wps.map(w =>
+              `<div style="margin-bottom:4px">
+                <span style="color:${['#4caf50','#ffeb3b','#ff9800'][w.rank-1] ?? '#fff'}">
+                  #${w.rank} ${(w.probability*100).toFixed(0)}%
+                </span>
+                (${w.x}, ${w.y}) ${w.description ?? ''}
+              </div>`).join('')
+          : 'none';
+
+        const hist = document.getElementById('history');
+        hist.innerHTML = (d.history ?? []).slice().reverse()
+          .map(h => `<div class="history-item"><span>${h}</span></div>`)
+          .join('');
+      } catch(_) {}
+      setTimeout(poll, 1000);
+    }
+    poll();
+  </script>
+</body>
+</html>"""
+
+
+@app.route("/")
+def index():
+    return render_template_string(_HTML)
+
+
+@app.route("/video")
+def video_feed():
+    def generate():
+        while True:
+            frame = get_frame()
+            if frame:
+                yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
+            time.sleep(0.033)
+    return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
+
+
+@app.route("/status")
+def status():
+    result = get_result()
+    result["step"] = _step
+    result["history"] = list(_history)
+    return jsonify(result)
+
+
+# ── Entry point ────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(description="Rover navigation agent")
+    parser.add_argument("--device",      type=int,   default=0,    help="Camera device index")
+    parser.add_argument("--interval",    type=float, default=3.0,  help="Seconds between Gemini queries")
+    parser.add_argument("--port",        type=int,   default=5000, help="Web server port")
+    parser.add_argument("--roomba-port", type=str,   default=None, help="Roomba serial port (e.g. /dev/ttyUSB0); omit to disable")
+    parser.add_argument("--dry-run",     action="store_true",      help="Log Roomba commands but do not send them")
+    args = parser.parse_args()
+
+    log.info("=== Rover agent starting ===")
+    log.info("Camera device : %d", args.device)
+    log.info("Query interval: %.1fs", args.interval)
+    log.info("Model         : %s", gemini_client.MODEL)
+    log.info("Web UI        : http://localhost:%d", args.port)
+    if args.roomba_port:
+        log.info("Roomba port   : %s%s", args.roomba_port, " (dry-run)" if args.dry_run else "")
+    else:
+        log.info("Roomba        : disabled (pass --roomba-port to enable)")
+
+    t = threading.Thread(
+        target=agent_loop,
+        args=(args.device, args.interval, args.roomba_port, args.dry_run),
+        daemon=True,
+    )
+    t.start()
+
+    app.run(host="0.0.0.0", port=args.port, debug=False, use_reloader=False)
+
+
+if __name__ == "__main__":
+    main()
