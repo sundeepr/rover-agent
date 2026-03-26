@@ -52,7 +52,7 @@ MIN_ROTATION_DEGREES = 3.0   # Ignore turns smaller than this (dead-band)
 
 # How long to drive per step before stopping and re-querying the camera.
 # At 150 mm/s this moves the rover ~7.5 cm per step.
-STEP_DURATION_S = 0.5
+STEP_DURATION_S = 2
 
 # Image dimensions (must match prompts.py)
 IMAGE_WIDTH = 640
