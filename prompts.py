@@ -54,11 +54,16 @@ Rules:
 - y=0 is the TOP (far away), y={IMAGE_HEIGHT - 1} is the BOTTOM (right in front).
 - Rank 1 is the best/most probable next waypoint. Ranks 2 and 3 are alternatives.
 - WAYPOINT PLACEMENT — this is critical:
-  * Identify the LEFT edge pixel and RIGHT edge pixel of the brown path at the target y depth.
-  * Set x = (left_edge_x + right_edge_x) / 2 — the exact horizontal midpoint of the path width.
+  * Phase 1: you are following the LEFT-MOST brown path ONLY. Ignore any other paths visible.
+    - Find the left and right edges of that single left-most path at the target y depth.
+    - Set x = (left_edge_x + right_edge_x) / 2 — midpoint of the LEFT-MOST path only.
+  * Phase 2: you are following the SECOND brown path from the left ONLY. Ignore the left-most path.
+    - Find the left and right edges of that second path at the target y depth.
+    - Set x = (left_edge_x + right_edge_x) / 2 — midpoint of that path only.
+  * NEVER average across multiple paths or place a waypoint between two paths.
   * Never place a waypoint at the edge or corner of the path; it must be the centre of the path.
 - Place waypoints at a y value roughly 1/3 up from the bottom (not too far ahead).
-- All three waypoints must lie on the brown path surface, not on grass or obstacles.
+- All three waypoints must lie on the correct phase path surface, not on grass, obstacles, or the wrong path.
 - Set goal_status "phase1_complete" when the path ends or a T-junction requires turning around.
 - Set goal_status "mission_complete" when the rover has returned to the start on the right path.
 - Set waypoints to an empty list only when goal_status is not "in_progress".
