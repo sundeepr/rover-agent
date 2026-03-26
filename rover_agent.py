@@ -24,7 +24,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from flask import Flask, Response, jsonify, render_template_string
+from flask import Flask, Response, jsonify, render_template_string, send_file
 
 import gemini_client
 import prompts
@@ -325,6 +325,10 @@ _HTML = """<!DOCTYPE html>
     .history-item { font-size: 0.78em; color: #666; padding: 3px 0;
                     border-bottom: 1px solid #1a1a1a; }
     .history-item span { color: #999; }
+    .log-link { display: block; font-size: 0.75em; padding: 4px 0;
+                border-bottom: 1px solid #1a1a1a; color: #7ecfff;
+                text-decoration: none; }
+    .log-link:hover { color: #fff; }
   </style>
 </head>
 <body>
@@ -361,6 +365,9 @@ _HTML = """<!DOCTYPE html>
 
       <h2 style="margin-top:4px">History</h2>
       <div class="history" id="history"></div>
+
+      <h2 style="margin-top:4px">Logs</h2>
+      <div id="log-list" style="padding:8px 12px; overflow-y:auto; max-height:120px;"></div>
     </div>
 
   </div>
@@ -388,6 +395,20 @@ _HTML = """<!DOCTYPE html>
         el.style.color = '#4caf50';
       }
     }
+
+    async function loadLogs() {
+      try {
+        const r = await fetch('/logs');
+        const files = await r.json();
+        document.getElementById('log-list').innerHTML = files.length
+          ? files.map(f =>
+              `<a class="log-link" href="/logs/${encodeURIComponent(f)}" download="${f}">&#x2B07; ${f}</a>`
+            ).join('')
+          : '<span style="font-size:0.75em;color:#555">No logs yet</span>';
+      } catch(_) {}
+    }
+    loadLogs();
+    setInterval(loadLogs, 10000);   // refresh list every 10s
 
     async function poll() {
       try {
@@ -478,6 +499,20 @@ def video_realtime():
 def video_llm():
     return Response(_stream(_llm_lock, lambda: _llm_frame, "Waiting for first Gemini query..."),
                     mimetype="multipart/x-mixed-replace; boundary=frame")
+
+
+@app.route("/logs")
+def list_logs():
+    files = sorted(Path("logs").glob("rover_*.log"), reverse=True)
+    return jsonify([f.name for f in files])
+
+
+@app.route("/logs/<path:filename>")
+def download_log(filename):
+    log_path = Path("logs") / filename
+    if not log_path.exists() or log_path.parent != Path("logs"):
+        return "Not found", 404
+    return send_file(log_path.resolve(), as_attachment=True, download_name=filename)
 
 
 @app.route("/status")
