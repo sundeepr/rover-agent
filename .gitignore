@@ -18,6 +18,9 @@ env/
 # Logs
 logs/
 
+# Captured LLM frames
+captures/
+
 # Environment variables
 .env
 *.env

@@ -69,6 +69,10 @@ _history: list[str] = []
 _step = 0
 _phase = 1
 
+# LLM query timing (seconds since epoch)
+_llm_query_start: float = 0.0    # set when query is sent; 0 = idle
+_llm_response_s: float = 0.0     # elapsed time of last completed query
+
 
 def set_raw_frame(frame):
     global _raw_frame
@@ -133,7 +137,7 @@ def draw_overlay(frame, result: dict, step: int):
 # ── Agent loop (runs in background thread) ─────────────────────────────────────
 
 def agent_loop(device: int, interval: float, roomba_port: str | None = None, dry_run: bool = False):
-    global _step, _phase
+    global _step, _phase, _llm_query_start, _llm_response_s
 
     # Optionally connect to the Roomba
     roomba_ctrl: roomba_controller.RoombaController | None = None
@@ -156,6 +160,10 @@ def agent_loop(device: int, interval: float, roomba_port: str | None = None, dry
     log.info("Camera opened: %dx%d",
              int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
              int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+
+    captures_dir = Path("captures")
+    captures_dir.mkdir(exist_ok=True)
+    log.info("Saving LLM frames to: %s", captures_dir.resolve())
 
     last_query_time = 0.0
 
@@ -184,17 +192,26 @@ def agent_loop(device: int, interval: float, roomba_port: str | None = None, dry
             log.info("--- Step %d | Phase %d ---", _step, _phase)
             log.debug("Image size: %d bytes", len(image_bytes))
 
+            # Save the raw frame sent to Gemini
+            cv2.imwrite(str(captures_dir / f"step_{_step:04d}_raw.jpg"), query_frame)
+
             t0 = time.time()
+            _llm_query_start = t0
             try:
                 result = gemini_client.get_waypoint(
                     image_bytes, prompts.SYSTEM_PROMPT, user_prompt
                 )
                 elapsed = time.time() - t0
+                _llm_response_s = elapsed
+                _llm_query_start = 0.0
                 set_result(result)
 
                 # Draw waypoints onto the frozen query frame and publish
                 annotated = draw_overlay(query_frame, result, _step)
                 set_llm_frame(annotated)
+
+                # Save the annotated frame with waypoints
+                cv2.imwrite(str(captures_dir / f"step_{_step:04d}_annotated.jpg"), annotated)
 
                 status     = result.get("goal_status", "unknown")
                 reasoning  = result.get("reasoning", "")
@@ -231,6 +248,7 @@ def agent_loop(device: int, interval: float, roomba_port: str | None = None, dry
                     log.info(">> Mission complete after %d steps!", _step)
 
             except Exception as e:
+                _llm_query_start = 0.0
                 log.error("Gemini error after %.2fs: %s", time.time() - t0, e, exc_info=True)
 
         time.sleep(0.033)   # ~30 fps
@@ -316,6 +334,8 @@ _HTML = """<!DOCTYPE html>
         <div class="value" id="waypoints">—</div></div>
       <div class="kv"><div class="label">Reasoning</div>
         <div class="value" id="reasoning">—</div></div>
+      <div class="kv"><div class="label">LLM Timer</div>
+        <div class="value" id="llm-timer">—</div></div>
 
       <h2 style="margin-top:4px">History</h2>
       <div class="history" id="history"></div>
@@ -330,6 +350,22 @@ _HTML = """<!DOCTYPE html>
       mission_complete: 'status-done',
       no_path:          'status-err',
     };
+
+    let _queryStart = 0;      // unix seconds; 0 = not querying
+    let _lastResponseS = 0;
+    let _timerInterval = null;
+
+    function updateTimer() {
+      const el = document.getElementById('llm-timer');
+      if (_queryStart > 0) {
+        const elapsed = (Date.now() / 1000 - _queryStart).toFixed(1);
+        el.textContent = '⏱ querying... ' + elapsed + 's';
+        el.style.color = '#ffeb3b';
+      } else if (_lastResponseS > 0) {
+        el.textContent = '✓ responded in ' + _lastResponseS.toFixed(2) + 's';
+        el.style.color = '#4caf50';
+      }
+    }
 
     async function poll() {
       try {
@@ -361,6 +397,17 @@ _HTML = """<!DOCTYPE html>
         hist.innerHTML = (d.history ?? []).slice().reverse()
           .map(h => `<div class="history-item"><span>${h}</span></div>`)
           .join('');
+
+        // Update timer state from server
+        _queryStart   = d.llm_query_start ?? 0;
+        _lastResponseS = d.llm_response_s ?? 0;
+        if (_queryStart > 0 && !_timerInterval) {
+          _timerInterval = setInterval(updateTimer, 100);
+        } else if (_queryStart === 0 && _timerInterval) {
+          clearInterval(_timerInterval);
+          _timerInterval = null;
+          updateTimer();
+        }
       } catch(_) {}
       setTimeout(poll, 1000);
     }
@@ -416,6 +463,8 @@ def status():
     result = get_result()
     result["step"] = _step
     result["history"] = list(_history)
+    result["llm_query_start"] = _llm_query_start   # unix ts if querying, else 0
+    result["llm_response_s"] = _llm_response_s     # elapsed s of last response
     return jsonify(result)
 
 
