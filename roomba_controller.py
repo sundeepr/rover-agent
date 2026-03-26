@@ -24,10 +24,12 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-# Allow importing Roomba from the sibling roomba/ directory
-_ROOMBA_DIR = Path(__file__).parent.parent / "roomba"
-if str(_ROOMBA_DIR) not in sys.path:
-    sys.path.insert(0, str(_ROOMBA_DIR))
+# Look for roomba_control in the same directory first, then ../roomba/
+_HERE = Path(__file__).parent
+_ROOMBA_DIR = _HERE.parent / "roomba"
+for _p in (_HERE, _ROOMBA_DIR):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 try:
     from roomba_control import Roomba  # type: ignore
@@ -91,7 +93,7 @@ class RoombaController:
         if not _ROOMBA_AVAILABLE:
             raise RuntimeError(
                 "roomba_control module not found. "
-                f"Expected it at {_ROOMBA_DIR}/roomba_control.py"
+                f"Copy roomba_control.py into {_HERE} or {_ROOMBA_DIR}"
             )
 
         self._roomba = Roomba(self.port, baud=self.baud)
