@@ -207,6 +207,7 @@ def _gemini_query(step: int, phase: int, query_frame, captures_dir: Path,
 
         if status == "phase1_complete":
             _phase = 2
+            _frame_buffer.clear()   # discard Phase 1 frames so Phase 2 starts fresh
             log.info(">> Phase 1 complete — executing U-turn")
             if roomba_ctrl:
                 try:
