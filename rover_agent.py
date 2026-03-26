@@ -136,8 +136,74 @@ def draw_overlay(frame, result: dict, step: int):
 
 # ── Agent loop (runs in background thread) ─────────────────────────────────────
 
+def _gemini_query(step: int, phase: int, query_frame, captures_dir: Path,
+                   roomba_ctrl):
+    """Runs in its own thread — sends frame to Gemini and updates shared state."""
+    global _phase, _llm_query_start, _llm_response_s
+
+    _, jpeg_buf = cv2.imencode(".jpg", query_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    image_bytes = jpeg_buf.tobytes()
+    user_prompt = prompts.build_user_prompt(phase, step, list(_history))
+
+    log.info("--- Step %d | Phase %d ---", step, phase)
+
+    # Save the raw frame sent to Gemini
+    cv2.imwrite(str(captures_dir / f"step_{step:04d}_raw.jpg"), query_frame)
+
+    t0 = time.time()
+    _llm_query_start = t0
+    try:
+        result = gemini_client.get_waypoint(
+            image_bytes, prompts.SYSTEM_PROMPT, user_prompt
+        )
+        elapsed = time.time() - t0
+        _llm_response_s = elapsed
+        _llm_query_start = 0.0
+        set_result(result)
+
+        annotated = draw_overlay(query_frame, result, step)
+        set_llm_frame(annotated)
+        cv2.imwrite(str(captures_dir / f"step_{step:04d}_annotated.jpg"), annotated)
+
+        status     = result.get("goal_status", "unknown")
+        reasoning  = result.get("reasoning", "")
+        confidence = result.get("confidence", 0)
+
+        log.info("Status     : %s", status)
+        log.info("Confidence : %.0f%%", confidence * 100)
+        log.info("Reasoning  : %s", reasoning)
+        log.info("Response time: %.2fs", elapsed)
+        for wp in result.get("waypoints", []):
+            log.info("Waypoint #%d: (%d, %d) p=%.0f%% — %s",
+                     wp.get("rank"), wp["x"], wp["y"],
+                     wp.get("probability", 0) * 100,
+                     wp.get("description", ""))
+
+        top = next((w for w in result.get("waypoints", []) if w.get("rank") == 1), None)
+        if top:
+            _history.append(
+                f"Step {step}: ({top['x']},{top['y']}) {top.get('description','')}"
+            )
+
+        if roomba_ctrl and status == "in_progress" and top:
+            try:
+                roomba_ctrl.navigate_to_waypoint(top)
+            except Exception as e:
+                log.error("Roomba drive error: %s", e, exc_info=True)
+
+        if status == "phase1_complete":
+            _phase = 2
+            log.info(">> Phase 1 complete — switching to return path")
+        elif status == "mission_complete":
+            log.info(">> Mission complete after %d steps!", step)
+
+    except Exception as e:
+        _llm_query_start = 0.0
+        log.error("Gemini error after %.2fs: %s", time.time() - t0, e, exc_info=True)
+
+
 def agent_loop(device: int, interval: float, roomba_port: str | None = None, dry_run: bool = False):
-    global _step, _phase, _llm_query_start, _llm_response_s
+    global _step
 
     # Optionally connect to the Roomba
     roomba_ctrl: roomba_controller.RoombaController | None = None
@@ -173,83 +239,20 @@ def agent_loop(device: int, interval: float, roomba_port: str | None = None, dry
             log.error("Failed to grab frame")
             break
 
-        # ── Always push raw frame to realtime stream ───────────────────────────
+        # ── Always push raw frame to realtime stream (never blocked by Gemini) ──
         set_raw_frame(frame)
 
         now = time.time()
 
-        # ── Query Gemini on interval ───────────────────────────────────────────
+        # ── Fire Gemini query in a separate thread so camera loop never blocks ──
         if now - last_query_time >= interval:
             last_query_time = now
             _step += 1
-
-            # Capture the exact frame being sent to Gemini
-            query_frame = frame.copy()
-            _, jpeg_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-            image_bytes = jpeg_buf.tobytes()
-            user_prompt = prompts.build_user_prompt(_phase, _step, list(_history))
-
-            log.info("--- Step %d | Phase %d ---", _step, _phase)
-            log.debug("Image size: %d bytes", len(image_bytes))
-
-            # Save the raw frame sent to Gemini
-            cv2.imwrite(str(captures_dir / f"step_{_step:04d}_raw.jpg"), query_frame)
-
-            t0 = time.time()
-            _llm_query_start = t0
-            try:
-                result = gemini_client.get_waypoint(
-                    image_bytes, prompts.SYSTEM_PROMPT, user_prompt
-                )
-                elapsed = time.time() - t0
-                _llm_response_s = elapsed
-                _llm_query_start = 0.0
-                set_result(result)
-
-                # Draw waypoints onto the frozen query frame and publish
-                annotated = draw_overlay(query_frame, result, _step)
-                set_llm_frame(annotated)
-
-                # Save the annotated frame with waypoints
-                cv2.imwrite(str(captures_dir / f"step_{_step:04d}_annotated.jpg"), annotated)
-
-                status     = result.get("goal_status", "unknown")
-                reasoning  = result.get("reasoning", "")
-                confidence = result.get("confidence", 0)
-
-                log.info("Status     : %s", status)
-                log.info("Confidence : %.0f%%", confidence * 100)
-                log.info("Reasoning  : %s", reasoning)
-                log.info("Response time: %.2fs", elapsed)
-                for wp in result.get("waypoints", []):
-                    log.info("Waypoint #%d: (%d, %d) p=%.0f%% — %s",
-                             wp.get("rank"), wp["x"], wp["y"],
-                             wp.get("probability", 0) * 100,
-                             wp.get("description", ""))
-                log.debug("Full response: %s", result)
-
-                top = next((w for w in result.get("waypoints", []) if w.get("rank") == 1), None)
-                if top:
-                    _history.append(
-                        f"Step {_step}: ({top['x']},{top['y']}) {top.get('description','')}"
-                    )
-
-                # Drive the Roomba toward the rank-1 waypoint (if connected)
-                if roomba_ctrl and status == "in_progress" and top:
-                    try:
-                        roomba_ctrl.navigate_to_waypoint(top)
-                    except Exception as e:
-                        log.error("Roomba drive error: %s", e, exc_info=True)
-
-                if status == "phase1_complete":
-                    _phase = 2
-                    log.info(">> Phase 1 complete — switching to return path")
-                elif status == "mission_complete":
-                    log.info(">> Mission complete after %d steps!", _step)
-
-            except Exception as e:
-                _llm_query_start = 0.0
-                log.error("Gemini error after %.2fs: %s", time.time() - t0, e, exc_info=True)
+            threading.Thread(
+                target=_gemini_query,
+                args=(_step, _phase, frame.copy(), captures_dir, roomba_ctrl),
+                daemon=True,
+            ).start()
 
         time.sleep(0.033)   # ~30 fps
 
