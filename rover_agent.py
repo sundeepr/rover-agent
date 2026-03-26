@@ -78,6 +78,8 @@ _frame_buffer: collections.deque = collections.deque(maxlen=_FRAME_BUFFER_SIZE)
 _llm_query_start: float = 0.0    # set when query is sent; 0 = idle
 _llm_response_s: float = 0.0     # elapsed time of last completed query
 
+_query_in_flight = threading.Event()  # set while a Gemini query thread is running
+
 
 
 def set_raw_frame(frame):
@@ -147,6 +149,7 @@ def _gemini_query(step: int, phase: int, query_frame, captures_dir: Path,
     """Runs in its own thread — sends frame to Gemini and updates shared state."""
     global _phase, _llm_query_start, _llm_response_s, _frame_buffer
 
+    _query_in_flight.set()
     _, jpeg_buf = cv2.imencode(".jpg", query_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
     image_bytes = jpeg_buf.tobytes()
 
@@ -220,6 +223,8 @@ def _gemini_query(step: int, phase: int, query_frame, captures_dir: Path,
     except Exception as e:
         _llm_query_start = 0.0
         log.error("Gemini error after %.2fs: %s", time.time() - t0, e, exc_info=True)
+    finally:
+        _query_in_flight.clear()
 
 
 def agent_loop(device: int, interval: float, roomba_port: str | None = None, dry_run: bool = False):
@@ -266,13 +271,16 @@ def agent_loop(device: int, interval: float, roomba_port: str | None = None, dry
 
         # ── Fire Gemini query in a separate thread so camera loop never blocks ──
         if now - last_query_time >= interval:
-            last_query_time = now
-            _step += 1
-            threading.Thread(
-                target=_gemini_query,
-                args=(_step, _phase, frame.copy(), captures_dir, roomba_ctrl),
-                daemon=True,
-            ).start()
+            if _query_in_flight.is_set():
+                log.warning("Previous query still in-flight — skipping step to avoid concurrent commands")
+            else:
+                last_query_time = now
+                _step += 1
+                threading.Thread(
+                    target=_gemini_query,
+                    args=(_step, _phase, frame.copy(), captures_dir, roomba_ctrl),
+                    daemon=True,
+                ).start()
 
         time.sleep(0.033)   # ~30 fps
 
