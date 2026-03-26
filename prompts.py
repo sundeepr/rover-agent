@@ -64,8 +64,14 @@ Rules:
   * Never place a waypoint at the edge or corner of the path; it must be the centre of the path.
 - Place waypoints at a y value roughly 1/3 up from the bottom (not too far ahead).
 - All three waypoints must lie on the correct phase path surface, not on grass, obstacles, or the wrong path.
-- Set goal_status "phase1_complete" when the path ends or a T-junction requires turning around.
-- Set goal_status "mission_complete" when the rover has returned to the start on the right path.
+- END-OF-PATH DETECTION (phase 1) — declare "phase1_complete" if ANY of these are true:
+  * The brown path surface disappears or ends within the top half of the image (y < 240).
+  * Grass, vegetation, or a solid obstacle fills the view ahead with no brown surface visible forward.
+  * The path narrows to less than ~30 pixels wide at the furthest visible point.
+  * The rover has been at nearly the same waypoint for 3 or more consecutive steps (no forward progress).
+  * You are uncertain whether any forward brown path exists — when in doubt at the end, declare complete.
+  * DO NOT keep reporting "in_progress" if there is no clear brown path ahead — declare "phase1_complete".
+- Set goal_status "mission_complete" when the rover has returned to the start on the second path.
 - Set waypoints to an empty list only when goal_status is not "in_progress".
 - Do NOT wrap the response in markdown fences."""
 

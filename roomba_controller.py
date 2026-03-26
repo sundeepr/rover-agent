@@ -145,6 +145,11 @@ class RoombaController:
 
         self._drive_forward()
 
+    def uturn(self) -> None:
+        """Spin 180° in place to reverse direction."""
+        self._turn(180.0)
+        log.info("U-turn complete")
+
     def stop(self) -> None:
         """Stop all wheel motion."""
         self._send_drive(0, 0x8000)

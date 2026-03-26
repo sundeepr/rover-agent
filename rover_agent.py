@@ -193,7 +193,12 @@ def _gemini_query(step: int, phase: int, query_frame, captures_dir: Path,
 
         if status == "phase1_complete":
             _phase = 2
-            log.info(">> Phase 1 complete — switching to return path")
+            log.info(">> Phase 1 complete — executing U-turn")
+            if roomba_ctrl:
+                try:
+                    roomba_ctrl.uturn()
+                except Exception as e:
+                    log.error("U-turn error: %s", e, exc_info=True)
         elif status == "mission_complete":
             log.info(">> Mission complete after %d steps!", step)
 
