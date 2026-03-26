@@ -68,7 +68,6 @@ Rules:
   * The brown path surface disappears or ends within the top half of the image (y < 240).
   * Grass, vegetation, or a solid obstacle fills the view ahead with no brown surface visible forward.
   * The path narrows to less than ~30 pixels wide at the furthest visible point.
-  * The rover has been at nearly the same waypoint for 3 or more consecutive steps (no forward progress).
   * You are uncertain whether any forward brown path exists — when in doubt at the end, declare complete.
   * DO NOT keep reporting "in_progress" if there is no clear brown path ahead — declare "phase1_complete".
 - Set goal_status "mission_complete" when the rover has returned to the start on the second path.
