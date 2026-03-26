@@ -73,10 +73,6 @@ _phase = 1
 _llm_query_start: float = 0.0    # set when query is sent; 0 = idle
 _llm_response_s: float = 0.0     # elapsed time of last completed query
 
-# Stagnation detection — tracked in Python, not by the LLM
-_STAGNATION_THRESHOLD = 40       # pixels; waypoints within this radius count as "same position"
-_STAGNATION_STEPS = 3            # how many consecutive stuck steps before forcing phase1_complete
-_recent_top_waypoints: list[tuple[int,int]] = []   # last N rank-1 (x, y) positions
 
 
 def set_raw_frame(frame):
@@ -141,20 +137,10 @@ def draw_overlay(frame, result: dict, step: int):
 
 # ── Agent loop (runs in background thread) ─────────────────────────────────────
 
-def _is_stagnant() -> bool:
-    """Return True if the last N rank-1 waypoints are all within STAGNATION_THRESHOLD pixels."""
-    if len(_recent_top_waypoints) < _STAGNATION_STEPS:
-        return False
-    xs = [p[0] for p in _recent_top_waypoints[-_STAGNATION_STEPS:]]
-    ys = [p[1] for p in _recent_top_waypoints[-_STAGNATION_STEPS:]]
-    return (max(xs) - min(xs)) <= _STAGNATION_THRESHOLD and \
-           (max(ys) - min(ys)) <= _STAGNATION_THRESHOLD
-
-
 def _gemini_query(step: int, phase: int, query_frame, captures_dir: Path,
                    roomba_ctrl):
     """Runs in its own thread — sends frame to Gemini and updates shared state."""
-    global _phase, _llm_query_start, _llm_response_s, _recent_top_waypoints
+    global _phase, _llm_query_start, _llm_response_s
 
     _, jpeg_buf = cv2.imencode(".jpg", query_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
     image_bytes = jpeg_buf.tobytes()
@@ -199,12 +185,6 @@ def _gemini_query(step: int, phase: int, query_frame, captures_dir: Path,
             _history.append(
                 f"Step {step}: ({top['x']},{top['y']}) {top.get('description','')}"
             )
-            _recent_top_waypoints.append((top["x"], top["y"]))
-
-        # Override to phase1_complete if Python detects stagnation (LLM is stateless)
-        if status == "in_progress" and phase == 1 and _is_stagnant():
-            log.warning("Stagnation detected after %d steps — forcing phase1_complete", _STAGNATION_STEPS)
-            status = "phase1_complete"
 
         if roomba_ctrl and status == "in_progress" and top:
             try:
@@ -214,7 +194,6 @@ def _gemini_query(step: int, phase: int, query_frame, captures_dir: Path,
 
         if status == "phase1_complete":
             _phase = 2
-            _recent_top_waypoints.clear()
             log.info(">> Phase 1 complete — executing U-turn")
             if roomba_ctrl:
                 try:
