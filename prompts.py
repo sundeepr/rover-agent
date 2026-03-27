@@ -21,43 +21,6 @@ The rover must complete a two-phase mission:
   Phase 1 — follow the LEFT-MOST brown path forward until the path ends.
   Phase 2 — turn around and follow the NEXT brown path to the RIGHT back to the start.
 
-Respond ONLY with valid JSON in this exact format:
-{{
-  "phase": 1 or 2,
-  "navigation_mode": "aligning" | "following",
-  "goal_status": "in_progress" | "phase1_complete" | "mission_complete" | "no_path",
-  "reasoning": "<brief scene analysis including alignment state>",
-  "waypoints": [
-    {{
-      "rank": 1,
-      "x": <integer 0-{IMAGE_WIDTH - 1}>,
-      "y": <integer 0-{IMAGE_HEIGHT - 1}>,
-      "description": "<what is at this point>",
-      "probability": <float 0.0-1.0, most likely next waypoint>
-    }},
-    {{
-      "rank": 2,
-      "x": <integer 0-{IMAGE_WIDTH - 1}>,
-      "y": <integer 0-{IMAGE_HEIGHT - 1}>,
-      "description": "<what is at this point>",
-      "probability": <float 0.0-1.0>
-    }},
-    {{
-      "rank": 3,
-      "x": <integer 0-{IMAGE_WIDTH - 1}>,
-      "y": <integer 0-{IMAGE_HEIGHT - 1}>,
-      "description": "<what is at this point>",
-      "probability": <float 0.0-1.0>
-    }}
-  ],
-  "confidence": <float 0.0-1.0, overall confidence in this decision>
-}}
-
-Rules:
-- x=0 is the LEFT edge, x={IMAGE_WIDTH - 1} is the RIGHT edge, x={IMAGE_WIDTH // 2} is centre.
-- y=0 is the TOP (far away), y={IMAGE_HEIGHT - 1} is the BOTTOM (right in front).
-- Rank 1 is the best/most probable next waypoint. Ranks 2 and 3 are alternatives.
-
 ----------------------------------------------------------------
 PATH ALIGNMENT (PRE-NAVIGATION — CRITICAL)
 ----------------------------------------------------------------
@@ -147,7 +110,45 @@ Reasoning must include:
 - Whether rover is aligned or misaligned and by how much.
 - What correction (if any) is being applied.
 
-Do NOT wrap the response in markdown fences."""
+----------------------------------------------------------------
+OUTPUT FORMAT
+----------------------------------------------------------------
+Respond ONLY with valid JSON in this exact format:
+{{
+  "phase": 1 or 2,
+  "navigation_mode": "aligning" | "following",
+  "goal_status": "in_progress" | "phase1_complete" | "mission_complete" | "no_path",
+  "reasoning": "<brief scene analysis including alignment state>",
+  "waypoints": [
+    {{
+      "rank": 1,
+      "x": <integer 0-{IMAGE_WIDTH - 1}>,
+      "y": <integer 0-{IMAGE_HEIGHT - 1}>,
+      "description": "<what is at this point>",
+      "probability": <float 0.0-1.0, most likely next waypoint>
+    }},
+    {{
+      "rank": 2,
+      "x": <integer 0-{IMAGE_WIDTH - 1}>,
+      "y": <integer 0-{IMAGE_HEIGHT - 1}>,
+      "description": "<what is at this point>",
+      "probability": <float 0.0-1.0>
+    }},
+    {{
+      "rank": 3,
+      "x": <integer 0-{IMAGE_WIDTH - 1}>,
+      "y": <integer 0-{IMAGE_HEIGHT - 1}>,
+      "description": "<what is at this point>",
+      "probability": <float 0.0-1.0>
+    }}
+  ],
+  "confidence": <float 0.0-1.0, overall confidence in this decision>
+}}
+
+- x=0 is the LEFT edge, x={IMAGE_WIDTH - 1} is the RIGHT edge, x={IMAGE_WIDTH // 2} is centre.
+- y=0 is the TOP (far away), y={IMAGE_HEIGHT - 1} is the BOTTOM (right in front).
+- Rank 1 is the best/most probable next waypoint. Ranks 2 and 3 are alternatives.
+- Do NOT wrap the response in markdown fences."""
 
 
 def build_user_prompt(phase: int, step: int,
