@@ -180,11 +180,13 @@ def _gemini_query(step: int, phase: int, query_frame, captures_dir: Path,
         set_llm_frame(annotated)
         cv2.imwrite(str(captures_dir / f"step_{step:04d}_annotated.jpg"), annotated)
 
-        status     = result.get("goal_status", "unknown")
-        reasoning  = result.get("reasoning", "")
+        status    = result.get("goal_status", "unknown")
+        nav_mode  = result.get("navigation_mode", "unknown")
+        reasoning = result.get("reasoning", "")
         confidence = result.get("confidence", 0)
 
         log.info("Status     : %s", status)
+        log.info("Nav mode   : %s", nav_mode)
         log.info("Confidence : %.0f%%", confidence * 100)
         log.info("Reasoning  : %s", reasoning)
         log.info("Response time: %.2fs", elapsed)
@@ -363,6 +365,8 @@ _HTML = """<!DOCTYPE html>
         <div class="value" id="step">—</div></div>
       <div class="kv"><div class="label">Status</div>
         <div class="value" id="status">—</div></div>
+      <div class="kv"><div class="label">Nav Mode</div>
+        <div class="value" id="nav-mode">—</div></div>
       <div class="kv"><div class="label">Confidence</div>
         <div class="value" id="confidence">—</div></div>
       <div class="kv"><div class="label">Waypoints</div>
@@ -387,6 +391,10 @@ _HTML = """<!DOCTYPE html>
       phase1_complete:  'status-done',
       mission_complete: 'status-done',
       no_path:          'status-err',
+    };
+    const navModeColors = {
+      aligning:  '#ffeb3b',
+      following: '#4caf50',
     };
 
     let _queryStart = 0;      // unix seconds; 0 = not querying
@@ -433,6 +441,10 @@ _HTML = """<!DOCTYPE html>
         const statusEl = document.getElementById('status');
         statusEl.textContent  = d.goal_status ?? '—';
         statusEl.className    = 'value ' + (statusColors[d.goal_status] ?? '');
+
+        const navEl = document.getElementById('nav-mode');
+        navEl.textContent = d.navigation_mode ?? '—';
+        navEl.style.color = navModeColors[d.navigation_mode] ?? '#e0e0e0';
 
         const wps = d.waypoints ?? [];
         document.getElementById('waypoints').innerHTML = wps.length

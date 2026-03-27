@@ -24,8 +24,9 @@ The rover must complete a two-phase mission:
 Respond ONLY with valid JSON in this exact format:
 {{
   "phase": 1 or 2,
+  "navigation_mode": "aligning" | "following",
   "goal_status": "in_progress" | "phase1_complete" | "mission_complete" | "no_path",
-  "reasoning": "<brief scene analysis>",
+  "reasoning": "<brief scene analysis including alignment state>",
   "waypoints": [
     {{
       "rank": 1,
@@ -56,26 +57,97 @@ Rules:
 - x=0 is the LEFT edge, x={IMAGE_WIDTH - 1} is the RIGHT edge, x={IMAGE_WIDTH // 2} is centre.
 - y=0 is the TOP (far away), y={IMAGE_HEIGHT - 1} is the BOTTOM (right in front).
 - Rank 1 is the best/most probable next waypoint. Ranks 2 and 3 are alternatives.
-- WAYPOINT PLACEMENT — this is critical:
-  * Phase 1: you are following the LEFT-MOST brown path ONLY. Ignore any other paths visible.
-    - Find the left and right edges of that single left-most path at the target y depth.
-    - Set x = (left_edge_x + right_edge_x) / 2 — midpoint of the LEFT-MOST path only.
-  * Phase 2: you are following the SECOND brown path from the left ONLY. Ignore the left-most path.
-    - Find the left and right edges of that second path at the target y depth.
-    - Set x = (left_edge_x + right_edge_x) / 2 — midpoint of that path only.
-  * NEVER average across multiple paths or place a waypoint between two paths.
-  * Never place a waypoint at the edge or corner of the path; it must be the centre of the path.
-- Place waypoints at a y value roughly 1/3 up from the bottom (not too far ahead).
-- All three waypoints must lie on the correct phase path surface, not on grass, obstacles, or the wrong path.
-- END-OF-PATH DETECTION (phase 1) — use ALL provided images together:
-  * If across the sequence the brown path is getting shorter, narrower, or disappearing — the path is ending.
-  * If the most recent image shows no clear brown path ahead (grass/obstacle fills the view) — declare "phase1_complete".
-  * If the trajectory data shows the rover x/y has barely changed across recent steps — the rover is stuck at the end.
-  * When in doubt with no clear path forward — declare "phase1_complete" so the rover can turn and find the next path.
-  * DO NOT keep reporting "in_progress" if there is no clear brown path ahead.
-- Set goal_status "mission_complete" when the rover has returned to the start on the second path.
-- Set waypoints to an empty list only when goal_status is not "in_progress".
-- Do NOT wrap the response in markdown fences."""
+
+----------------------------------------------------------------
+PATH ALIGNMENT (PRE-NAVIGATION — CRITICAL)
+----------------------------------------------------------------
+Before placing waypoints for forward motion, determine if the rover is properly aligned with the target path.
+
+Set navigation_mode = "aligning" if ANY of the following are true:
+- The target path center is offset from image center:
+  |path_center_x - {IMAGE_WIDTH // 2}| > {int(IMAGE_WIDTH * 0.12)} pixels (~12% of image width)
+- The path appears angled (not vertically aligned in the image)
+- The rover appears to be facing across the path instead of along it
+- Across images, motion suggests lateral drift instead of forward progression
+
+Alignment objective:
+- The selected path is centered (x ≈ {IMAGE_WIDTH // 2})
+- The path appears vertically aligned (straight ahead)
+- The rover is positioned ON the path surface
+
+Alignment behaviour:
+- Place waypoints that move the rover TOWARD the path center (not forward along it)
+- Prioritize lateral correction over forward progress
+- Use closer waypoints (y ≈ 70–90% of image height, i.e. y ≈ {int(IMAGE_HEIGHT * 0.7)}–{int(IMAGE_HEIGHT * 0.9)})
+
+Exit alignment (set navigation_mode = "following") ONLY when:
+- Path center is within ~5% of image center ({int(IMAGE_WIDTH * 0.05)} px) AND
+- Path appears vertically aligned AND
+- Rover is clearly on the path surface
+
+----------------------------------------------------------------
+WAYPOINT PLACEMENT — this is critical
+----------------------------------------------------------------
+* Phase 1: follow the LEFT-MOST brown path ONLY. Ignore any other paths.
+  - Find left and right edges of that path at the target y depth.
+  - x = (left_edge_x + right_edge_x) / 2
+
+* Phase 2: follow the SECOND path from the left ONLY. Ignore others.
+  - Find left and right edges of that path.
+  - x = (left_edge_x + right_edge_x) / 2
+
+* NEVER average across multiple paths.
+* NEVER place a waypoint between two paths.
+* Waypoint must be at the CENTER of the selected path.
+
+----------------------------------------------------------------
+WAYPOINT DEPTH LOGIC
+----------------------------------------------------------------
+- If navigation_mode = "aligning":
+  * Place waypoints close to rover (y ≈ 70–90% of image height)
+  * Focus on lateral correction, minimal forward movement
+
+- If navigation_mode = "following":
+  * Place waypoints at ~1/3 up from bottom (y ≈ {int(IMAGE_HEIGHT * 0.67)})
+
+----------------------------------------------------------------
+STRICT BEHAVIOUR RULE
+----------------------------------------------------------------
+- NEVER begin forward path following if the rover is misaligned.
+- ALWAYS prioritize alignment before forward progression.
+
+----------------------------------------------------------------
+PATH VALIDITY
+----------------------------------------------------------------
+- All waypoints must lie on the correct phase path surface.
+- Never place waypoints on grass, obstacles, or the wrong path.
+
+----------------------------------------------------------------
+END-OF-PATH DETECTION (phase 1)
+----------------------------------------------------------------
+Use ALL images together:
+- If path is shrinking, narrowing, or disappearing across the sequence → ending.
+- If the latest image has no clear brown path ahead → "phase1_complete".
+- If the trajectory data shows rover position barely changing → stuck → "phase1_complete".
+- When uncertain with no clear path forward → "phase1_complete".
+- DO NOT keep reporting "in_progress" if there is no clear brown path ahead.
+
+----------------------------------------------------------------
+GOAL STATUS
+----------------------------------------------------------------
+- "mission_complete" when rover has returned to start via the second path.
+- "no_path" if no valid path is detected.
+- Set waypoints = [] if goal_status is not "in_progress".
+
+----------------------------------------------------------------
+REASONING REQUIREMENT
+----------------------------------------------------------------
+Reasoning must include:
+- Which path is selected and why.
+- Whether rover is aligned or misaligned and by how much.
+- What correction (if any) is being applied.
+
+Do NOT wrap the response in markdown fences."""
 
 
 def build_user_prompt(phase: int, step: int,
@@ -86,7 +158,7 @@ def build_user_prompt(phase: int, step: int,
     if trajectory:
         rows = "\n".join(
             f"  step {t['step']:>3d} | phase {t['phase']} | x={t['x']:>3d} y={t['y']:>3d} | {t['description']}"
-            for t in trajectory[-10:]   # last 10 steps
+            for t in trajectory[-10:]
         )
     else:
         rows = "  (no steps yet — this is the first query)"

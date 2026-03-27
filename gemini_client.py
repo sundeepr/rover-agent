@@ -33,15 +33,17 @@ _WAYPOINT_SCHEMA = {
 _RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
-        "phase":       {"type": "integer"},
-        "goal_status": {"type": "string",
-                        "enum": ["in_progress", "phase1_complete",
-                                 "mission_complete", "no_path"]},
-        "reasoning":   {"type": "string"},
-        "waypoints":   {"type": "array", "items": _WAYPOINT_SCHEMA},
-        "confidence":  {"type": "number"},
+        "phase":           {"type": "integer"},
+        "navigation_mode": {"type": "string",
+                            "enum": ["aligning", "following"]},
+        "goal_status":     {"type": "string",
+                            "enum": ["in_progress", "phase1_complete",
+                                     "mission_complete", "no_path"]},
+        "reasoning":       {"type": "string"},
+        "waypoints":       {"type": "array", "items": _WAYPOINT_SCHEMA},
+        "confidence":      {"type": "number"},
     },
-    "required": ["phase", "goal_status", "reasoning", "waypoints", "confidence"],
+    "required": ["phase", "navigation_mode", "goal_status", "reasoning", "waypoints", "confidence"],
 }
 
 
