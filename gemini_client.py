@@ -11,7 +11,7 @@ import re
 from google import genai
 from google.genai import types
 
-MODEL = "gemini-3.1-pro-preview"
+MODEL = "gemini-3-flash-preview"
 
 log = logging.getLogger("rover.gemini")
 

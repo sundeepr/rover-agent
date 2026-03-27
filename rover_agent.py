@@ -206,7 +206,7 @@ def _gemini_query(step: int, phase: int, query_frame, captures_dir: Path,
 
         if roomba_ctrl and status == "in_progress" and top:
             try:
-                roomba_ctrl.navigate_to_waypoint(top)
+                roomba_ctrl.navigate_to_waypoint(top, nav_mode)
             except Exception as e:
                 log.error("Roomba drive error: %s", e, exc_info=True)
 
@@ -259,6 +259,7 @@ def agent_loop(device: int, interval: float, roomba_port: str | None = None, dry
     log.info("Saving LLM frames to: %s", captures_dir.resolve())
 
     last_query_time = 0.0
+    _logged_in_flight = False
 
     while True:
         ret, frame = cap.read()
@@ -274,8 +275,11 @@ def agent_loop(device: int, interval: float, roomba_port: str | None = None, dry
         # ── Fire Gemini query in a separate thread so camera loop never blocks ──
         if now - last_query_time >= interval:
             if _query_in_flight.is_set():
-                log.warning("Previous query still in-flight — skipping step to avoid concurrent commands")
+                if not _logged_in_flight:
+                    log.info("Previous query still in-flight — skipping until complete")
+                    _logged_in_flight = True
             else:
+                _logged_in_flight = False
                 last_query_time = now
                 _step += 1
                 threading.Thread(
