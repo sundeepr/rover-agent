@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import time
 
 from google import genai
 from google.genai import types
@@ -47,11 +48,16 @@ _RESPONSE_SCHEMA = {
 }
 
 
+_MAX_RETRIES = 3
+_RETRY_DELAY_S = 1.0
+
+
 def get_waypoint(image_frames: list[bytes], system_prompt: str, user_prompt: str) -> dict:
     """
     Send one or more images + prompts to Gemini and return the parsed JSON response dict.
 
     image_frames: JPEG bytes in chronological order, oldest first, newest last.
+    Retries up to _MAX_RETRIES times on truncated/invalid JSON responses.
     """
     log.debug("Sending request to %s (%d frames, newest %d bytes)",
               MODEL, len(image_frames), len(image_frames[-1]))
@@ -62,30 +68,35 @@ def get_waypoint(image_frames: list[bytes], system_prompt: str, user_prompt: str
     ]
     contents.append(types.Part.from_text(text=user_prompt))
 
-    response = _client.models.generate_content(
-        model=MODEL,
-        contents=contents,
-        config=types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            max_output_tokens=4096,
-            temperature=0.3,
-            response_mime_type="application/json",
-            response_schema=_RESPONSE_SCHEMA,
-        ),
-    )
+    last_exc: Exception | None = None
+    for attempt in range(1, _MAX_RETRIES + 1):
+        response = _client.models.generate_content(
+            model=MODEL,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                max_output_tokens=4096,
+                temperature=0.3,
+                response_mime_type="application/json",
+                response_schema=_RESPONSE_SCHEMA,
+            ),
+        )
 
-    raw = response.text or ""
-    log.debug("Raw response (%d chars): %s", len(raw), raw[:500])
+        raw = response.text or ""
+        log.debug("Raw response attempt %d (%d chars): %s", attempt, len(raw), raw[:500])
 
-    # Strip markdown fences if present
-    match = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", raw)
-    if match:
-        log.debug("Stripped markdown fences from response")
-        raw = match.group(1)
+        # Strip markdown fences if present
+        match = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", raw)
+        if match:
+            raw = match.group(1)
 
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as e:
-        log.error("JSON parse failed: %s", e)
-        log.error("Raw response was: %s", raw)
-        raise
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as e:
+            last_exc = e
+            log.warning("JSON parse failed (attempt %d/%d): %s", attempt, _MAX_RETRIES, e)
+            if attempt < _MAX_RETRIES:
+                time.sleep(_RETRY_DELAY_S)
+
+    log.error("All %d attempts failed. Last raw response: %s", _MAX_RETRIES, raw)
+    raise last_exc
