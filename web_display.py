@@ -229,6 +229,13 @@ class WebDisplay:
 
     def run(self, host: str = "0.0.0.0", port: int = 5000) -> None:
         """Start Flask on the calling thread (blocks). Call from main thread."""
+        # Route werkzeug access logs to the rover log file instead of stdout
+        werkzeug_log = logging.getLogger("werkzeug")
+        werkzeug_log.handlers = []
+        for handler in logging.getLogger("rover").handlers:
+            werkzeug_log.addHandler(handler)
+        werkzeug_log.setLevel(logging.DEBUG)
+
         self._app.run(host=host, port=port, debug=False,
                       use_reloader=False, threaded=True)
 
