@@ -139,10 +139,13 @@ def agent_loop(
 
 # ── Strategy factory ───────────────────────────────────────────────────────────
 
-def _build_strategy(name: str) -> NavigationStrategy:
+def _build_strategy(name: str, args) -> NavigationStrategy:
     if name == "gemini":
         from gemini_strategy import GeminiStrategy
         return GeminiStrategy()
+    if name == "omnivla":
+        from omnivla_strategy import OmniVLAStrategy
+        return OmniVLAStrategy(goal=args.goal)
     raise ValueError(f"Unknown strategy: {name!r}")
 
 
@@ -161,15 +164,20 @@ def main():
     parser.add_argument("--dry-run",     action="store_true",
                         help="Log Roomba commands but do not send them")
     parser.add_argument("--strategy",    type=str,   default="gemini",
-                        choices=["gemini"],
+                        choices=["gemini", "omnivla"],
                         help="Navigation strategy (default: gemini)")
+    parser.add_argument("--goal",        type=str,   default="navigate forward",
+                        help="Language goal for omnivla strategy (e.g. 'blue trash bin')")
     args = parser.parse_args()
 
     log.info("=== Rover agent starting ===")
     log.info("Camera device : %d", args.device)
     log.info("Query interval: %.1fs", args.interval)
     log.info("Strategy      : %s", args.strategy)
-    log.info("Model         : %s", gemini_client.MODEL)
+    if args.strategy == "omnivla":
+        log.info("Goal          : %s", args.goal)
+    else:
+        log.info("Model         : %s", gemini_client.MODEL)
     log.info("Web UI        : http://localhost:%d", args.port)
     if args.roomba_port:
         log.info("Roomba port   : %s%s", args.roomba_port, " (dry-run)" if args.dry_run else "")
@@ -177,7 +185,7 @@ def main():
         log.info("Roomba        : disabled (pass --roomba-port to enable)")
 
     state    = AgentState()
-    strategy = _build_strategy(args.strategy)
+    strategy = _build_strategy(args.strategy, args)
 
     threading.Thread(
         target=agent_loop,

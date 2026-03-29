@@ -1,0 +1,8 @@
+# Extra dependencies for the omnivla strategy
+# Install with: pip install -r requirements-omnivla.txt
+torch
+torchvision
+git+https://github.com/openai/CLIP.git
+efficientnet_pytorch
+huggingface_hub
+Pillow

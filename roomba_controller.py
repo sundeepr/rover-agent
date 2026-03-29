@@ -156,6 +156,14 @@ class RoombaController:
         self._turn(180.0)
         log.info("U-turn complete")
 
+    def drive_raw(self, velocity: int, radius: int) -> None:
+        """Send a raw (velocity, radius) drive command immediately without sleeping.
+
+        Used by strategies (e.g. OmniVLA) that manage their own timing and
+        want continuous motion rather than a fixed-duration step.
+        """
+        self._send_drive(velocity, radius)
+
     def stop(self) -> None:
         """Stop all wheel motion."""
         self._send_drive(0, 0x8000)
