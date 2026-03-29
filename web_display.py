@@ -232,6 +232,7 @@ class WebDisplay:
         # Route werkzeug access logs to the rover log file instead of stdout
         werkzeug_log = logging.getLogger("werkzeug")
         werkzeug_log.handlers = []
+        werkzeug_log.propagate = False
         for handler in logging.getLogger("rover").handlers:
             werkzeug_log.addHandler(handler)
         werkzeug_log.setLevel(logging.DEBUG)
