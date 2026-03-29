@@ -161,6 +161,21 @@ Both strategies work with either rover — the controllers share the same interf
 
 ---
 
+## Atlas-1 calibration
+
+Before the first real drive, update these constants in [atlas_controller.py](atlas_controller.py):
+
+| Constant | Default | What to do |
+|----------|---------|------------|
+| `WHEEL_BASE_MM` | 300 | Measure centre-to-centre distance between left and right wheel contact patches |
+| `DRIVE_SPEED_PCT` | 60 | Lower if too fast, raise if the rover barely moves |
+| `CAMERA_HFOV_DEGREES` | 62.2 | Match your camera spec (Pi Camera v2 = 62.2°, wide-angle USB = 70–90°) |
+| `_MAX_VELOCITY_REF_MM_S` | 200 | OmniVLA only — increase if the rover feels slow with `--strategy omnivla` |
+
+`WHEEL_BASE_MM` has the biggest impact on turn accuracy — get this right first.
+
+---
+
 ## Gemini mission
 
 The default Gemini prompt navigates a two-phase brown-path mission:
