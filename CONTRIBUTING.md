@@ -10,11 +10,13 @@ A quick reference for making changes to this codebase.
 rover_agent.py          Thin orchestrator: camera loop, thread wiring, CLI
 navigation_strategy.py  AgentState dataclass + NavigationStrategy ABC
 gemini_strategy.py      GeminiStrategy — 3-frame Gemini vision approach
+omnivla_strategy.py     OmniVLAStrategy — OmniVLA-edge local neural network
 web_display.py          WebDisplay — Flask routes, MJPEG streams, HTML UI
 gemini_client.py        Gemini API wrapper (model, schema, retry logic)
 prompts.py              System prompt, user prompt builder, image dimensions
 roomba_controller.py    Pixel → bearing → Roomba OI motion pipeline
 roomba_control.py       Low-level Roomba serial driver (iRobot OI protocol)
+atlas_controller.py     Pixel → bearing → Atlas-1 $CMD motion pipeline
 ```
 
 ---
@@ -34,12 +36,19 @@ python rover_agent.py
 # With Roomba
 python rover_agent.py --roomba-port /dev/ttyUSB0
 
-# Dry-run: logs Roomba commands without opening the serial port
-python rover_agent.py --roomba-port /dev/ttyUSB0 --dry-run
+# With Atlas-1
+python rover_agent.py --rover atlas --atlas-port /dev/ttyACM0
+
+# Dry-run: logs commands without opening the serial port
+python rover_agent.py --rover atlas --atlas-port /dev/ttyACM0 --dry-run
+
+# Atlas + OmniVLA
+python rover_agent.py --rover atlas --atlas-port /dev/ttyACM0 \
+                      --strategy omnivla --goal "Follow the brown path" --interval 1.0
 
 # All options
 python rover_agent.py --device 0 --interval 3.0 --port 5000 \
-                      --roomba-port /dev/ttyUSB0 --dry-run \
+                      --rover atlas --atlas-port /dev/ttyACM0 --dry-run \
                       --strategy gemini
 ```
 
@@ -203,6 +212,42 @@ MODEL = "gemini-3-flash-preview"
 
 ---
 
+## Adding a new rover
+
+Both `RoombaController` and `AtlasController` expose the same interface.
+To add a third rover:
+
+**1. Create the controller file** (copy `atlas_controller.py` as a template):
+
+```python
+# my_rover_controller.py
+class MyRoverController:
+    def __init__(self, port: str, dry_run: bool = False): ...
+
+    @contextmanager
+    def connect(self): ...          # open serial / connection; yield self; close
+
+    def navigate_to_waypoint(self, waypoint: dict,
+                             navigation_mode: str = "following") -> None: ...
+    def uturn(self) -> None: ...    # 180° spin
+    def drive_raw(self, velocity: int, radius: int) -> None: ...  # for OmniVLA
+    def stop(self) -> None: ...
+```
+
+**2. Register it in `rover_agent.py`**:
+
+```python
+def _build_rover_ctrl(rover: str, port, dry_run):
+    ...
+    if rover == "myrover":
+        import my_rover_controller
+        return my_rover_controller.MyRoverController(port=port, dry_run=dry_run)
+```
+
+Add `"myrover"` to `choices=` in the `--rover` argparse argument.
+
+---
+
 ## Tuning Roomba motion
 
 All physical constants are at the top of [roomba_controller.py](roomba_controller.py):
@@ -215,6 +260,26 @@ All physical constants are at the top of [roomba_controller.py](roomba_controlle
 | `MIN_ROTATION_DEGREES` | 3.0 | Dead-band — ignore tiny bearing corrections |
 | `STEP_DURATION_ALIGNING_S` | 0.5 | Drive time when `navigation_mode = "aligning"` |
 | `STEP_DURATION_FOLLOWING_S` | 2.0 | Drive time when `navigation_mode = "following"` |
+
+---
+
+## Tuning Atlas-1 motion
+
+All physical constants are at the top of [atlas_controller.py](atlas_controller.py):
+
+| Constant | Default | Effect |
+|---|---|---|
+| `CAMERA_HFOV_DEGREES` | 62.2 | Bearing calculation — match your camera |
+| `WHEEL_BASE_MM` | 300 | Turn accuracy — measure centre-to-centre of wheels |
+| `DRIVE_SPEED_PCT` | 60 | Forward cruising power (0–100 %) |
+| `MIN_ROTATION_DEGREES` | 3.0 | Dead-band — ignore tiny bearing corrections |
+| `STEP_DURATION_ALIGNING_S` | 0.5 | Drive time when `navigation_mode = "aligning"` |
+| `STEP_DURATION_FOLLOWING_S` | 2.0 | Drive time when `navigation_mode = "following"` |
+| `_MAX_VELOCITY_REF_MM_S` | 200 | Reference speed used to scale OmniVLA `drive_raw()` commands to % |
+
+The `WHEEL_BASE_MM` constant directly affects turn accuracy. Measure the
+distance between the contact patches of the left and right wheels and update
+this value before the first drive.
 
 ---
 

@@ -1,6 +1,6 @@
 # Rover Agent
 
-An autonomous rover navigation system that uses a camera, a vision model, and an iRobot Roomba as the drive platform. The agent captures frames at 30 fps, queries a navigation strategy at a configurable interval, and drives the Roomba toward the predicted waypoints. A live web UI streams both the raw camera feed and the annotated inference frame.
+An autonomous rover navigation system that uses a camera, a vision model, and a wheeled robot as the drive platform. The agent captures frames at 30 fps, queries a navigation strategy at a configurable interval, and drives the rover toward the predicted waypoints. A live web UI streams both the raw camera feed and the annotated inference frame.
 
 ## Strategies
 
@@ -13,9 +13,12 @@ An autonomous rover navigation system that uses a camera, a vision model, and an
 
 ## Hardware
 
-- iRobot Roomba connected via USB serial (e.g. `/dev/ttyUSB0`)
-- USB or CSI camera (OpenCV-compatible)
-- Linux host (tested on Ubuntu 24.04)
+| Rover | Connection | Default port |
+|-------|-----------|--------------|
+| iRobot Roomba | USB serial (iRobot OI) | `/dev/ttyUSB0` |
+| Atlas-1 (four-wheel STM32) | USB serial (`$CMD` protocol) | `/dev/ttyACM0` |
+
+Both rovers work with any navigation strategy. A USB or CSI camera (OpenCV-compatible) is required. Tested on Ubuntu 24.04.
 
 ---
 
@@ -45,21 +48,33 @@ pip install -r requirements-omnivla.txt
 
 ## Running
 
-### Gemini strategy (default)
+### Roomba + Gemini (default)
 
 ```bash
 python rover_agent.py
-python rover_agent.py --device 1 --interval 5 --port 5000
 python rover_agent.py --roomba-port /dev/ttyUSB0
-python rover_agent.py --dry-run   # log Roomba commands, no hardware needed
+python rover_agent.py --dry-run   # no hardware needed
 ```
 
-### OmniVLA strategy
+### Atlas-1 + Gemini
 
 ```bash
-python rover_agent.py --strategy omnivla --goal "blue trash bin"
-python rover_agent.py --strategy omnivla --goal "go forward" --interval 1.0 --dry-run
-python rover_agent.py --strategy omnivla --goal "door" --roomba-port /dev/ttyUSB0
+python rover_agent.py --rover atlas --atlas-port /dev/ttyACM0
+python rover_agent.py --rover atlas --atlas-port /dev/ttyACM0 --dry-run
+```
+
+### Atlas-1 + OmniVLA
+
+```bash
+python rover_agent.py --rover atlas --atlas-port /dev/ttyACM0 \
+    --strategy omnivla --goal "Follow the brown path" --interval 1.0
+```
+
+### Roomba + OmniVLA
+
+```bash
+python rover_agent.py --roomba-port /dev/ttyUSB0 \
+    --strategy omnivla --goal "blue trash bin" --interval 1.0
 ```
 
 `--interval 1.0` is recommended for OmniVLA — it matches the model's 1 Hz control rate.
@@ -71,7 +86,9 @@ python rover_agent.py --strategy omnivla --goal "door" --roomba-port /dev/ttyUSB
 | `--device` | `0` | Camera device index |
 | `--interval` | `3.0` | Seconds between inference steps |
 | `--port` | `5000` | Web UI port |
+| `--rover` | `roomba` | Rover hardware: `roomba` or `atlas` |
 | `--roomba-port` | *(disabled)* | Roomba serial port (e.g. `/dev/ttyUSB0`) |
+| `--atlas-port` | *(disabled)* | Atlas-1 serial port (e.g. `/dev/ttyACM0`) |
 | `--dry-run` | `false` | Log drive commands without sending them |
 | `--strategy` | `gemini` | Navigation strategy: `gemini` or `omnivla` |
 | `--goal` | `navigate forward` | Language goal for OmniVLA |
@@ -95,7 +112,7 @@ Once running, open `http://localhost:5000` in a browser.
 ## File Map
 
 ```
-rover_agent.py          Thin orchestrator — agent loop, strategy factory, main()
+rover_agent.py          Thin orchestrator — agent loop, rover factory, main()
 navigation_strategy.py  NavigationStrategy ABC + AgentState dataclass
 gemini_strategy.py      GeminiStrategy — Gemini vision API, 3-frame JPEG history
 omnivla_strategy.py     OmniVLAStrategy — OmniVLA-edge local neural network
@@ -103,6 +120,7 @@ web_display.py          WebDisplay — Flask server, MJPEG streams, status API
 gemini_client.py        Gemini API wrapper with retry logic
 prompts.py              System prompt + user prompt builder for Gemini
 roomba_controller.py    Pixel-to-motion conversion + Roomba OI serial driver
+atlas_controller.py     Pixel-to-motion conversion + Atlas-1 $CMD serial driver
 
 requirements-omnivla.txt  Extra deps for the omnivla strategy
 ```
@@ -131,13 +149,15 @@ camera thread (30 fps)
                ▼
        state.llm_frame  ────────────────────────────► /video/llm
        state.latest_result ─────────────────────────► /status
-       roomba_ctrl.navigate_to_waypoint()  (Gemini)
-       roomba_ctrl.drive_raw()             (OmniVLA)
+       rover_ctrl.navigate_to_waypoint()   (Gemini)
+       rover_ctrl.drive_raw()              (OmniVLA)
 ```
 
 **Gemini** drives step-and-stop: turn to align with the waypoint, drive forward 0.5 s (aligning mode) or 2.0 s (following mode), then stop and wait for the next query.
 
-**OmniVLA** drives continuously: sends one `(velocity, radius)` command per step and the Roomba keeps moving at that speed until the next inference result arrives.
+**OmniVLA** drives continuously: sends one command per step and the rover keeps moving at that velocity until the next inference result arrives.
+
+Both strategies work with either rover — the controllers share the same interface.
 
 ---
 

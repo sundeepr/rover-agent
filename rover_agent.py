@@ -25,6 +25,7 @@ import cv2
 import gemini_client
 import prompts
 import roomba_controller
+import atlas_controller
 from navigation_strategy import AgentState, NavigationStrategy
 from web_display import WebDisplay
 
@@ -59,30 +60,43 @@ log = setup_logging()
 
 # ── Agent loop (runs on a daemon thread) ───────────────────────────────────────
 
+def _build_rover_ctrl(rover: str, port: str | None, dry_run: bool):
+    """Instantiate and return the appropriate rover controller, or None."""
+    if not port:
+        return None
+    if rover == "roomba":
+        return roomba_controller.RoombaController(port=port, dry_run=dry_run)
+    if rover == "atlas":
+        return atlas_controller.AtlasController(port=port, dry_run=dry_run)
+    raise ValueError(f"Unknown rover: {rover!r}")
+
+
 def agent_loop(
     state: AgentState,
     strategy: NavigationStrategy,
     device: int,
     interval: float,
-    roomba_port: str | None = None,
+    rover: str = "roomba",
+    rover_port: str | None = None,
     dry_run: bool = False,
 ) -> None:
-    """Camera capture loop — never blocked by LLM queries or Roomba motion."""
+    """Camera capture loop — never blocked by LLM queries or rover motion."""
 
-    # Optionally connect to the Roomba
-    roomba_ctrl: roomba_controller.RoombaController | None = None
-    roomba_ctx = None
-    if roomba_port:
-        roomba_ctrl = roomba_controller.RoombaController(port=roomba_port, dry_run=dry_run)
-        roomba_ctx = roomba_ctrl.connect()
-        roomba_ctx.__enter__()
-        log.info("Roomba controller active on %s%s", roomba_port, " (dry-run)" if dry_run else "")
+    # Optionally connect to the rover
+    rover_ctrl = None
+    rover_ctx  = None
+    if rover_port:
+        rover_ctrl = _build_rover_ctrl(rover, rover_port, dry_run)
+        rover_ctx  = rover_ctrl.connect()
+        rover_ctx.__enter__()
+        log.info("%s controller active on %s%s",
+                 rover.capitalize(), rover_port, " (dry-run)" if dry_run else "")
 
     cap = cv2.VideoCapture(device)
     if not cap.isOpened():
         log.error("Could not open camera at device %d", device)
-        if roomba_ctx:
-            roomba_ctx.__exit__(None, None, None)
+        if rover_ctx:
+            rover_ctx.__exit__(None, None, None)
         return
 
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, prompts.IMAGE_WIDTH)
@@ -124,7 +138,7 @@ def agent_loop(
                 state.query_in_flight.set()
                 threading.Thread(
                     target=strategy.run_query,
-                    args=(state, frame.copy(), captures_dir, roomba_ctrl),
+                    args=(state, frame.copy(), captures_dir, rover_ctrl),
                     daemon=True,
                 ).start()
 
@@ -133,8 +147,8 @@ def agent_loop(
     cap.release()
     log.info("Camera released")
 
-    if roomba_ctx:
-        roomba_ctx.__exit__(None, None, None)
+    if rover_ctx:
+        rover_ctx.__exit__(None, None, None)
 
 
 # ── Strategy factory ───────────────────────────────────────────────────────────
@@ -159,16 +173,24 @@ def main():
                         help="Seconds between LLM queries")
     parser.add_argument("--port",        type=int,   default=5000,
                         help="Web server port")
+    parser.add_argument("--rover",       type=str,   default="roomba",
+                        choices=["roomba", "atlas"],
+                        help="Rover hardware (default: roomba)")
     parser.add_argument("--roomba-port", type=str,   default=None,
-                        help="Roomba serial port (e.g. /dev/ttyUSB0); omit to disable")
+                        help="Roomba serial port (e.g. /dev/ttyUSB0)")
+    parser.add_argument("--atlas-port",  type=str,   default=None,
+                        help="Atlas-1 serial port (e.g. /dev/ttyACM0)")
     parser.add_argument("--dry-run",     action="store_true",
-                        help="Log Roomba commands but do not send them")
+                        help="Log rover commands but do not send them")
     parser.add_argument("--strategy",    type=str,   default="gemini",
                         choices=["gemini", "omnivla"],
                         help="Navigation strategy (default: gemini)")
     parser.add_argument("--goal",        type=str,   default="navigate forward",
                         help="Language goal for omnivla strategy (e.g. 'blue trash bin')")
     args = parser.parse_args()
+
+    # Resolve rover port: explicit flag takes priority, else auto-detect from rover type
+    rover_port = args.atlas_port if args.rover == "atlas" else args.roomba_port
 
     log.info("=== Rover agent starting ===")
     log.info("Camera device : %d", args.device)
@@ -179,10 +201,11 @@ def main():
     else:
         log.info("Model         : %s", gemini_client.MODEL)
     log.info("Web UI        : http://localhost:%d", args.port)
-    if args.roomba_port:
-        log.info("Roomba port   : %s%s", args.roomba_port, " (dry-run)" if args.dry_run else "")
+    log.info("Rover         : %s", args.rover)
+    if rover_port:
+        log.info("Rover port    : %s%s", rover_port, " (dry-run)" if args.dry_run else "")
     else:
-        log.info("Roomba        : disabled (pass --roomba-port to enable)")
+        log.info("Rover         : disabled (pass --roomba-port or --atlas-port to enable)")
 
     state    = AgentState()
     strategy = _build_strategy(args.strategy, args)
@@ -190,7 +213,7 @@ def main():
     threading.Thread(
         target=agent_loop,
         args=(state, strategy, args.device, args.interval,
-              args.roomba_port, args.dry_run),
+              args.rover, rover_port, args.dry_run),
         daemon=True,
     ).start()
 
