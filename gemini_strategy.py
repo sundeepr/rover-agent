@@ -1,16 +1,15 @@
 """
-GeminiStrategy — stateless Gemini vision strategy with a rolling frame buffer.
+GeminiStrategy — cloud vision strategy using Google Gemini with a rolling frame buffer.
 
-This is the "3-frame history" approach that was originally baked into
-rover_agent.py._gemini_query(). Extracted here so alternative strategies
-can be swapped in without touching the agent loop or web display.
+Sends the last N frames as temporal context to Gemini on every query step and
+receives structured JSON with pixel-space waypoints and navigation mode.
 
 Each call to run_query():
   1. Encodes the current frame to JPEG.
   2. Prepends up to frame_buffer_size prior frames for temporal context.
   3. Calls gemini_client.get_waypoint() with the structured prompts.
-  4. Draws waypoint overlay and saves captures.
-  5. Updates AgentState and drives the Roomba.
+  4. Draws waypoint overlay and saves captures to captures/.
+  5. Updates AgentState and drives the rover.
   6. Handles phase transitions (frame buffer clear + U-turn).
 """
 
@@ -98,10 +97,10 @@ class GeminiStrategy(NavigationStrategy):
         state: AgentState,
         frame: np.ndarray,
         captures_dir: Path,
-        roomba_ctrl,
+        rover_ctrl,
     ) -> None:
         try:
-            self._do_query(state, frame, captures_dir, roomba_ctrl)
+            self._do_query(state, frame, captures_dir, rover_ctrl)
         except Exception as e:
             with state.result_lock:
                 state.llm_query_start = 0.0
@@ -114,7 +113,7 @@ class GeminiStrategy(NavigationStrategy):
         state: AgentState,
         frame: np.ndarray,
         captures_dir: Path,
-        roomba_ctrl,
+        rover_ctrl,
     ) -> None:
         # 1. Encode current frame to JPEG
         _, jpeg_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
@@ -182,12 +181,12 @@ class GeminiStrategy(NavigationStrategy):
                     "description": top.get("description", ""),
                 })
 
-        # 8. Drive Roomba
-        if roomba_ctrl and status == "in_progress" and top:
+        # 8. Drive rover toward rank-1 waypoint
+        if rover_ctrl and status == "in_progress" and top:
             try:
-                roomba_ctrl.navigate_to_waypoint(top, nav_mode)
+                rover_ctrl.navigate_to_waypoint(top, nav_mode)
             except Exception as e:
-                log.error("Roomba drive error: %s", e, exc_info=True)
+                log.error("Rover drive error: %s", e, exc_info=True)
 
         # 9. Phase transitions
         if status == "phase1_complete":
@@ -196,9 +195,9 @@ class GeminiStrategy(NavigationStrategy):
             with state.result_lock:
                 state.phase = 2
             log.info(">> Phase 1 complete — executing U-turn")
-            if roomba_ctrl:
+            if rover_ctrl:
                 try:
-                    roomba_ctrl.uturn()
+                    rover_ctrl.uturn()
                 except Exception as e:
                     log.error("U-turn error: %s", e, exc_info=True)
         elif status == "mission_complete":

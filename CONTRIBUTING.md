@@ -113,7 +113,7 @@ class MyStrategy(NavigationStrategy):
         state: AgentState,
         frame: np.ndarray,
         captures_dir: Path,
-        roomba_ctrl,
+        rover_ctrl,          # RoombaController | AtlasController | None
     ) -> None:
         try:
             # 1. Decide where to go (call an LLM, run CV, anything)
@@ -131,15 +131,15 @@ class MyStrategy(NavigationStrategy):
                     state.trajectory.append({...})
 
             # 3. Drive
-            if roomba_ctrl and result["goal_status"] == "in_progress":
-                roomba_ctrl.navigate_to_waypoint(top_waypoint, result["navigation_mode"])
+            if rover_ctrl and result["goal_status"] == "in_progress":
+                rover_ctrl.navigate_to_waypoint(top_waypoint, result["navigation_mode"])
 
             # 4. Phase transition
             if result["goal_status"] == "phase1_complete":
                 with state.result_lock:
                     state.phase = 2
-                if roomba_ctrl:
-                    roomba_ctrl.uturn()
+                if rover_ctrl:
+                    rover_ctrl.uturn()
 
         except Exception as e:
             with state.result_lock:

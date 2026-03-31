@@ -2,15 +2,26 @@
 """
 Rover navigation agent — thin orchestrator.
 
-Opens the camera, wires up the chosen navigation strategy and web display,
+Opens the camera, wires up the chosen navigation strategy and rover controller,
 then runs the agent loop in a background thread while Flask serves the UI
 on the main thread.
 
+Supported rovers    : roomba (iRobot OI), atlas (STM32 $CMD protocol)
+Supported strategies: gemini (Gemini vision API), omnivla (local neural network)
+
 Usage:
-    python rover_agent.py
-    python rover_agent.py --device 1 --interval 5 --port 5000
+    # Camera only, no hardware
+    python rover_agent.py --dry-run
+
+    # Roomba + Gemini (default strategy)
     python rover_agent.py --roomba-port /dev/ttyUSB0
-    python rover_agent.py --strategy gemini   # default
+
+    # Atlas-1 + Gemini
+    python rover_agent.py --rover atlas --atlas-port /dev/ttyACM0
+
+    # Atlas-1 + OmniVLA
+    python rover_agent.py --rover atlas --atlas-port /dev/ttyACM0 \\
+        --strategy omnivla --goal "Follow the brown path" --interval 1.0
 """
 
 import argparse
@@ -80,7 +91,18 @@ def agent_loop(
     rover_port: str | None = None,
     dry_run: bool = False,
 ) -> None:
-    """Camera capture loop — never blocked by LLM queries or rover motion."""
+    """
+    Camera capture loop — runs on a daemon thread at ~30 fps.
+
+    Continuously reads frames from the camera and pushes them to
+    state.raw_frame (for the live web stream). Every `interval` seconds,
+    if no query is already in-flight, increments state.step and spawns a
+    new daemon thread to call strategy.run_query(). This keeps the camera
+    loop completely non-blocking regardless of how long inference takes.
+
+    If rover_port is given, opens a connection to the rover controller
+    before starting the loop and closes it when the loop exits.
+    """
 
     # Optionally connect to the rover
     rover_ctrl = None
@@ -154,6 +176,13 @@ def agent_loop(
 # ── Strategy factory ───────────────────────────────────────────────────────────
 
 def _build_strategy(name: str, args) -> NavigationStrategy:
+    """
+    Instantiate and return the requested NavigationStrategy.
+
+    Strategies are imported lazily so their heavy dependencies (torch, etc.)
+    are only loaded when actually needed. To add a new strategy, import and
+    return it here, and add its name to the --strategy choices in main().
+    """
     if name == "gemini":
         from gemini_strategy import GeminiStrategy
         return GeminiStrategy()

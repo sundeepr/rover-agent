@@ -75,10 +75,14 @@ class NavigationStrategy(ABC):
         state: AgentState,
         frame: np.ndarray,
         captures_dir: Path,
-        roomba_ctrl,
+        rover_ctrl,
     ) -> None:
         """
         Execute one navigation query cycle in a fresh daemon thread.
+
+        rover_ctrl is a RoombaController, AtlasController, or None (no hardware).
+        All controllers share the same interface: navigate_to_waypoint(),
+        uturn(), drive_raw(), stop().
 
         Contract:
         - MUST call state.query_in_flight.clear() in a finally block.
@@ -87,7 +91,7 @@ class NavigationStrategy(ABC):
         - MUST append to state.trajectory under state.result_lock when a
           rank-1 waypoint exists.
         - MUST update state.phase and clear its internal buffer on
-          phase1_complete, then call roomba_ctrl.uturn() if available.
+          phase1_complete, then call rover_ctrl.uturn() if available.
         - MUST reset state.llm_query_start to 0.0 (under result_lock)
           on both success and exception.
         """

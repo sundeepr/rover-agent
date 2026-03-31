@@ -302,7 +302,12 @@ class WebDisplay:
     # ── MJPEG streaming ────────────────────────────────────────────────────────
 
     def _stream(self, lock, get_frame_fn, placeholder_text: str):
-        """MJPEG generator — encodes inside lock to match momanip pattern."""
+        """
+        MJPEG generator — yields multipart JPEG frames at ~20 fps.
+
+        Holds `lock` while reading and encoding to avoid tearing.
+        Shows a grey placeholder frame until the first real frame arrives.
+        """
         blank = self._blank.copy()
         cv2.putText(blank, placeholder_text, (30, 240),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.9, (100, 100, 100), 2)

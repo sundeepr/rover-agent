@@ -215,10 +215,10 @@ class OmniVLAStrategy(NavigationStrategy):
         state: AgentState,
         frame: np.ndarray,
         captures_dir: Path,
-        roomba_ctrl,
+        rover_ctrl,
     ) -> None:
         try:
-            self._do_query(state, frame, roomba_ctrl)
+            self._do_query(state, frame, rover_ctrl)
         except Exception as e:
             with state.result_lock:
                 state.llm_query_start = 0.0
@@ -230,7 +230,7 @@ class OmniVLAStrategy(NavigationStrategy):
         self,
         state: AgentState,
         frame: np.ndarray,
-        roomba_ctrl,
+        rover_ctrl,
     ) -> None:
         import torch
         from PIL import Image as PIL_Image
@@ -322,9 +322,9 @@ class OmniVLAStrategy(NavigationStrategy):
                     "description": top["description"],
                 })
 
-        # Send drive command — Roomba keeps moving at this velocity until next step
-        if roomba_ctrl:
+        # Send drive command — rover keeps moving at this velocity until next step
+        if rover_ctrl:
             try:
-                roomba_ctrl.drive_raw(vel, radius)
+                rover_ctrl.drive_raw(vel, radius)
             except Exception as e:
-                log.error("Roomba drive error: %s", e, exc_info=True)
+                log.error("Rover drive error: %s", e, exc_info=True)
