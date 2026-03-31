@@ -163,7 +163,10 @@ class OmniVLAStrategy(NavigationStrategy):
                 address=(host, int(port_str)), authkey=DEFAULT_AUTHKEY
             )
             self._manager.connect()
-            self._infer_fn = self._manager.infer
+            # engine() returns a proxy to the InferenceEngine instance;
+            # calling .infer() on the proxy sends args to the server and
+            # returns the dict result via pickle (not wrapped in another proxy).
+            self._infer_fn = self._manager.engine().infer
             # Pre-load goal image bytes once (sent on every request)
             self._goal_image_bytes: bytes | None = None
             if goal_image_path:

@@ -62,9 +62,11 @@ _OMNIVLA_DIR = Path(__file__).parent.parent / "omnivla"
 class OmniVLAManager(BaseManager):
     pass
 
-# Register at module level so the client gets the proxy just by importing this
-# module — no callable needed on the client side (callable lives in the server).
-OmniVLAManager.register("infer")
+# Register at module level so the client side gets the proxy by importing this
+# module. "engine" exposes InferenceEngine.infer as a proxied method; calling
+# a method on a proxy returns the pickled return value directly (unlike the
+# manager creation pattern which wraps the return in another proxy).
+OmniVLAManager.register("engine", exposed=["infer"])
 
 
 # ── Inference engine (lives in the server process) ───────────────────────────
@@ -275,7 +277,7 @@ def main():
 
     engine = InferenceEngine()
 
-    OmniVLAManager.register("infer", callable=lambda *a, **kw: engine.infer(*a, **kw))
+    OmniVLAManager.register("engine", callable=lambda: engine, exposed=["infer"])
     manager = OmniVLAManager(address=(args.host, args.port), authkey=authkey)
     server  = manager.get_server()
 
