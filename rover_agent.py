@@ -173,7 +173,7 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
         return GeminiStrategy()
     if name == "omnivla":
         from omnivla_strategy import OmniVLAStrategy
-        return OmniVLAStrategy(goal=args.goal)
+        return OmniVLAStrategy(goal=args.goal, goal_image_path=args.goal_image)
     raise ValueError(f"Unknown strategy: {name!r}")
 
 
@@ -201,6 +201,8 @@ def main():
                         help="Navigation strategy (default: gemini)")
     parser.add_argument("--goal",        type=str,   default="navigate forward",
                         help="Language goal for omnivla strategy (e.g. 'blue trash bin')")
+    parser.add_argument("--goal-image",  type=str,   default=None,
+                        help="Path to a goal image for omnivla strategy (optional)")
     args = parser.parse_args()
 
     # Resolve rover port: explicit flag takes priority, else auto-detect from rover type
@@ -212,6 +214,8 @@ def main():
     log.info("Strategy      : %s", args.strategy)
     if args.strategy == "omnivla":
         log.info("Goal          : %s", args.goal)
+        if args.goal_image:
+            log.info("Goal image    : %s", args.goal_image)
     else:
         log.info("Model         : %s", gemini_client.MODEL)
     log.info("Web UI        : http://localhost:%d", args.port)

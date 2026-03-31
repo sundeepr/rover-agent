@@ -42,10 +42,16 @@ IMG_MAP        = (352, 352) # satellite map size (unused; dummy zeros)
 METRIC_SPACING = 0.1        # 1 model unit = 0.1 m
 DT             = 1.0        # intended control period (seconds)
 WAYPOINT_IDX   = 4          # which of the 8 predicted waypoints to execute
-MODALITY_LANG  = 7          # modality ID for language-only goal
 ENC_SIZE       = 1024
 MAX_LIN_MM_S   = 50         # max forward velocity sent to Roomba
 MAX_ANG_RAD_S  = 0.5        # max angular velocity
+
+# Modality IDs (defined by the OmniVLA-edge model architecture):
+#   7 = language only          — language token in transformer
+#   6 = image only             — goal image token in transformer
+#                                (language still conditions FiLM in both cases)
+MODALITY_LANG     = 7
+MODALITY_GOAL_IMG = 6
 
 # omnivla source directory — needed to import model.py
 _OMNIVLA_DIR = Path(__file__).parent.parent / "omnivla"
@@ -113,10 +119,18 @@ class OmniVLAStrategy(NavigationStrategy):
     ----------
     goal : str
         Language navigation goal (e.g. "blue trash bin", "go forward").
+        Always used to condition the FiLM visual encoder.
+    goal_image_path : str | None
+        Optional path to a goal image (any format PIL can read).
+        When provided, the goal image token is active in the transformer
+        (modality 6) alongside FiLM language conditioning.
+        When None, language-only modality (7) is used.
     """
 
-    def __init__(self, goal: str = "navigate forward"):
-        self._goal = goal
+    def __init__(self, goal: str = "navigate forward",
+                 goal_image_path: str | None = None):
+        self._goal            = goal
+        self._goal_image_path = goal_image_path
         self._context: collections.deque = collections.deque(maxlen=CONTEXT_SIZE + 1)
         self._context_lock = threading.Lock()
 
@@ -128,7 +142,7 @@ class OmniVLAStrategy(NavigationStrategy):
         self._clip_tf      = None   # clip_transform
         self._dummy_pose   = None
         self._dummy_map    = None
-        self._dummy_goal   = None
+        self._goal_img     = None   # processed goal image tensor, or dummy zeros
         self._modality_id  = None
         self._loaded       = threading.Event()
 
@@ -150,6 +164,7 @@ class OmniVLAStrategy(NavigationStrategy):
             import torch
             import torchvision.transforms as T
             import clip as clip_lib
+            from PIL import Image as PIL_Image
         except ImportError as e:
             log.error("OmniVLA dependencies not installed: %s", e)
             log.error("Run: pip install -r requirements-omnivla.txt")
@@ -200,10 +215,19 @@ class OmniVLAStrategy(NavigationStrategy):
                         [0.26862954, 0.26130258, 0.27577711]),
         ])
 
-        self._dummy_pose  = torch.zeros(1, 4, device=device)
-        self._dummy_map   = torch.zeros(1, 9, *IMG_MAP, device=device)
-        self._dummy_goal  = torch.zeros(1, 3, *IMG_OBS, device=device)
-        self._modality_id = torch.tensor([MODALITY_LANG], device=device)
+        self._dummy_pose = torch.zeros(1, 4, device=device)
+        self._dummy_map  = torch.zeros(1, 9, *IMG_MAP, device=device)
+
+        if self._goal_image_path:
+            log.info("OmniVLA: loading goal image '%s'…", self._goal_image_path)
+            goal_pil = PIL_Image.open(self._goal_image_path).convert("RGB")
+            self._goal_img    = self._obs_tf(goal_pil).unsqueeze(0).to(device)
+            self._modality_id = torch.tensor([MODALITY_GOAL_IMG], device=device)
+            log.info("OmniVLA: using image+language goal (modality %d)", MODALITY_GOAL_IMG)
+        else:
+            self._goal_img    = torch.zeros(1, 3, *IMG_OBS, device=device)
+            self._modality_id = torch.tensor([MODALITY_LANG], device=device)
+            log.info("OmniVLA: using language-only goal (modality %d)", MODALITY_LANG)
 
         self._loaded.set()
         log.info("OmniVLAStrategy ready — goal: '%s'", self._goal)
@@ -233,7 +257,7 @@ class OmniVLAStrategy(NavigationStrategy):
         rover_ctrl,
     ) -> None:
         import torch
-        from PIL import Image as PIL_Image
+        from PIL import Image as PIL_Image  # noqa: F811 (re-import for local scope)
 
         if not self._loaded.is_set():
             log.info("OmniVLA model still loading — skipping step")
@@ -263,7 +287,7 @@ class OmniVLAStrategy(NavigationStrategy):
         with torch.no_grad():
             actions, _, _ = self._model(
                 obs_images, self._dummy_pose, self._dummy_map,
-                self._dummy_goal, self._modality_id,
+                self._goal_img, self._modality_id,
                 self._feat_text, cur_large,
             )
 
