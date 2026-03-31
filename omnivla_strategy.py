@@ -10,8 +10,16 @@ Model weights are downloaded automatically from HuggingFace on first use:
 
 Recommended interval: --interval 1.0  (OmniVLA control rate is 1 Hz)
 
-The drive command is sent once per step and the Roomba keeps moving at that
+The drive command is sent once per step and the rover keeps moving at that
 velocity/radius until the next command arrives — no stop between steps.
+
+Server mode (optional):
+    Start the model server once with:
+        python omnivla_server.py
+    Then point rover_agent at it:
+        python rover_agent.py --strategy omnivla --omnivla-server localhost:5100 ...
+    The model stays loaded in the server process between rover_agent runs,
+    eliminating the ~30 s reload on each restart.
 
 Dependencies (beyond requirements.txt):
     pip install -r requirements-omnivla.txt
@@ -111,9 +119,18 @@ class OmniVLAStrategy(NavigationStrategy):
     """
     Navigation strategy using OmniVLA-edge.
 
-    The model is downloaded from HuggingFace and loaded on a background thread
-    at construction time. Steps received before the model finishes loading are
-    silently skipped.
+    Two operating modes:
+
+    Local mode (default):
+        The model is downloaded from HuggingFace and loaded on a background
+        thread at construction time. Steps received before the model finishes
+        loading are silently skipped.
+
+    Server mode (server_addr is set):
+        Connects to a running omnivla_server.py via TCP. The server keeps
+        weights loaded between rover_agent restarts, saving ~30 s reload time.
+        Context frames are sent as JPEG bytes; goal text/image are sent on
+        every request so the server needs no persistent goal state.
 
     Parameters
     ----------
@@ -122,31 +139,53 @@ class OmniVLAStrategy(NavigationStrategy):
         Always used to condition the FiLM visual encoder.
     goal_image_path : str | None
         Optional path to a goal image (any format PIL can read).
-        When provided, the goal image token is active in the transformer
-        (modality 6) alongside FiLM language conditioning.
-        When None, language-only modality (7) is used.
+    server_addr : str | None
+        "host:port" of a running omnivla_server.py. When set, inference is
+        delegated to the server instead of running locally.
     """
 
     def __init__(self, goal: str = "navigate forward",
-                 goal_image_path: str | None = None):
+                 goal_image_path: str | None = None,
+                 server_addr: str | None = None):
         self._goal            = goal
         self._goal_image_path = goal_image_path
+        self._server_addr     = server_addr
+
+        # Context deque — PIL images in local mode, JPEG bytes in server mode
         self._context: collections.deque = collections.deque(maxlen=CONTEXT_SIZE + 1)
         self._context_lock = threading.Lock()
 
-        # Set by _load() on the background thread
-        self._model        = None
-        self._feat_text    = None
-        self._device       = None
-        self._obs_tf       = None   # obs_transform
-        self._clip_tf      = None   # clip_transform
-        self._dummy_pose   = None
-        self._dummy_map    = None
-        self._goal_img     = None   # processed goal image tensor, or dummy zeros
-        self._modality_id  = None
-        self._loaded       = threading.Event()
-
-        threading.Thread(target=self._load, daemon=True).start()
+        if server_addr:
+            # ── Server mode ───────────────────────────────────────────────────
+            host, port_str = server_addr.rsplit(":", 1)
+            from omnivla_server import OmniVLAManager, DEFAULT_AUTHKEY
+            self._manager = OmniVLAManager(
+                address=(host, int(port_str)), authkey=DEFAULT_AUTHKEY
+            )
+            self._manager.connect()
+            self._infer_fn = self._manager.infer
+            # Pre-load goal image bytes once (sent on every request)
+            self._goal_image_bytes: bytes | None = None
+            if goal_image_path:
+                with open(goal_image_path, "rb") as fh:
+                    self._goal_image_bytes = fh.read()
+            self._loaded = threading.Event()
+            self._loaded.set()   # server is already ready
+            log.info("OmniVLAStrategy: connected to server at %s", server_addr)
+        else:
+            # ── Local mode ────────────────────────────────────────────────────
+            # Set by _load() on the background thread
+            self._model        = None
+            self._feat_text    = None
+            self._device       = None
+            self._obs_tf       = None   # obs_transform
+            self._clip_tf      = None   # clip_transform
+            self._dummy_pose   = None
+            self._dummy_map    = None
+            self._goal_img     = None   # processed goal image tensor, or dummy zeros
+            self._modality_id  = None
+            self._loaded       = threading.Event()
+            threading.Thread(target=self._load, daemon=True).start()
 
     @property
     def name(self) -> str:
@@ -256,8 +295,9 @@ class OmniVLAStrategy(NavigationStrategy):
         frame: np.ndarray,
         rover_ctrl,
     ) -> None:
-        import torch
-        from PIL import Image as PIL_Image  # noqa: F811 (re-import for local scope)
+        import io as _io
+        import numpy as np_local
+        from PIL import Image as PIL_Image
 
         if not self._loaded.is_set():
             log.info("OmniVLA model still loading — skipping step")
@@ -269,31 +309,56 @@ class OmniVLAStrategy(NavigationStrategy):
             phase = state.phase
             state.llm_query_start = t0
 
-        # Build frame context (sliding window of PIL images)
+        # Encode current frame as PIL/JPEG (both modes need it)
         pil = PIL_Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        with self._context_lock:
-            self._context.append(pil)
-            frames = list(self._context)
-        # Pad with first frame if context not yet full
-        while len(frames) < CONTEXT_SIZE + 1:
-            frames.insert(0, frames[0])
 
-        # Prepare model inputs
-        obs_images = torch.stack([self._obs_tf(f) for f in frames]).unsqueeze(0)
-        obs_images = obs_images.view(1, -1, *IMG_OBS).to(self._device)
-        cur_large  = self._clip_tf(pil).unsqueeze(0).to(self._device)
+        if self._server_addr:
+            # ── Server mode: send JPEG bytes, receive waypoints ────────────────
+            buf = _io.BytesIO()
+            pil.save(buf, format="JPEG", quality=85)
+            current_jpeg = buf.getvalue()
 
-        # Run inference
-        with torch.no_grad():
-            actions, _, _ = self._model(
-                obs_images, self._dummy_pose, self._dummy_map,
-                self._goal_img, self._modality_id,
-                self._feat_text, cur_large,
+            with self._context_lock:
+                self._context.append(current_jpeg)
+                context_jpegs = list(self._context)
+            while len(context_jpegs) < CONTEXT_SIZE + 1:
+                context_jpegs.insert(0, context_jpegs[0])
+
+            result_srv = self._infer_fn(
+                context_jpegs,
+                current_jpeg,
+                self._goal,
+                self._goal_image_bytes,
             )
+            waypoints = np_local.array(result_srv["waypoints"])   # [8, 4]
+            vel       = result_srv["vel"]
+            radius    = result_srv["radius"]
+            elapsed   = time.time() - t0
 
-        waypoints = actions[0].cpu().numpy()   # [8, 4]: (dx, dy, cos θ, sin θ)
-        vel, radius = _waypoint_to_drive(waypoints)
-        elapsed = time.time() - t0
+        else:
+            # ── Local mode: run inference in-process ───────────────────────────
+            import torch
+
+            with self._context_lock:
+                self._context.append(pil)
+                frames = list(self._context)
+            while len(frames) < CONTEXT_SIZE + 1:
+                frames.insert(0, frames[0])
+
+            obs_images = torch.stack([self._obs_tf(f) for f in frames]).unsqueeze(0)
+            obs_images = obs_images.view(1, -1, *IMG_OBS).to(self._device)
+            cur_large  = self._clip_tf(pil).unsqueeze(0).to(self._device)
+
+            with torch.no_grad():
+                actions, _, _ = self._model(
+                    obs_images, self._dummy_pose, self._dummy_map,
+                    self._goal_img, self._modality_id,
+                    self._feat_text, cur_large,
+                )
+
+            waypoints = actions[0].cpu().numpy()   # [8, 4]: (dx, dy, cos θ, sin θ)
+            vel, radius = _waypoint_to_drive(waypoints)
+            elapsed = time.time() - t0
 
         wp = waypoints[WAYPOINT_IDX]
         log.info("Step %d | wp=(%.2fm, %.2fm) vel=%d mm/s %s | %.2fs",

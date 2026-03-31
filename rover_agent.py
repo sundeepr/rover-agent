@@ -173,7 +173,8 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
         return GeminiStrategy()
     if name == "omnivla":
         from omnivla_strategy import OmniVLAStrategy
-        return OmniVLAStrategy(goal=args.goal, goal_image_path=args.goal_image)
+        return OmniVLAStrategy(goal=args.goal, goal_image_path=args.goal_image,
+                               server_addr=args.omnivla_server)
     raise ValueError(f"Unknown strategy: {name!r}")
 
 
@@ -203,6 +204,12 @@ def main():
                         help="Language goal for omnivla strategy (e.g. 'blue trash bin')")
     parser.add_argument("--goal-image",  type=str,   default=None,
                         help="Path to a goal image for omnivla strategy (optional)")
+    parser.add_argument("--omnivla-server", type=str, default=None,
+                        metavar="HOST:PORT",
+                        help="Address of a running omnivla_server.py "
+                             "(e.g. localhost:5100). When set, inference is "
+                             "delegated to the server instead of loading "
+                             "the model locally.")
     args = parser.parse_args()
 
     # Resolve rover port: explicit flag takes priority, else auto-detect from rover type
@@ -216,6 +223,10 @@ def main():
         log.info("Goal          : %s", args.goal)
         if args.goal_image:
             log.info("Goal image    : %s", args.goal_image)
+        if args.omnivla_server:
+            log.info("OmniVLA server: %s", args.omnivla_server)
+        else:
+            log.info("OmniVLA server: (loading locally)")
     else:
         log.info("Model         : %s", gemini_client.MODEL)
     log.info("Web UI        : http://localhost:%d", args.port)
