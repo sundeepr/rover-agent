@@ -135,7 +135,7 @@ def agent_loop(
         now = time.time()
 
         # Fire strategy query in a separate thread so camera loop never blocks
-        if now - last_query_time >= interval:
+        if now - last_query_time >= interval and not state.paused.is_set():
             if state.query_in_flight.is_set():
                 if not _logged_in_flight:
                     log.info("Previous query still in-flight — skipping until complete")
@@ -247,7 +247,7 @@ def main():
         daemon=True,
     ).start()
 
-    display = WebDisplay(state, log_dir=Path("logs"))
+    display = WebDisplay(state, log_dir=Path("logs"), rover_ctrl=rover_ctrl)
     try:
         display.run(port=args.port)
     except (KeyboardInterrupt, SystemExit):

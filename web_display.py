@@ -15,7 +15,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from flask import Flask, Response, jsonify, render_template_string, send_file
+from flask import Flask, Response, jsonify, render_template_string, send_file, request
 
 from navigation_strategy import AgentState
 
@@ -33,7 +33,13 @@ _HTML = """<!DOCTYPE html>
     body { background: #0f0f0f; color: #e0e0e0; font-family: monospace;
            display: flex; flex-direction: column; height: 100vh; }
     header { padding: 10px 16px; background: #1a1a1a; border-bottom: 1px solid #333;
-             font-size: 1.1em; letter-spacing: 0.05em; color: #7ecfff; flex-shrink: 0; }
+             font-size: 1.1em; letter-spacing: 0.05em; color: #7ecfff; flex-shrink: 0;
+             display: flex; align-items: center; gap: 16px; }
+    #pause-btn { padding: 5px 18px; border: none; border-radius: 4px; cursor: pointer;
+                 font-family: monospace; font-size: 0.9em; font-weight: bold;
+                 background: #c0392b; color: #fff; transition: background 0.15s; }
+    #pause-btn:hover { filter: brightness(1.2); }
+    #pause-btn.paused { background: #27ae60; }
     .main { display: flex; flex: 1; overflow: hidden; }
 
     /* Video column — two stacked feeds */
@@ -69,7 +75,10 @@ _HTML = """<!DOCTYPE html>
   </style>
 </head>
 <body>
-  <header>&#x25B6; Rover Navigation Agent</header>
+  <header>
+    <span>&#x25B6; Rover Navigation Agent</span>
+    <button id="pause-btn" onclick="togglePause()">&#x23F8; Pause</button>
+  </header>
   <div class="main">
 
     <div class="video-column">
@@ -153,10 +162,28 @@ _HTML = """<!DOCTYPE html>
     loadLogs();
     setInterval(loadLogs, 10000);   // refresh list every 10s
 
+    async function togglePause() {
+      const r = await fetch('/pause', { method: 'POST' });
+      const d = await r.json();
+      updatePauseButton(d.paused);
+    }
+
+    function updatePauseButton(paused) {
+      const btn = document.getElementById('pause-btn');
+      if (paused) {
+        btn.textContent = '▶ Resume';
+        btn.classList.add('paused');
+      } else {
+        btn.textContent = '⏸ Pause';
+        btn.classList.remove('paused');
+      }
+    }
+
     async function poll() {
       try {
         const r = await fetch('/status');
         const d = await r.json();
+        updatePauseButton(d.paused ?? false);
 
         document.getElementById('phase').textContent      = d.phase ?? '—';
         document.getElementById('step').textContent       = d.step  ?? '—';
@@ -215,9 +242,11 @@ class WebDisplay:
     that is its only coupling to the rest of the system.
     """
 
-    def __init__(self, state: AgentState, log_dir: Path = Path("logs")):
+    def __init__(self, state: AgentState, log_dir: Path = Path("logs"),
+                 rover_ctrl=None):
         self._state = state
         self._log_dir = log_dir
+        self._rover_ctrl = rover_ctrl   # used to send stop() on pause
         self._blank = np.zeros((480, 640, 3), dtype=np.uint8)
         self._app = Flask(__name__)
         self._register_routes()
@@ -249,6 +278,7 @@ class WebDisplay:
         app.add_url_rule("/video/realtime",          "video_realtime", self._video_realtime)
         app.add_url_rule("/video/llm",               "video_llm",    self._video_llm)
         app.add_url_rule("/status",                  "status",       self._status)
+        app.add_url_rule("/pause",                   "pause",        self._pause, methods=["POST"])
         app.add_url_rule("/logs",                    "list_logs",    self._list_logs)
         app.add_url_rule("/logs/<path:filename>",    "download_log", self._download_log)
 
@@ -273,6 +303,21 @@ class WebDisplay:
             mimetype="multipart/x-mixed-replace; boundary=frame",
         )
 
+    def _pause(self):
+        """Toggle pause state. Stops the rover immediately when pausing."""
+        if self._state.paused.is_set():
+            self._state.paused.clear()
+            log.info("Rover resumed")
+        else:
+            self._state.paused.set()
+            log.info("Rover paused")
+            if self._rover_ctrl:
+                try:
+                    self._rover_ctrl.stop()
+                except Exception as e:
+                    log.error("Stop error on pause: %s", e)
+        return jsonify({"paused": self._state.paused.is_set()})
+
     def _status(self):
         with self._state.result_lock:
             result      = dict(self._state.latest_result)
@@ -280,7 +325,8 @@ class WebDisplay:
             trajectory  = list(self._state.trajectory)
             query_start = self._state.llm_query_start
             response_s  = self._state.llm_response_s
-        result["step"] = step
+        result["step"]   = step
+        result["paused"] = self._state.paused.is_set()
         result["history"] = [
             f"Step {t['step']}: ({t['x']},{t['y']}) {t['description']}"
             for t in trajectory

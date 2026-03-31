@@ -49,6 +49,10 @@ class AgentState:
     # Set while a query thread is running; checked by agent_loop before spawning
     query_in_flight: threading.Event = field(default_factory=threading.Event)
 
+    # Set to pause the agent loop — no new queries are spawned while set.
+    # The rover is stopped immediately when this is set via the web UI.
+    paused: threading.Event = field(default_factory=threading.Event)
+
 
 class NavigationStrategy(ABC):
     """
