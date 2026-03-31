@@ -26,6 +26,8 @@ Usage:
 
 import argparse
 import logging
+import signal
+import sys
 import threading
 import time
 from datetime import datetime
@@ -87,9 +89,7 @@ def agent_loop(
     strategy: NavigationStrategy,
     device: int,
     interval: float,
-    rover: str = "roomba",
-    rover_port: str | None = None,
-    dry_run: bool = False,
+    rover_ctrl=None,
 ) -> None:
     """
     Camera capture loop — runs on a daemon thread at ~30 fps.
@@ -100,25 +100,13 @@ def agent_loop(
     new daemon thread to call strategy.run_query(). This keeps the camera
     loop completely non-blocking regardless of how long inference takes.
 
-    If rover_port is given, opens a connection to the rover controller
-    before starting the loop and closes it when the loop exits.
+    rover_ctrl is an already-connected controller (or None). Connection
+    lifecycle is managed by main() so the stop command is guaranteed to
+    run on shutdown even when the program is killed.
     """
-
-    # Optionally connect to the rover
-    rover_ctrl = None
-    rover_ctx  = None
-    if rover_port:
-        rover_ctrl = _build_rover_ctrl(rover, rover_port, dry_run)
-        rover_ctx  = rover_ctrl.connect()
-        rover_ctx.__enter__()
-        log.info("%s controller active on %s%s",
-                 rover.capitalize(), rover_port, " (dry-run)" if dry_run else "")
-
     cap = cv2.VideoCapture(device)
     if not cap.isOpened():
         log.error("Could not open camera at device %d", device)
-        if rover_ctx:
-            rover_ctx.__exit__(None, None, None)
         return
 
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, prompts.IMAGE_WIDTH)
@@ -168,9 +156,6 @@ def agent_loop(
 
     cap.release()
     log.info("Camera released")
-
-    if rover_ctx:
-        rover_ctx.__exit__(None, None, None)
 
 
 # ── Strategy factory ───────────────────────────────────────────────────────────
@@ -239,15 +224,38 @@ def main():
     state    = AgentState()
     strategy = _build_strategy(args.strategy, args)
 
+    # Open rover connection on the main thread so stop() is guaranteed to
+    # run on shutdown — daemon threads are killed hard and cannot clean up.
+    rover_ctrl = _build_rover_ctrl(args.rover, rover_port, args.dry_run)
+    rover_ctx  = None
+    if rover_ctrl:
+        rover_ctx = rover_ctrl.connect()
+        rover_ctrl = rover_ctx.__enter__()
+        log.info("%s controller active on %s%s",
+                 args.rover.capitalize(), rover_port,
+                 " (dry-run)" if args.dry_run else "")
+
+    # SIGTERM handler (e.g. `kill <pid>`) — Flask catches SIGINT itself,
+    # but SIGTERM would otherwise skip the finally block below.
+    def _on_sigterm(signum, frame):
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, _on_sigterm)
+
     threading.Thread(
         target=agent_loop,
-        args=(state, strategy, args.device, args.interval,
-              args.rover, rover_port, args.dry_run),
+        args=(state, strategy, args.device, args.interval, rover_ctrl),
         daemon=True,
     ).start()
 
     display = WebDisplay(state, log_dir=Path("logs"))
-    display.run(port=args.port)
+    try:
+        display.run(port=args.port)
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    finally:
+        log.info("Shutting down — stopping rover")
+        if rover_ctx:
+            rover_ctx.__exit__(None, None, None)  # calls rover_ctrl.stop()
 
 
 if __name__ == "__main__":
