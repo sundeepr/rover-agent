@@ -62,6 +62,10 @@ _OMNIVLA_DIR = Path(__file__).parent.parent / "omnivla"
 class OmniVLAManager(BaseManager):
     pass
 
+# Register at module level so the client gets the proxy just by importing this
+# module — no callable needed on the client side (callable lives in the server).
+OmniVLAManager.register("infer")
+
 
 # ── Inference engine (lives in the server process) ───────────────────────────
 
