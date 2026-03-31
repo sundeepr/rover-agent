@@ -239,14 +239,6 @@ class OmniVLAStrategy(NavigationStrategy):
         self._model = model
         log.info("OmniVLA-edge weights loaded")
 
-        log.info("OmniVLA: encoding goal '%s' with CLIP…", self._goal)
-        text_encoder, _ = clip_lib.load("ViT-B/32", device=device)
-        text_encoder.eval()
-        with torch.no_grad():
-            self._feat_text = text_encoder.encode_text(
-                clip_lib.tokenize([self._goal], truncate=True).to(device)
-            ).float()
-
         self._obs_tf = T.Compose([
             T.Resize(IMG_OBS), T.ToTensor(),
             T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
@@ -261,12 +253,22 @@ class OmniVLAStrategy(NavigationStrategy):
         self._dummy_map  = torch.zeros(1, 9, *IMG_MAP, device=device)
 
         if self._goal_image_path:
+            # Modality 6: image-goal only — feat_text must be zeros (no language)
             log.info("OmniVLA: loading goal image '%s'…", self._goal_image_path)
             goal_pil = PIL_Image.open(self._goal_image_path).convert("RGB")
             self._goal_img    = self._obs_tf(goal_pil).unsqueeze(0).to(device)
             self._modality_id = torch.tensor([MODALITY_GOAL_IMG], device=device)
-            log.info("OmniVLA: using image+language goal (modality %d)", MODALITY_GOAL_IMG)
+            self._feat_text   = torch.zeros(1, ENC_SIZE, device=device)
+            log.info("OmniVLA: using image-only goal (modality %d)", MODALITY_GOAL_IMG)
         else:
+            # Modality 7: language-only — encode goal text with CLIP
+            log.info("OmniVLA: encoding goal '%s' with CLIP…", self._goal)
+            text_encoder, _ = clip_lib.load("ViT-B/32", device=device)
+            text_encoder.eval()
+            with torch.no_grad():
+                self._feat_text = text_encoder.encode_text(
+                    clip_lib.tokenize([self._goal], truncate=True).to(device)
+                ).float()
             self._goal_img    = torch.zeros(1, 3, *IMG_OBS, device=device)
             self._modality_id = torch.tensor([MODALITY_LANG], device=device)
             log.info("OmniVLA: using language-only goal (modality %d)", MODALITY_LANG)
