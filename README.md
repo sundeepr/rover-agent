@@ -77,7 +77,55 @@ python rover_agent.py --roomba-port /dev/ttyUSB0 \
     --strategy omnivla --goal "blue trash bin" --interval 1.0
 ```
 
+With a goal image instead of a text goal:
+
+```bash
+python rover_agent.py --roomba-port /dev/ttyUSB0 \
+    --strategy omnivla --goal "follow path" --goal-image /path/to/goal.jpg --interval 1.0
+```
+
 `--interval 1.0` is recommended for OmniVLA — it matches the model's 1 Hz control rate.
+
+---
+
+### OmniVLA model server (optional)
+
+Loading OmniVLA-edge takes ~30 seconds on first start. The model server keeps the weights in memory between `rover_agent` runs, so restarting the agent is instant.
+
+**Step 1 — start the server once** (leave it running):
+
+```bash
+python omnivla_server.py
+# Optionally bind to a specific address:
+python omnivla_server.py --host 127.0.0.1 --port 5100
+```
+
+The server prints `OmniVLA server listening on 127.0.0.1:5100` when ready.
+
+**Step 2 — point `rover_agent` at the server**:
+
+```bash
+python rover_agent.py --roomba-port /dev/ttyUSB0 \
+    --strategy omnivla --omnivla-server localhost:5100 \
+    --goal "Follow the brown path" --interval 1.0
+
+# With a goal image:
+python rover_agent.py --roomba-port /dev/ttyUSB0 \
+    --strategy omnivla --omnivla-server localhost:5100 \
+    --goal "follow path" --goal-image /path/to/goal.jpg --interval 1.0
+```
+
+When `--omnivla-server` is set, `rover_agent` connects to the server instead of loading the model locally. The server caches CLIP text encodings per unique goal string, so changing goals between runs costs only a single CLIP encode (~200 ms).
+
+**Server flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--host` | `127.0.0.1` | Address to bind |
+| `--port` | `5100` | TCP port |
+| `--authkey` | `omnivla-edge` | Shared secret between server and client |
+
+> Without `--omnivla-server`, the agent loads the model locally on every start (original behaviour, unchanged).
 
 ### All flags
 
@@ -92,6 +140,8 @@ python rover_agent.py --roomba-port /dev/ttyUSB0 \
 | `--dry-run` | `false` | Log drive commands without sending them |
 | `--strategy` | `gemini` | Navigation strategy: `gemini` or `omnivla` |
 | `--goal` | `navigate forward` | Language goal for OmniVLA |
+| `--goal-image` | *(none)* | Path to a goal image for OmniVLA (modality 6: image+language) |
+| `--omnivla-server` | *(none)* | `host:port` of a running `omnivla_server.py` — skips local model load |
 
 ---
 
@@ -115,7 +165,8 @@ Once running, open `http://localhost:5000` in a browser.
 rover_agent.py          Thin orchestrator — agent loop, rover factory, main()
 navigation_strategy.py  NavigationStrategy ABC + AgentState dataclass
 gemini_strategy.py      GeminiStrategy — Gemini vision API, 3-frame JPEG history
-omnivla_strategy.py     OmniVLAStrategy — OmniVLA-edge local neural network
+omnivla_strategy.py     OmniVLAStrategy — OmniVLA-edge local or server-mode inference
+omnivla_server.py       Standalone model server — keeps weights loaded between runs
 web_display.py          WebDisplay — Flask server, MJPEG streams, status API
 gemini_client.py        Gemini API wrapper with retry logic
 prompts.py              System prompt + user prompt builder for Gemini
