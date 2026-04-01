@@ -207,16 +207,17 @@ class InferenceEngine:
 
         t0 = time.time()
 
+        # CLIP text always conditions the FiLM visual backbone regardless of modality
+        feat_text = self._encode_text(goal)
+
         if goal_image_bytes:
-            # Modality 6: image-goal only — feat_text must be zeros (no language)
+            # Modality 6: goal image token in transformer + language via FiLM
             goal_img    = self._encode_goal_image(goal_image_bytes)
             modality_id = torch.tensor([MODALITY_GOAL_IMG], device=self._device)
-            feat_text   = torch.zeros(1, ENC_SIZE, device=self._device)
         else:
-            # Modality 7: language-only — goal_img is dummy zeros
+            # Modality 7: language token in transformer + language via FiLM
             goal_img    = torch.zeros(1, 3, *IMG_OBS, device=self._device)
             modality_id = torch.tensor([MODALITY_LANG], device=self._device)
-            feat_text   = self._encode_text(goal)
 
         # Decode context frames
         frames = [
