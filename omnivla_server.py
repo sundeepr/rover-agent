@@ -54,6 +54,13 @@ ENC_SIZE       = 1024
 MODALITY_LANG     = 7
 MODALITY_GOAL_IMG = 6
 
+# Minimum cosine similarity to positive prompts required before trusting
+# the logit_scale-amplified softmax score. When both pos_sim and neg_sim
+# are very low CLIP has no real signal — logit_scale (~100) amplifies even
+# tiny random differences into false-positive high scores. Below this floor
+# we return score=0.0 so the rover stays in PATH_LOST.
+MIN_PATH_POS_SIM = 0.18
+
 
 # ── Manager (shared definition used by both server and client) ────────────────
 
@@ -205,6 +212,11 @@ class InferenceEngine:
         img_feat = img_feat / img_feat.norm(dim=-1, keepdim=True)
         pos_sim = float((img_feat @ self._path_pos_feat.T).squeeze())
         neg_sim = float((img_feat @ self._path_neg_feat.T).squeeze())
+        # When pos_sim is below the noise floor CLIP has no real signal.
+        # logit_scale (~100) would amplify the tiny remaining difference into
+        # a false-positive score, so we short-circuit to 0.0.
+        if pos_sim < MIN_PATH_POS_SIM:
+            return {"score": 0.0, "pos_sim": pos_sim, "neg_sim": neg_sim}
         # Apply CLIP's learned temperature (logit_scale ~100) before softmax
         # so differences in cosine similarity produce meaningful probability gaps
         scale = self._text_encoder.logit_scale.exp().item()

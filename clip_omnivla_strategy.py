@@ -63,6 +63,10 @@ _NEGATIVE_PROMPTS = [
     "end of brown path",
 ]
 
+# Minimum pos_sim before trusting logit_scale-amplified softmax.
+# Below this floor CLIP has no real signal — return score=0.0 (PATH_LOST).
+MIN_PATH_POS_SIM = 0.18
+
 
 # ── State machine ─────────────────────────────────────────────────────────────
 
@@ -267,6 +271,8 @@ class ClipOmniVLAStrategy(NavigationStrategy):
         img_feat = img_feat / img_feat.norm(dim=-1, keepdim=True)
         pos_sim = float((img_feat @ self._path_pos_feat.T).squeeze())
         neg_sim = float((img_feat @ self._path_neg_feat.T).squeeze())
+        if pos_sim < MIN_PATH_POS_SIM:
+            return {"score": 0.0, "pos_sim": pos_sim, "neg_sim": neg_sim}
         scale   = float(self._clip_model.logit_scale.exp())
         score   = float(torch.softmax(
             torch.tensor([scale * pos_sim, scale * neg_sim]), dim=0
