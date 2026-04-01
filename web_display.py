@@ -126,6 +126,8 @@ _HTML = """<!DOCTYPE html>
       phase1_complete:  'status-done',
       mission_complete: 'status-done',
       no_path:          'status-err',
+      path_lost:        'status-err',
+      initializing:     '',
     };
     const navModeColors = {
       aligning:  '#ffeb3b',

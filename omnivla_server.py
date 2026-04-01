@@ -64,7 +64,7 @@ class OmniVLAManager(BaseManager):
 # module. "engine" exposes InferenceEngine.infer as a proxied method; calling
 # a method on a proxy returns the pickled return value directly (unlike the
 # manager creation pattern which wraps the return in another proxy).
-OmniVLAManager.register("engine", exposed=["infer"])
+OmniVLAManager.register("engine", exposed=["infer", "detect_path"])
 
 
 # ── Inference engine (lives in the server process) ───────────────────────────
@@ -91,6 +91,9 @@ class InferenceEngine:
         self._text_cache: dict = {}
         # Goal image cache: image bytes → goal_img tensor
         self._img_cache: dict = {}
+        # Path detection: pre-encoded prompt features (set in _load)
+        self._path_pos_feat = None
+        self._path_neg_feat = None
 
         self._load()
 
@@ -138,6 +141,21 @@ class InferenceEngine:
         self._dummy_pose = torch.zeros(1, 4, device=device)
         self._dummy_map  = torch.zeros(1, 9, *IMG_MAP, device=device)
 
+        # Pre-encode path detection prompts for zero-shot classification
+        import clip as _clip
+        _pos_prompts = ["brown path ahead", "brown tape on floor", "brown strip on ground"]
+        _neg_prompts = ["white floor", "no brown path visible", "end of brown path"]
+        with torch.no_grad():
+            pos = self._text_encoder.encode_text(
+                _clip.tokenize(_pos_prompts, truncate=True).to(device)
+            ).float()
+            neg = self._text_encoder.encode_text(
+                _clip.tokenize(_neg_prompts, truncate=True).to(device)
+            ).float()
+        self._path_pos_feat = (pos / pos.norm(dim=-1, keepdim=True)).mean(dim=0, keepdim=True)
+        self._path_neg_feat = (neg / neg.norm(dim=-1, keepdim=True)).mean(dim=0, keepdim=True)
+        log.info("Path detection prompts encoded")
+
         log.info("InferenceEngine ready — waiting for requests")
 
     def _encode_text(self, goal: str):
@@ -164,6 +182,27 @@ class InferenceEngine:
             tensor = self._obs_tf(pil).unsqueeze(0).to(self._device)
             self._img_cache[key] = tensor
         return self._img_cache[key]
+
+    def detect_path(self, jpeg_bytes: bytes) -> float:
+        """
+        Zero-shot CLIP path detection.
+
+        Returns a score in [0, 1] — higher means the brown path is more
+        likely present. Uses pre-encoded positive/negative prompts compared
+        against the CLIP image embedding of the current frame.
+        """
+        import torch
+        from PIL import Image as PIL_Image
+        pil = PIL_Image.open(io.BytesIO(jpeg_bytes)).convert("RGB")
+        with torch.no_grad():
+            img_feat = self._text_encoder.encode_image(
+                self._clip_tf(pil).unsqueeze(0).to(self._device)
+            ).float()
+        img_feat = img_feat / img_feat.norm(dim=-1, keepdim=True)
+        pos_sim = (img_feat @ self._path_pos_feat.T).squeeze()
+        neg_sim = (img_feat @ self._path_neg_feat.T).squeeze()
+        score = torch.softmax(torch.stack([pos_sim, neg_sim]), dim=0)[0].item()
+        return float(score)
 
     def infer(
         self,
@@ -276,7 +315,7 @@ def main():
 
     engine = InferenceEngine()
 
-    OmniVLAManager.register("engine", callable=lambda: engine, exposed=["infer"])
+    OmniVLAManager.register("engine", callable=lambda: engine, exposed=["infer", "detect_path"])
     manager = OmniVLAManager(address=(args.host, args.port), authkey=authkey)
     server  = manager.get_server()
 

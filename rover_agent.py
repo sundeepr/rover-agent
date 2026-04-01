@@ -175,6 +175,11 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
         from omnivla_strategy import OmniVLAStrategy
         return OmniVLAStrategy(goal=args.goal, goal_image_path=args.goal_image,
                                server_addr=args.omnivla_server)
+    if name == "clip_omnivla":
+        from clip_omnivla_strategy import ClipOmniVLAStrategy
+        return ClipOmniVLAStrategy(goal=args.goal, goal_image_path=args.goal_image,
+                                   server_addr=args.omnivla_server,
+                                   path_threshold=args.path_threshold)
     raise ValueError(f"Unknown strategy: {name!r}")
 
 
@@ -198,7 +203,7 @@ def main():
     parser.add_argument("--dry-run",     action="store_true",
                         help="Log rover commands but do not send them")
     parser.add_argument("--strategy",    type=str,   default="gemini",
-                        choices=["gemini", "omnivla"],
+                        choices=["gemini", "omnivla", "clip_omnivla"],
                         help="Navigation strategy (default: gemini)")
     parser.add_argument("--goal",        type=str,   default="navigate forward",
                         help="Language goal for omnivla strategy (e.g. 'blue trash bin')")
@@ -210,6 +215,11 @@ def main():
                              "(e.g. localhost:5100). When set, inference is "
                              "delegated to the server instead of loading "
                              "the model locally.")
+    parser.add_argument("--path-threshold", type=float, default=0.5,
+                        metavar="FLOAT",
+                        help="CLIP path detection threshold for clip_omnivla "
+                             "strategy (default: 0.5). Higher = more confident "
+                             "brown path required before rover moves.")
     args = parser.parse_args()
 
     # Resolve rover port: explicit flag takes priority, else auto-detect from rover type
@@ -219,7 +229,7 @@ def main():
     log.info("Camera device : %d", args.device)
     log.info("Query interval: %.1fs", args.interval)
     log.info("Strategy      : %s", args.strategy)
-    if args.strategy == "omnivla":
+    if args.strategy in ("omnivla", "clip_omnivla"):
         log.info("Goal          : %s", args.goal)
         if args.goal_image:
             log.info("Goal image    : %s", args.goal_image)
@@ -227,6 +237,8 @@ def main():
             log.info("OmniVLA server: %s", args.omnivla_server)
         else:
             log.info("OmniVLA server: (loading locally)")
+        if args.strategy == "clip_omnivla":
+            log.info("Path threshold: %.2f", args.path_threshold)
     else:
         log.info("Model         : %s", gemini_client.MODEL)
     log.info("Web UI        : http://localhost:%d", args.port)
