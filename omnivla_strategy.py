@@ -412,8 +412,8 @@ class OmniVLAStrategy(NavigationStrategy):
                     "description": top["description"],
                 })
 
-        # Send drive command — rover keeps moving at this velocity until next step
-        if rover_ctrl:
+        # Send drive command — skip if paused (pause handler already sent stop)
+        if rover_ctrl and not state.paused.is_set():
             try:
                 rover_ctrl.drive_raw(vel, radius)
             except Exception as e:

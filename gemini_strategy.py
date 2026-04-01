@@ -181,8 +181,8 @@ class GeminiStrategy(NavigationStrategy):
                     "description": top.get("description", ""),
                 })
 
-        # 8. Drive rover toward rank-1 waypoint
-        if rover_ctrl and status == "in_progress" and top:
+        # 8. Drive rover toward rank-1 waypoint — skip if paused
+        if rover_ctrl and status == "in_progress" and top and not state.paused.is_set():
             try:
                 rover_ctrl.navigate_to_waypoint(top, nav_mode)
             except Exception as e:
@@ -195,7 +195,7 @@ class GeminiStrategy(NavigationStrategy):
             with state.result_lock:
                 state.phase = 2
             log.info(">> Phase 1 complete — executing U-turn")
-            if rover_ctrl:
+            if rover_ctrl and not state.paused.is_set():
                 try:
                     rover_ctrl.uturn()
                 except Exception as e:
