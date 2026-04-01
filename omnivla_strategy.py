@@ -28,7 +28,6 @@ Dependencies (beyond requirements.txt):
 import collections
 import logging
 import math
-import sys
 import threading
 import time
 from pathlib import Path
@@ -61,8 +60,6 @@ MAX_ANG_RAD_S  = 0.5        # max angular velocity
 MODALITY_LANG     = 7
 MODALITY_GOAL_IMG = 6
 
-# omnivla source directory — needed to import model.py
-_OMNIVLA_DIR = Path(__file__).parent.parent / "omnivla"
 
 
 # ── Pure functions (no torch imports needed) ───────────────────────────────────
@@ -212,10 +209,8 @@ class OmniVLAStrategy(NavigationStrategy):
             log.error("Run: pip install -r requirements-omnivla.txt")
             return
 
-        if str(_OMNIVLA_DIR) not in sys.path:
-            sys.path.insert(0, str(_OMNIVLA_DIR))
         try:
-            from model import OmniVLA_edge
+            from omnivla_model import OmniVLA_edge
             from huggingface_hub import hf_hub_download
         except ImportError as e:
             log.error("Cannot import OmniVLA model: %s", e)

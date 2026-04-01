@@ -173,6 +173,7 @@ prompts.py              System prompt + user prompt builder for Gemini
 roomba_controller.py    Pixel-to-motion conversion + Roomba OI serial driver
 atlas_controller.py     Pixel-to-motion conversion + Atlas-1 $CMD serial driver
 
+omnivla_model.py        OmniVLA-edge model architecture (copied from NHirose/OmniVLA)
 requirements-omnivla.txt  Extra deps for the omnivla strategy
 ```
 

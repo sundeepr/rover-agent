@@ -21,7 +21,6 @@ Then start rover_agent with:
 import argparse
 import io
 import logging
-import sys
 import time
 from multiprocessing.managers import BaseManager
 from pathlib import Path
@@ -55,7 +54,6 @@ ENC_SIZE       = 1024
 MODALITY_LANG     = 7
 MODALITY_GOAL_IMG = 6
 
-_OMNIVLA_DIR = Path(__file__).parent.parent / "omnivla"
 
 # ── Manager (shared definition used by both server and client) ────────────────
 
@@ -102,9 +100,7 @@ class InferenceEngine:
         import clip as clip_lib
         from huggingface_hub import hf_hub_download
 
-        if str(_OMNIVLA_DIR) not in sys.path:
-            sys.path.insert(0, str(_OMNIVLA_DIR))
-        from model import OmniVLA_edge
+        from omnivla_model import OmniVLA_edge
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self._device = device
