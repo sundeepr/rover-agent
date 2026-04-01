@@ -183,13 +183,17 @@ class InferenceEngine:
             self._img_cache[key] = tensor
         return self._img_cache[key]
 
-    def detect_path(self, jpeg_bytes: bytes) -> float:
+    def detect_path(self, jpeg_bytes: bytes) -> dict:
         """
         Zero-shot CLIP path detection.
 
-        Returns a score in [0, 1] — higher means the brown path is more
-        likely present. Uses pre-encoded positive/negative prompts compared
-        against the CLIP image embedding of the current frame.
+        Returns a dict:
+            score   : float [0,1] — probability that the brown path is present
+            pos_sim : float — raw cosine similarity to positive prompts
+            neg_sim : float — raw cosine similarity to negative prompts
+
+        Uses CLIP's learned logit_scale for temperature-scaled softmax so
+        scores spread away from 50% when there is a real signal.
         """
         import torch
         from PIL import Image as PIL_Image
@@ -199,10 +203,15 @@ class InferenceEngine:
                 self._clip_tf(pil).unsqueeze(0).to(self._device)
             ).float()
         img_feat = img_feat / img_feat.norm(dim=-1, keepdim=True)
-        pos_sim = (img_feat @ self._path_pos_feat.T).squeeze()
-        neg_sim = (img_feat @ self._path_neg_feat.T).squeeze()
-        score = torch.softmax(torch.stack([pos_sim, neg_sim]), dim=0)[0].item()
-        return float(score)
+        pos_sim = float((img_feat @ self._path_pos_feat.T).squeeze())
+        neg_sim = float((img_feat @ self._path_neg_feat.T).squeeze())
+        # Apply CLIP's learned temperature (logit_scale ~100) before softmax
+        # so differences in cosine similarity produce meaningful probability gaps
+        scale = self._text_encoder.logit_scale.exp().item()
+        score = float(torch.softmax(
+            torch.tensor([scale * pos_sim, scale * neg_sim]), dim=0
+        )[0])
+        return {"score": score, "pos_sim": pos_sim, "neg_sim": neg_sim}
 
     def infer(
         self,

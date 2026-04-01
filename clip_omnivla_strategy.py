@@ -258,16 +258,20 @@ class ClipOmniVLAStrategy(NavigationStrategy):
 
     # ── Path detection (local) ────────────────────────────────────────────────
 
-    def _detect_path_local(self, pil_frame) -> float:
+    def _detect_path_local(self, pil_frame) -> dict:
         import torch
         with torch.no_grad():
             img_feat = self._clip_model.encode_image(
                 self._clip_tf(pil_frame).unsqueeze(0).to(self._device)
             ).float()
         img_feat = img_feat / img_feat.norm(dim=-1, keepdim=True)
-        pos_sim  = (img_feat @ self._path_pos_feat.T).squeeze()
-        neg_sim  = (img_feat @ self._path_neg_feat.T).squeeze()
-        return torch.softmax(torch.stack([pos_sim, neg_sim]), dim=0)[0].item()
+        pos_sim = float((img_feat @ self._path_pos_feat.T).squeeze())
+        neg_sim = float((img_feat @ self._path_neg_feat.T).squeeze())
+        scale   = float(self._clip_model.logit_scale.exp())
+        score   = float(torch.softmax(
+            torch.tensor([scale * pos_sim, scale * neg_sim]), dim=0
+        )[0])
+        return {"score": score, "pos_sim": pos_sim, "neg_sim": neg_sim}
 
     # ── OmniVLA inference (local) ─────────────────────────────────────────────
 
@@ -341,9 +345,14 @@ class ClipOmniVLAStrategy(NavigationStrategy):
 
         # ── Path detection ────────────────────────────────────────────────────
         if self._server_addr:
-            path_score = self._engine.detect_path(current_jpeg)
+            det = self._engine.detect_path(current_jpeg)
         else:
-            path_score = self._detect_path_local(pil)
+            det = self._detect_path_local(pil)
+        path_score = det["score"]
+        pos_sim    = det["pos_sim"]
+        neg_sim    = det["neg_sim"]
+        log.info("CLIP detect | score=%.3f  pos_sim=%.4f  neg_sim=%.4f  threshold=%.2f",
+                 path_score, pos_sim, neg_sim, self._path_threshold)
 
         with self._state_lock:
             current_state = self._nav_state
@@ -356,7 +365,8 @@ class ClipOmniVLAStrategy(NavigationStrategy):
             # Should not reach here (_loaded guards entry), but be safe
             log.info("ClipOmniVLA: still initializing — skipping")
             self._write_result(state, step, phase, None, 0, 0x8000,
-                               path_score, "initializing", time.time() - t0)
+                               path_score, pos_sim, neg_sim,
+                               "initializing", time.time() - t0)
             return
 
         elif current_state == _NavState.NAVIGATING:
@@ -403,12 +413,13 @@ class ClipOmniVLAStrategy(NavigationStrategy):
             annotated = _annotate(frame, waypoints, vel, radius, self._goal)
         else:
             annotated = frame.copy()
-        _draw_path_hud(annotated, path_score, self._path_threshold, self._nav_state)
+        _draw_path_hud(annotated, path_score, self._path_threshold,
+                       self._nav_state, pos_sim, neg_sim)
         with state.llm_lock:
             state.llm_frame = annotated
 
         self._write_result(state, step, phase, waypoints, vel, radius,
-                           path_score, goal_status, elapsed)
+                           path_score, pos_sim, neg_sim, goal_status, elapsed)
 
     def _run_inference(self, pil_frame, current_jpeg=None):
         """Run OmniVLA inference in either server or local mode."""
@@ -431,7 +442,7 @@ class ClipOmniVLAStrategy(NavigationStrategy):
             return self._run_omnivla_local(pil_frame)
 
     def _write_result(self, state, step, phase, waypoints, vel, radius,
-                      path_score, goal_status, elapsed):
+                      path_score, pos_sim, neg_sim, goal_status, elapsed):
         h, w = 480, 640   # fallback; overwritten if waypoints present
         ui_waypoints = []
         if waypoints is not None:
@@ -457,8 +468,8 @@ class ClipOmniVLAStrategy(NavigationStrategy):
             "phase":           phase,
             "navigation_mode": "following",
             "goal_status":     goal_status,
-            "reasoning":       (f"path={path_score:.2f} vel={vel}mm/s {r_str}"
-                                f" | goal='{self._goal}'"),
+            "reasoning":       (f"path={path_score:.2f} (pos={pos_sim:.4f} neg={neg_sim:.4f})"
+                                f" vel={vel}mm/s {r_str} | goal='{self._goal}'"),
             "waypoints":       ui_waypoints,
             "confidence":      round(path_score, 2),
         }
@@ -479,8 +490,8 @@ class ClipOmniVLAStrategy(NavigationStrategy):
 # ── HUD annotation ────────────────────────────────────────────────────────────
 
 def _draw_path_hud(frame: np.ndarray, score: float, threshold: float,
-                   nav_state: _NavState) -> None:
-    """Draw path score and state label onto frame in-place."""
+                   nav_state: _NavState, pos_sim: float, neg_sim: float) -> None:
+    """Draw path score, raw CLIP sims, and threshold bar onto frame in-place."""
     if nav_state == _NavState.NAVIGATING:
         color = (0, 220, 80)
         label = f"path: {score*100:.0f}%"
@@ -493,11 +504,16 @@ def _draw_path_hud(frame: np.ndarray, score: float, threshold: float,
 
     cv2.putText(frame, label, (10, 50),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2)
-    # Threshold marker line on a small bar
-    bar_x, bar_y, bar_w, bar_h = 10, 60, 120, 8
+
+    # Raw cosine similarities — useful for tuning prompts and threshold
+    cv2.putText(frame, f"pos={pos_sim:.4f}  neg={neg_sim:.4f}", (10, 72),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.42, (160, 160, 160), 1)
+
+    # Score bar with threshold marker
+    bar_x, bar_y, bar_w, bar_h = 10, 80, 120, 8
     cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h),
                   (60, 60, 60), -1)
-    fill = int(bar_w * score)
+    fill = int(bar_w * max(0.0, min(1.0, score)))
     cv2.rectangle(frame, (bar_x, bar_y), (bar_x + fill, bar_y + bar_h), color, -1)
     thr_x = bar_x + int(bar_w * threshold)
     cv2.line(frame, (thr_x, bar_y - 2), (thr_x, bar_y + bar_h + 2), (255, 255, 255), 1)
