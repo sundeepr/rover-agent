@@ -3,13 +3,20 @@
 Rover navigation agent — thin orchestrator.
 
 Opens the camera, wires up the chosen navigation strategy and rover controller,
-then runs the agent loop in a background thread while Flask serves the UI
-on the main thread.
+then runs the agent loop and a publisher thread in the background. The main
+thread blocks until Ctrl-C or SIGTERM.
+
+The web UI is served by the standalone web_server.py process. Start it once and
+leave it running; the agent connects to it on startup and publishes frames and
+status over HTTP. The browser tab survives agent restarts and crashes.
 
 Supported rovers    : roomba (iRobot OI), atlas (STM32 $CMD protocol)
 Supported strategies: gemini (Gemini vision API), omnivla (local neural network)
 
 Usage:
+    # Start the web server once (separate terminal):
+    python web_server.py
+
     # Camera only, no hardware
     python rover_agent.py --dry-run
 
@@ -40,7 +47,7 @@ import prompts
 import roomba_controller
 import atlas_controller
 from navigation_strategy import AgentState, NavigationStrategy
-from web_display import WebDisplay
+from agent_publisher import AgentPublisher
 
 
 # ── Logging ────────────────────────────────────────────────────────────────────
@@ -95,10 +102,10 @@ def agent_loop(
     Camera capture loop — runs on a daemon thread at ~30 fps.
 
     Continuously reads frames from the camera and pushes them to
-    state.raw_frame (for the live web stream). Every `interval` seconds,
-    if no query is already in-flight, increments state.step and spawns a
-    new daemon thread to call strategy.run_query(). This keeps the camera
-    loop completely non-blocking regardless of how long inference takes.
+    state.raw_frame. Every `interval` seconds, if no query is already
+    in-flight, increments state.step and spawns a new daemon thread to
+    call strategy.run_query(). This keeps the camera loop completely
+    non-blocking regardless of how long inference takes.
 
     rover_ctrl is an already-connected controller (or None). Connection
     lifecycle is managed by main() so the stop command is guaranteed to
@@ -119,8 +126,8 @@ def agent_loop(
     captures_dir.mkdir(exist_ok=True)
     log.info("Saving LLM frames to: %s", captures_dir.resolve())
 
-    last_query_time = 0.0
-    _logged_in_flight = False
+    last_query_time    = 0.0
+    _logged_in_flight  = False
 
     while True:
         ret, frame = cap.read()
@@ -128,7 +135,7 @@ def agent_loop(
             log.error("Failed to grab frame")
             break
 
-        # Always push raw frame to realtime stream — never blocked by queries
+        # Always push raw frame — never blocked by queries
         with state.raw_lock:
             state.raw_frame = frame.copy()
 
@@ -165,8 +172,7 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
     Instantiate and return the requested NavigationStrategy.
 
     Strategies are imported lazily so their heavy dependencies (torch, etc.)
-    are only loaded when actually needed. To add a new strategy, import and
-    return it here, and add its name to the --strategy choices in main().
+    are only loaded when actually needed.
     """
     if name == "gemini":
         from gemini_strategy import GeminiStrategy
@@ -191,8 +197,10 @@ def main():
                         help="Camera device index")
     parser.add_argument("--interval",    type=float, default=3.0,
                         help="Seconds between LLM queries")
-    parser.add_argument("--port",        type=int,   default=5000,
-                        help="Web server port")
+    parser.add_argument("--web-server",  type=str,   default="http://localhost:5001",
+                        metavar="URL",
+                        help="URL of the running web_server.py "
+                             "(default: http://localhost:5001)")
     parser.add_argument("--rover",       type=str,   default="roomba",
                         choices=["roomba", "atlas"],
                         help="Rover hardware (default: roomba)")
@@ -206,23 +214,19 @@ def main():
                         choices=["gemini", "omnivla", "clip_omnivla"],
                         help="Navigation strategy (default: gemini)")
     parser.add_argument("--goal",        type=str,   default="navigate forward",
-                        help="Language goal for omnivla strategy (e.g. 'blue trash bin')")
+                        help="Language goal for omnivla strategy")
     parser.add_argument("--goal-image",  type=str,   default=None,
                         help="Path to a goal image for omnivla strategy (optional)")
     parser.add_argument("--omnivla-server", type=str, default=None,
                         metavar="HOST:PORT",
                         help="Address of a running omnivla_server.py "
-                             "(e.g. localhost:5100). When set, inference is "
-                             "delegated to the server instead of loading "
-                             "the model locally.")
+                             "(e.g. localhost:5100)")
     parser.add_argument("--path-threshold", type=float, default=0.5,
                         metavar="FLOAT",
                         help="CLIP path detection threshold for clip_omnivla "
-                             "strategy (default: 0.5). Higher = more confident "
-                             "brown path required before rover moves.")
+                             "strategy (default: 0.5)")
     args = parser.parse_args()
 
-    # Resolve rover port: explicit flag takes priority, else auto-detect from rover type
     rover_port = args.atlas_port if args.rover == "atlas" else args.roomba_port
 
     log.info("=== Rover agent starting ===")
@@ -241,7 +245,7 @@ def main():
             log.info("Path threshold: %.2f", args.path_threshold)
     else:
         log.info("Model         : %s", gemini_client.MODEL)
-    log.info("Web UI        : http://localhost:%d", args.port)
+    log.info("Web server    : %s", args.web_server)
     log.info("Rover         : %s", args.rover)
     if rover_port:
         log.info("Rover port    : %s%s", rover_port, " (dry-run)" if args.dry_run else "")
@@ -256,27 +260,37 @@ def main():
     rover_ctrl = _build_rover_ctrl(args.rover, rover_port, args.dry_run)
     rover_ctx  = None
     if rover_ctrl:
-        rover_ctx = rover_ctrl.connect()
+        rover_ctx  = rover_ctrl.connect()
         rover_ctrl = rover_ctx.__enter__()
         log.info("%s controller active on %s%s",
                  args.rover.capitalize(), rover_port,
                  " (dry-run)" if args.dry_run else "")
 
-    # SIGTERM handler (e.g. `kill <pid>`) — Flask catches SIGINT itself,
-    # but SIGTERM would otherwise skip the finally block below.
+    # SIGTERM handler — ensures the finally block runs on `kill <pid>`
     def _on_sigterm(signum, frame):
         sys.exit(0)
     signal.signal(signal.SIGTERM, _on_sigterm)
 
+    # Agent loop (camera + inference dispatch)
     threading.Thread(
         target=agent_loop,
         args=(state, strategy, args.device, args.interval, rover_ctrl),
         daemon=True,
     ).start()
 
-    display = WebDisplay(state, log_dir=Path("logs"), rover_ctrl=rover_ctrl)
+    # Publisher loop (reads AgentState, POSTs to web server)
+    publisher = AgentPublisher(args.web_server)
+    threading.Thread(
+        target=publisher.run,
+        args=(state, rover_ctrl),
+        daemon=True,
+    ).start()
+
+    log.info("Agent running — publishing to %s", args.web_server)
+
     try:
-        display.run(port=args.port)
+        while True:
+            time.sleep(1)
     except (KeyboardInterrupt, SystemExit):
         pass
     finally:
