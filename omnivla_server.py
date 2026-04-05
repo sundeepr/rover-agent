@@ -98,9 +98,8 @@ class InferenceEngine:
         self._text_cache: dict = {}
         # Goal image cache: image bytes → goal_img tensor
         self._img_cache: dict = {}
-        # Path detection: pre-encoded prompt features (set in _load)
-        self._path_pos_feat = None
-        self._path_neg_feat = None
+        # Path detection: (tuple(pos_prompts), tuple(neg_prompts)) → (pos_feat, neg_feat)
+        self._path_cache: dict = {}
 
         self._load()
 
@@ -148,22 +147,7 @@ class InferenceEngine:
         self._dummy_pose = torch.zeros(1, 4, device=device)
         self._dummy_map  = torch.zeros(1, 9, *IMG_MAP, device=device)
 
-        # Pre-encode path detection prompts for zero-shot classification
-        import clip as _clip
-        _pos_prompts = ["brown path ahead", "brown tape on floor", "brown strip on ground"]
-        _neg_prompts = ["white floor", "no brown path visible", "end of brown path"]
-        with torch.no_grad():
-            pos = self._text_encoder.encode_text(
-                _clip.tokenize(_pos_prompts, truncate=True).to(device)
-            ).float()
-            neg = self._text_encoder.encode_text(
-                _clip.tokenize(_neg_prompts, truncate=True).to(device)
-            ).float()
-        self._path_pos_feat = (pos / pos.norm(dim=-1, keepdim=True)).mean(dim=0, keepdim=True)
-        self._path_neg_feat = (neg / neg.norm(dim=-1, keepdim=True)).mean(dim=0, keepdim=True)
-        log.info("Path detection prompts encoded")
-
-        log.info("InferenceEngine ready — waiting for requests")
+        log.info("InferenceEngine ready — path prompts encoded on first detect_path call")
 
     def _encode_text(self, goal: str):
         """Encode goal text with CLIP; result is cached per unique string."""
@@ -190,35 +174,50 @@ class InferenceEngine:
             self._img_cache[key] = tensor
         return self._img_cache[key]
 
-    def detect_path(self, jpeg_bytes: bytes) -> dict:
+    def detect_path(self, jpeg_bytes: bytes,
+                    pos_prompts: list, neg_prompts: list) -> dict:
         """
-        Zero-shot CLIP path detection.
+        Zero-shot CLIP path detection with caller-supplied prompts.
+
+        Prompt features are cached by (pos_prompts, neg_prompts) so repeated
+        calls with the same prompts pay the encoding cost only once.
 
         Returns a dict:
-            score   : float [0,1] — probability that the brown path is present
+            score   : float [0,1] — probability that the target is present
             pos_sim : float — raw cosine similarity to positive prompts
             neg_sim : float — raw cosine similarity to negative prompts
-
-        Uses CLIP's learned logit_scale for temperature-scaled softmax so
-        scores spread away from 50% when there is a real signal.
         """
         import torch
+        import clip as clip_lib
         from PIL import Image as PIL_Image
+
+        # Encode and cache prompts on first call for this prompt set
+        cache_key = (tuple(pos_prompts), tuple(neg_prompts))
+        if cache_key not in self._path_cache:
+            log.info("Encoding prompt set: %d pos, %d neg", len(pos_prompts), len(neg_prompts))
+            with torch.no_grad():
+                pos = self._text_encoder.encode_text(
+                    clip_lib.tokenize(list(pos_prompts), truncate=True).to(self._device)
+                ).float()
+                neg = self._text_encoder.encode_text(
+                    clip_lib.tokenize(list(neg_prompts), truncate=True).to(self._device)
+                ).float()
+            pos_feat = (pos / pos.norm(dim=-1, keepdim=True)).mean(dim=0, keepdim=True)
+            neg_feat = (neg / neg.norm(dim=-1, keepdim=True)).mean(dim=0, keepdim=True)
+            self._path_cache[cache_key] = (pos_feat, neg_feat)
+
+        pos_feat, neg_feat = self._path_cache[cache_key]
+
         pil = PIL_Image.open(io.BytesIO(jpeg_bytes)).convert("RGB")
         with torch.no_grad():
             img_feat = self._text_encoder.encode_image(
                 self._clip_tf(pil).unsqueeze(0).to(self._device)
             ).float()
         img_feat = img_feat / img_feat.norm(dim=-1, keepdim=True)
-        pos_sim = float((img_feat @ self._path_pos_feat.T).squeeze())
-        neg_sim = float((img_feat @ self._path_neg_feat.T).squeeze())
-        # When pos_sim is below the noise floor CLIP has no real signal.
-        # logit_scale (~100) would amplify the tiny remaining difference into
-        # a false-positive score, so we short-circuit to 0.0.
+        pos_sim = float((img_feat @ pos_feat.T).squeeze())
+        neg_sim = float((img_feat @ neg_feat.T).squeeze())
         if pos_sim < MIN_PATH_POS_SIM:
             return {"score": 0.0, "pos_sim": pos_sim, "neg_sim": neg_sim}
-        # Apply CLIP's learned temperature (logit_scale ~100) before softmax
-        # so differences in cosine similarity produce meaningful probability gaps
         scale = self._text_encoder.logit_scale.exp().item()
         score = float(torch.softmax(
             torch.tensor([scale * pos_sim, scale * neg_sim]), dim=0

@@ -40,6 +40,7 @@ import cv2
 import numpy as np
 
 from navigation_strategy import AgentState, NavigationStrategy
+from prompt_generator import generate_clip_prompts
 from omnivla_strategy import (
     CONTEXT_SIZE, TRAJ_LEN, IMG_OBS, IMG_CLIP, IMG_MAP,
     METRIC_SPACING, DT, WAYPOINT_IDX, ENC_SIZE,
@@ -49,19 +50,6 @@ from omnivla_strategy import (
 )
 
 log = logging.getLogger("rover.clip_omnivla")
-
-# ── Prompts for zero-shot path detection ──────────────────────────────────────
-
-_POSITIVE_PROMPTS = [
-    "brown path ahead",
-    "brown tape on floor",
-    "brown strip on ground",
-]
-_NEGATIVE_PROMPTS = [
-    "white floor",
-    "no brown path visible",
-    "end of brown path",
-]
 
 # Minimum pos_sim before trusting logit_scale-amplified softmax.
 # Below this floor CLIP has no real signal — return score=0.0 (PATH_LOST).
@@ -102,11 +90,17 @@ class ClipOmniVLAStrategy(NavigationStrategy):
         goal_image_path: str | None = None,
         server_addr: str | None = None,
         path_threshold: float = 0.5,
+        ollama_url: str = "http://localhost:11434",
     ):
         self._goal            = goal
         self._goal_image_path = goal_image_path
         self._server_addr     = server_addr
         self._path_threshold  = path_threshold
+
+        # Generate CLIP prompts from goal via Qwen3 (falls back to templates)
+        _prompts = generate_clip_prompts(goal, ollama_url=ollama_url)
+        self._pos_prompts: list = _prompts["positive"]
+        self._neg_prompts: list = _prompts["negative"]
 
         self._nav_state = _NavState.INITIALIZING
         # query_in_flight serialises query threads so no separate lock needed,
@@ -243,17 +237,18 @@ class ClipOmniVLAStrategy(NavigationStrategy):
             self._modality_id = torch.tensor([MODALITY_LANG], device=device)
             log.info("ClipOmniVLA: language-only goal (modality %d)", MODALITY_LANG)
 
-        # Pre-encode path detection prompts
+        # Encode path detection prompts (generated from goal by Qwen3 at startup)
         with torch.no_grad():
             pos = clip_model.encode_text(
-                clip_lib.tokenize(_POSITIVE_PROMPTS, truncate=True).to(device)
+                clip_lib.tokenize(self._pos_prompts, truncate=True).to(device)
             ).float()
             neg = clip_model.encode_text(
-                clip_lib.tokenize(_NEGATIVE_PROMPTS, truncate=True).to(device)
+                clip_lib.tokenize(self._neg_prompts, truncate=True).to(device)
             ).float()
         self._path_pos_feat = (pos / pos.norm(dim=-1, keepdim=True)).mean(dim=0, keepdim=True)
         self._path_neg_feat = (neg / neg.norm(dim=-1, keepdim=True)).mean(dim=0, keepdim=True)
-        log.info("ClipOmniVLA: path detection prompts encoded")
+        log.info("ClipOmniVLA: path detection prompts encoded (%d pos, %d neg)",
+                 len(self._pos_prompts), len(self._neg_prompts))
 
         self._loaded.set()
         with self._state_lock:
@@ -351,7 +346,7 @@ class ClipOmniVLAStrategy(NavigationStrategy):
 
         # ── Path detection ────────────────────────────────────────────────────
         if self._server_addr:
-            det = self._engine.detect_path(current_jpeg)
+            det = self._engine.detect_path(current_jpeg, self._pos_prompts, self._neg_prompts)
         else:
             det = self._detect_path_local(pil)
         path_score = det["score"]
