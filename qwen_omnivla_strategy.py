@@ -280,10 +280,14 @@ class QwenOmniVLAStrategy(NavigationStrategy):
 
         Returns {"visible": bool, "confidence": float, "reason": str}.
         On any error returns visible=False, confidence=0.0.
+
+        num_ctx=2048 caps the context window, which reduces KV cache size
+        and allows the model to fit within available memory.
         """
         import requests
 
         b64 = base64.b64encode(jpeg_bytes).decode()
+
         payload = {
             "model": self._vision_model,
             "messages": [{
@@ -294,7 +298,9 @@ class QwenOmniVLAStrategy(NavigationStrategy):
             "stream":  False,
             # No format=json — not supported by all Ollama versions for vision
             # models. We extract JSON from free-text response instead.
-            "options": {"temperature": 0.1},
+            # num_ctx=2048: our prompt + image tokens + short answer fit easily
+            # in 2048 tokens; smaller context = much smaller KV cache.
+            "options": {"temperature": 0.1, "num_ctx": 2048},
         }
         try:
             r = requests.post(
