@@ -42,6 +42,7 @@ import collections
 import io
 import json
 import logging
+import re
 import threading
 import time
 from enum import Enum, auto
@@ -291,7 +292,8 @@ class QwenOmniVLAStrategy(NavigationStrategy):
                 "images":  [b64],
             }],
             "stream":  False,
-            "format":  "json",
+            # No format=json — not supported by all Ollama versions for vision
+            # models. We extract JSON from free-text response instead.
             "options": {"temperature": 0.1},
         }
         try:
@@ -300,8 +302,21 @@ class QwenOmniVLAStrategy(NavigationStrategy):
                 json=payload,
                 timeout=30,
             )
-            r.raise_for_status()
-            data = json.loads(r.json()["message"]["content"])
+            if not r.ok:
+                try:
+                    err_body = r.json().get("error", r.text[:200])
+                except Exception:
+                    err_body = r.text[:200]
+                log.warning("Qwen detection failed: HTTP %d — %s", r.status_code, err_body)
+                return {"visible": False, "confidence": 0.0, "reason": f"ollama: {err_body}"}
+
+            content = r.json()["message"]["content"]
+            # Extract the first JSON object from the response text — handles
+            # cases where the model adds preamble or markdown code fences.
+            m = re.search(r"\{.*\}", content, re.DOTALL)
+            if not m:
+                raise ValueError(f"no JSON found in response: {content[:200]}")
+            data = json.loads(m.group())
             return {
                 "visible":    bool(data.get("visible", False)),
                 "confidence": float(data.get("confidence", 0.0)),
