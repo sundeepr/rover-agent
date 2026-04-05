@@ -81,18 +81,22 @@ def generate_clip_prompts(
             "model": model,
             "messages": [
                 {"role": "system", "content": _SYSTEM},
-                # /no_think disables Qwen3 chain-of-thought for a faster,
-                # direct JSON response — reasoning is not needed here.
-                {"role": "user", "content": f"/no_think\n{_USER.format(goal=goal)}"},
+                {"role": "user", "content": _USER.format(goal=goal)},
             ],
-            "stream": False,
-            "format": "json",
+            # think=False disables Qwen3 chain-of-thought at the Ollama API
+            # level (supported since Ollama 0.6). Without this, Ollama strips
+            # <think> tokens with format=json but leaves content empty.
+            "think":   False,
+            "stream":  False,
+            "format":  "json",
             "options": {"temperature": 0.2, "num_predict": 256},
         }
         r = requests.post(f"{ollama_url}/api/chat", json=payload, timeout=60)
         r.raise_for_status()
 
         content = r.json()["message"]["content"]
+        if not content.strip():
+            raise ValueError("Ollama returned empty content — check model/version")
         prompts = json.loads(content)
 
         if not (isinstance(prompts.get("positive"), list) and
