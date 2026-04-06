@@ -63,9 +63,9 @@ from omnivla_strategy import (
 log = logging.getLogger("rover.qwen_omnivla")
 
 # Default Qwen vision model served by Ollama.
-# qwen2-vl:2b (~1.5 GB) fits comfortably on Jetson Orin Nano Super (8 GB).
-# Use qwen2.5vl:3b if more memory is available.
-_VISION_MODEL = "qwen2-vl:2b"
+# Use a custom model built with num_ctx=2048 to cap KV cache at load time:
+#   ollama create qwen2.5vl-3b-ctx2k -f Modelfile  (FROM qwen2.5vl:3b, PARAMETER num_ctx 2048)
+_VISION_MODEL = "qwen2.5vl-3b-ctx2k"
 
 
 # ── State machine ──────────────────────────────────────────────────────────────
