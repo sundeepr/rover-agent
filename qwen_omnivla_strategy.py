@@ -62,8 +62,10 @@ from omnivla_strategy import (
 
 log = logging.getLogger("rover.qwen_omnivla")
 
-# Default Qwen vision model served by Ollama
-_VISION_MODEL = "qwen2.5vl:3b"
+# Default Qwen vision model served by Ollama.
+# qwen2-vl:2b (~1.5 GB) fits comfortably on Jetson Orin Nano Super (8 GB).
+# Use qwen2.5vl:3b if more memory is available.
+_VISION_MODEL = "qwen2-vl:2b"
 
 
 # ── State machine ──────────────────────────────────────────────────────────────

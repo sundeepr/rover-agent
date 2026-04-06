@@ -259,7 +259,7 @@ def main():
         if args.strategy == "clip_omnivla":
             log.info("Prompt model  : qwen3:4b (CLIP prompt generation)")
         if args.strategy == "qwen_omnivla":
-            log.info("Vision model  : qwen2.5vl:3b (path detection)")
+            log.info("Vision model  : qwen2-vl:2b (path detection)")
     else:
         log.info("Model         : %s", gemini_client.MODEL)
     log.info("Web server    : %s", args.web_server)

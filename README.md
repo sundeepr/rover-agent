@@ -9,7 +9,7 @@ An autonomous rover navigation system that uses a camera, a vision model, and a 
 | `gemini` (default) | Google Gemini vision API | Gemini waypoints | Rule-based missions with natural-language prompt |
 | `omnivla` | — | OmniVLA-edge | Open-ended language goals |
 | `clip_omnivla` | CLIP (prompts from Qwen3) | OmniVLA-edge | Fast path detection; Qwen generates CLIP prompts from goal at startup |
-| `qwen_omnivla` | Qwen2.5-VL via Ollama | OmniVLA-edge | No CLIP needed; Qwen directly answers "is the path visible?" |
+| `qwen_omnivla` | Qwen2-VL via Ollama | OmniVLA-edge | No CLIP needed; Qwen directly answers "is the path visible?" |
 
 ---
 
@@ -68,11 +68,12 @@ ollama list
 # Qwen3 4B — used by clip_omnivla to generate CLIP prompts at startup
 ollama pull qwen3:4b
 
-# Qwen2.5-VL 3B — used by qwen_omnivla for per-frame path detection
-ollama pull qwen2.5vl:3b
+# Qwen2-VL 2B — used by qwen_omnivla for per-frame path detection
+# (~1.5 GB, fits on Jetson Orin Nano Super 8 GB)
+ollama pull qwen2-vl:2b
 ```
 
-Download sizes: `qwen3:4b` ≈ 2.6 GB, `qwen2.5vl:3b` ≈ 2.3 GB.
+Download sizes: `qwen3:4b` ≈ 2.6 GB, `qwen2-vl:2b` ≈ 1.5 GB.
 
 **Memory on Jetson Orin Nano Super (8 GB unified):**
 
@@ -80,7 +81,7 @@ Download sizes: `qwen3:4b` ≈ 2.6 GB, `qwen2.5vl:3b` ≈ 2.3 GB.
 |-----------|--------|
 | OS + processes | ~1.5 GB |
 | Qwen3:4b (startup only, then unloaded) | ~2.6 GB |
-| Qwen2.5-VL:3b (`qwen_omnivla` runtime) | ~2.3 GB |
+| Qwen2-VL:2b (`qwen_omnivla` runtime) | ~1.5 GB |
 | CLIP ViT-B/32 | ~0.6 GB |
 | OmniVLA-edge | ~0.3 GB |
 
