@@ -53,6 +53,9 @@ class AgentState:
     # The rover is stopped immediately when this is set via the web UI.
     paused: threading.Event = field(default_factory=threading.Event)
 
+    # Optional SessionRecorder — set by rover_agent.main(); None disables recording
+    recorder: object = None
+
 
 class NavigationStrategy(ABC):
     """

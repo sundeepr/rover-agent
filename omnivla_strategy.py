@@ -412,6 +412,19 @@ class OmniVLAStrategy(NavigationStrategy):
                     "description": top["description"],
                 })
 
+        if state.recorder:
+            state.recorder.write_decision({
+                "timestamp":        time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "step":             step,
+                "phase":            phase,
+                "elapsed_s":        round(elapsed, 3),
+                "strategy":         self.name,
+                "vel_mm_s":         vel,
+                "radius_mm":        radius if radius != 0x8000 else None,
+                "waypoints_metric": waypoints[:, :2].tolist(),
+                "result":           result,
+            })
+
         # Send drive command — skip if paused (pause handler already sent stop)
         if rover_ctrl and not state.paused.is_set():
             try:

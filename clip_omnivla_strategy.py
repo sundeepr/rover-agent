@@ -487,6 +487,21 @@ class ClipOmniVLAStrategy(NavigationStrategy):
                     "description": top["description"],
                 })
 
+        if state.recorder:
+            state.recorder.write_decision({
+                "timestamp":  time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "step":       step,
+                "phase":      phase,
+                "elapsed_s":  round(elapsed, 3),
+                "strategy":   self.name,
+                "path_score": round(path_score, 4),
+                "pos_sim":    round(pos_sim, 4),
+                "neg_sim":    round(neg_sim, 4),
+                "vel_mm_s":   vel,
+                "radius_mm":  radius if radius != 0x8000 else None,
+                "result":     result,
+            })
+
 
 # ── HUD annotation ────────────────────────────────────────────────────────────
 

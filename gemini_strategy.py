@@ -169,7 +169,18 @@ class GeminiStrategy(NavigationStrategy):
                      wp.get("probability", 0) * 100,
                      wp.get("description", ""))
 
-        # 7. Update shared state
+        # 7. Record decision
+        if state.recorder:
+            state.recorder.write_decision({
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "step":      step,
+                "phase":     phase,
+                "elapsed_s": round(elapsed, 3),
+                "strategy":  self.name,
+                "result":    result,
+            })
+
+        # 8. Update shared state
         with state.result_lock:
             state.latest_result = result
             state.llm_query_start = 0.0
@@ -181,14 +192,14 @@ class GeminiStrategy(NavigationStrategy):
                     "description": top.get("description", ""),
                 })
 
-        # 8. Drive rover toward rank-1 waypoint — skip if paused
+        # 9. Drive rover toward rank-1 waypoint — skip if paused
         if rover_ctrl and status == "in_progress" and top and not state.paused.is_set():
             try:
                 rover_ctrl.navigate_to_waypoint(top, nav_mode)
             except Exception as e:
                 log.error("Rover drive error: %s", e, exc_info=True)
 
-        # 9. Phase transitions
+        # 10. Phase transitions
         if status == "phase1_complete":
             with self._buffer_lock:
                 self._frame_buffer.clear()

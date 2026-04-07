@@ -139,6 +139,12 @@ def agent_loop(
         with state.raw_lock:
             state.raw_frame = frame.copy()
 
+        # Record raw + latest annotated frame at camera rate
+        if state.recorder:
+            with state.llm_lock:
+                llm = state.llm_frame.copy() if state.llm_frame is not None else None
+            state.recorder.write_frames(frame, llm)
+
         now = time.time()
 
         # Fire strategy query in a separate thread so camera loop never blocks
@@ -269,8 +275,10 @@ def main():
     else:
         log.info("Rover         : disabled (pass --roomba-port or --atlas-port to enable)")
 
-    state    = AgentState()
-    strategy = _build_strategy(args.strategy, args)
+    from session_recorder import SessionRecorder
+    state          = AgentState()
+    state.recorder = SessionRecorder()
+    strategy       = _build_strategy(args.strategy, args)
 
     # Open rover connection on the main thread so stop() is guaranteed to
     # run on shutdown — daemon threads are killed hard and cannot clean up.
@@ -314,6 +322,8 @@ def main():
         log.info("Shutting down — stopping rover")
         if rover_ctx:
             rover_ctx.__exit__(None, None, None)  # calls rover_ctrl.stop()
+        if state.recorder:
+            state.recorder.close()
 
 
 if __name__ == "__main__":
