@@ -68,12 +68,6 @@ _ALPHA          = 0.5                 # overlay blend opacity
 _CROP_BGR  = np.array((0,   255,  57), dtype=np.uint8)   # neon green
 _SOIL_BGR  = np.array((19,   69, 139), dtype=np.uint8)   # brown
 
-_ROW_COLOURS = [
-    (0,   200,  50), (0,   165, 255), (220,   0, 220), (0,   220, 220),
-    (50,   50, 255), (0,   255, 180), (255, 200,   0), (100,   0, 255),
-    (0,   180, 180), (255,  50, 180),
-]
-
 # CLIP threshold floor (from clip_omnivla_strategy)
 _MIN_PATH_POS_SIM = 0.18
 
@@ -157,21 +151,11 @@ def hough_annotate(frame_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray, list]
     canvas = _strip_centre_canvas(mask)
     lines  = _hough_filter(canvas)
 
-    # Vegetation colour overlay
+    # Vegetation colour overlay only — no row lines drawn
     overlay = frame_bgr.copy()
     overlay[mask == 0] = _SOIL_BGR
     overlay[mask >  0] = _CROP_BGR
     annotated = cv2.addWeighted(frame_bgr, 1 - _ALPHA, overlay, _ALPHA, 0)
-
-    # Row lines
-    for idx, (rho_v, theta) in enumerate(lines):
-        colour  = _ROW_COLOURS[idx % len(_ROW_COLOURS)]
-        cos_t, sin_t = np.cos(theta), np.sin(theta)
-        x0 = int(cos_t * rho_v + 1000 * (-sin_t))
-        y0 = int(sin_t * rho_v + 1000 * ( cos_t))
-        x1 = int(cos_t * rho_v - 1000 * (-sin_t))
-        y1 = int(sin_t * rho_v - 1000 * ( cos_t))
-        cv2.line(annotated, (x0, y0), (x1, y1), colour, 2, cv2.LINE_AA)
 
     return annotated, mask, lines
 
