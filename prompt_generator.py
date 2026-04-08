@@ -26,10 +26,11 @@ _SYSTEM = (
     "Positive prompts describe camera images where the goal IS visible. "
     "Negative prompts describe images where it is NOT visible. "
     "Keep each prompt under 10 words. "
-    "Use indoor vocabulary (floor, tape, strip, room). "
+    "Use farm navigation vocabulary (crop rows, soil path, between plants, furrow lines, row gaps, vegetation boundaries). "
+    "Avoid indoor terms. "
     "Respond with valid JSON only."
 )
-
+# "Use indoor vocabulary (floor, tape, strip, room). "
 _USER = (
     "Navigation goal: {goal}\n\n"
     "Generate 3–4 positive and 3–4 negative CLIP image description prompts.\n\n"
