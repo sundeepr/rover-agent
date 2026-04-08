@@ -199,6 +199,12 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
                                    server_addr=args.omnivla_server,
                                    path_threshold=args.path_threshold,
                                    ollama_url=args.ollama_server)
+    if name == "hough_crop_row":
+        from hough_crop_row_strategy import HoughCropRowStrategy
+        return HoughCropRowStrategy(goal=args.goal, goal_image_path=args.goal_image,
+                                    server_addr=args.omnivla_server,
+                                    path_threshold=args.path_threshold,
+                                    ollama_url=args.ollama_server)
     raise ValueError(f"Unknown strategy: {name!r}")
 
 
@@ -224,7 +230,7 @@ def main():
     parser.add_argument("--dry-run",     action="store_true",
                         help="Log rover commands but do not send them")
     parser.add_argument("--strategy",    type=str,   default="gemini",
-                        choices=["gemini", "omnivla", "clip_omnivla", "qwen_omnivla"],
+                        choices=["gemini", "omnivla", "clip_omnivla", "qwen_omnivla", "hough_crop_row"],
                         help="Navigation strategy (default: gemini)")
     parser.add_argument("--goal",        type=str,   default="navigate forward",
                         help="Language goal for omnivla strategy")
