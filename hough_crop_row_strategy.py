@@ -79,10 +79,17 @@ def _vegetation_mask(frame_bgr: np.ndarray) -> np.ndarray:
     g = frame_bgr[:, :, 1].astype(np.float32)
     r = frame_bgr[:, :, 2].astype(np.float32)
     exg = 2.0 * g - r - b
-    lo, hi = exg.min(), exg.max()
-    if hi == lo:
+
+    # Clip negative ExG to zero before normalising.
+    # Negative ExG means "not green" — soil and sky both become 0, so Otsu
+    # separates vegetation (positive ExG) from everything else, not sky from
+    # (soil + plants) as happens when the full signed range is normalised.
+    exg = np.clip(exg, 0.0, None)
+    hi = exg.max()
+    if hi == 0.0:
         return np.zeros(exg.shape, dtype=np.uint8)
-    exg_u8 = ((exg - lo) / (hi - lo) * 255).astype(np.uint8)
+    exg_u8 = (exg / hi * 255).astype(np.uint8)
+
     _, mask = cv2.threshold(exg_u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k, iterations=1)
