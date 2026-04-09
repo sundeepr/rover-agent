@@ -38,38 +38,41 @@ _WATCHDOG_S = 0.3
 def _joy_to_drive(fwd: int, turn: int, max_vel: int) -> tuple[int, int]:
     """Convert joystick axes to (velocity mm/s, radius mm) for drive_raw().
 
-    fwd  ∈ [-100, 100]  — forward/back
-    turn ∈ [-100, 100]  — right is positive, left is negative
+    Uses the same kinematic formula as OmniVLA's _waypoint_to_drive():
+        radius = velocity / angular_rate
 
-    Roomba OI / Atlas drive_raw conventions:
-      radius = 0x8000 → straight
-      radius = -1     → spin CW  (right in place)
-      radius =  1     → spin CCW (left  in place)
-      radius negative → arc right;  positive → arc left
+    fwd  ∈ [-100, 100]  — forward/back  (maps to 0..max_vel mm/s)
+    turn ∈ [-100, 100]  — right positive, left negative
+                          (maps to ±MAX_ANG_RAD_S rad/s)
 
-    Arc formula uses division so small deflections give gentle large-radius arcs
-    and large deflections give tight small-radius arcs — natural joystick feel.
-    Clamped to 16-bit signed range so Roomba OI packs it correctly.
-
-      turn= 10 → radius ≈ -20000 (very gentle right arc)
-      turn= 25 → radius ≈  -8000 (gentle right arc)
-      turn= 50 → radius ≈  -4000 (moderate right arc)
-      turn=100 → radius =  -2000 (tight right arc)
+    Roomba OI radius conventions:
+      0x8000 → straight
+      -1     → spin CW  (right in place)
+       1     → spin CCW (left  in place)
+      negative → arc right;  positive → arc left
     """
+    import math
+    MAX_ANG_RAD_S = 0.5   # mirrors omnivla_strategy.MAX_ANG_RAD_S
+
+    vel_mm_s  = fwd * max_vel // 100
+
     if turn == 0:
-        return fwd * max_vel // 100, 0x8000
+        return vel_mm_s, 0x8000
 
-    if fwd == 0:
-        # Spin in place — speed proportional to how far the stick is pushed
-        vel    = abs(turn) * max_vel // 100
-        radius = -1 if turn > 0 else 1   # right=CW=-1, left=CCW=1
-        return vel, radius
+    ang_rad_s = (turn / 100.0) * MAX_ANG_RAD_S   # rad/s, sign: right=positive
 
-    # Arc: -2000 / (turn/100) = -200000 / turn
-    # Clamp to int16 range so the Roomba OI 2-byte field never overflows
-    vel    = fwd * max_vel // 100
-    radius = max(-32767, min(32767, int(-200000 / turn)))
-    return vel, radius
+    if vel_mm_s == 0:
+        # Spin in place
+        spin_vel = int(abs(ang_rad_s) / MAX_ANG_RAD_S * max_vel)
+        radius   = -1 if turn > 0 else 1
+        return spin_vel, radius
+
+    # radius = v / w  (same as OmniVLA); negate because Roomba: negative=right
+    radius = int(math.copysign(
+        min(32767, abs(vel_mm_s / ang_rad_s)),
+        -ang_rad_s
+    ))
+    return vel_mm_s, radius
 
 
 class ControlServer:
