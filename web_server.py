@@ -391,6 +391,7 @@ _HTML = """<!DOCTYPE html>
     // ── Joystick ──────────────────────────────────────────────────────────
     (function () {
       const BASE_R = 48, KNOB_R = 18, DEAD = 7;
+      const AXIS_DEAD = 12;   // per-axis dead zone (%) — suppresses cross-axis noise
       const base   = document.getElementById('joystick-base');
       const knob   = document.getElementById('joystick-knob');
       const readout = document.getElementById('joystick-readout');
@@ -398,7 +399,6 @@ _HTML = """<!DOCTYPE html>
       const joyStatus = document.getElementById('joy-status');
       let dragging = false, rect;
       let _joyFwd = 0, _joyTurn = 0, _joyTimer = null;
-      let _joyWasActive = false;   // tracks transition into dead-zone
 
       function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
 
@@ -415,21 +415,19 @@ _HTML = """<!DOCTYPE html>
           readout.textContent = 'joystick';
           joyStatus.textContent = '—';
           joyStatus.style.color = '#555';
-          _joyWasActive = false;
           return;
         }
-        _joyFwd  = clamp(Math.round(-cy / (BASE_R - KNOB_R) * 100), -100, 100);
-        _joyTurn = clamp(Math.round( cx / (BASE_R - KNOB_R) * 100), -100, 100);
-        const fwdS  = _joyFwd  >= 0 ? `FWD ${_joyFwd}%`   : `REV ${-_joyFwd}%`;
-        const turnS = _joyTurn >= 0 ? `R ${_joyTurn}%`     : `L ${-_joyTurn}%`;
-        readout.textContent = `${fwdS} ${turnS}`;
-        joyStatus.textContent = `● manual  ${fwdS}  ${turnS}`;
+        let rawFwd  = clamp(Math.round(-cy / (BASE_R - KNOB_R) * 100), -100, 100);
+        let rawTurn = clamp(Math.round( cx / (BASE_R - KNOB_R) * 100), -100, 100);
+        // Per-axis dead zone: suppress small cross-axis noise.
+        // e.g. pushing forward with a slight right offset won't trigger a turn.
+        _joyFwd  = Math.abs(rawFwd)  < AXIS_DEAD ? 0 : rawFwd;
+        _joyTurn = Math.abs(rawTurn) < AXIS_DEAD ? 0 : rawTurn;
+        const fwdS  = _joyFwd  > 0 ? `FWD ${_joyFwd}%`  : _joyFwd  < 0 ? `REV ${-_joyFwd}%`  : '';
+        const turnS = _joyTurn > 0 ? `R ${_joyTurn}%`   : _joyTurn < 0 ? `L ${-_joyTurn}%`   : '';
+        readout.textContent = [fwdS, turnS].filter(Boolean).join('  ') || 'holding';
+        joyStatus.textContent = `● manual  ${[fwdS, turnS].filter(Boolean).join('  ')}`;
         joyStatus.style.color = '#4caf50';
-        // Send immediately on first non-zero position (no waiting for timer)
-        if (!_joyWasActive) {
-          _joyWasActive = true;
-          sendMovement(_joyFwd, _joyTurn);
-        }
       }
 
       function centre() {
@@ -438,7 +436,7 @@ _HTML = """<!DOCTYPE html>
         readout.textContent = 'joystick';
         joyStatus.textContent = '—';
         joyStatus.style.color = '#555';
-        _joyFwd = 0; _joyTurn = 0; _joyWasActive = false;
+        _joyFwd = 0; _joyTurn = 0;
       }
 
       function startDrag(e) {

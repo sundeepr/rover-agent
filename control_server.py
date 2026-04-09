@@ -46,23 +46,29 @@ def _joy_to_drive(fwd: int, turn: int, max_vel: int) -> tuple[int, int]:
       radius = -1     → spin CW  (right in place)
       radius =  1     → spin CCW (left  in place)
       radius negative → arc right;  positive → arc left
+
+    Arc formula uses division so small deflections give gentle large-radius arcs
+    and large deflections give tight small-radius arcs — natural joystick feel.
+    Clamped to 16-bit signed range so Roomba OI packs it correctly.
+
+      turn= 10 → radius ≈ -20000 (very gentle right arc)
+      turn= 25 → radius ≈  -8000 (gentle right arc)
+      turn= 50 → radius ≈  -4000 (moderate right arc)
+      turn=100 → radius =  -2000 (tight right arc)
     """
     if turn == 0:
-        # Straight forward/back
         return fwd * max_vel // 100, 0x8000
 
     if fwd == 0:
-        # Pure rotation — spin in place, speed proportional to turn amount
+        # Spin in place — speed proportional to how far the stick is pushed
         vel    = abs(turn) * max_vel // 100
         radius = -1 if turn > 0 else 1   # right=CW=-1, left=CCW=1
         return vel, radius
 
-    # Arc: linear radius mapping keeps gentle turns gentle.
-    # turn=100 → radius=-2000 (tight right)
-    # turn=10  → radius= -200 (gentle right arc)
-    # (old formula used division which gave -20000 for turn=10 — always tight)
+    # Arc: -2000 / (turn/100) = -200000 / turn
+    # Clamp to int16 range so the Roomba OI 2-byte field never overflows
     vel    = fwd * max_vel // 100
-    radius = int(-2000 * turn / 100)
+    radius = max(-32767, min(32767, int(-200000 / turn)))
     return vel, radius
 
 
