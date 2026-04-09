@@ -40,14 +40,9 @@ _HTML = """<!DOCTYPE html>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: #0f0f0f; color: #e0e0e0; font-family: monospace;
            display: flex; flex-direction: column; height: 100vh; }
-    header { padding: 10px 16px; background: #1a1a1a; border-bottom: 1px solid #333;
+    header { padding: 8px 16px; background: #1a1a1a; border-bottom: 1px solid #333;
              font-size: 1.1em; letter-spacing: 0.05em; color: #7ecfff; flex-shrink: 0;
              display: flex; align-items: center; gap: 16px; }
-    #pause-btn { padding: 5px 18px; border: none; border-radius: 4px; cursor: pointer;
-                 font-family: monospace; font-size: 0.9em; font-weight: bold;
-                 background: #c0392b; color: #fff; transition: background 0.15s; }
-    #pause-btn:hover { filter: brightness(1.2); }
-    #pause-btn.paused { background: #27ae60; }
     #agent-indicator { font-size: 0.75em; margin-left: auto; display: flex;
                        align-items: center; gap: 6px; }
     #agent-dot { font-size: 1.1em; }
@@ -55,32 +50,69 @@ _HTML = """<!DOCTYPE html>
     #agent-dot.disconnected { color: #f44336; }
     .main { display: flex; flex: 1; overflow: hidden; }
 
-    /* Video column */
-    .video-column { flex: 1; display: flex; flex-direction: column; background: #000;
-                    gap: 2px; overflow: hidden; position: relative; }
+    /* Content area */
+    .content-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 
-    /* Joystick overlay */
-    #joystick-wrap { position: absolute; bottom: 24px; right: 24px;
-                     display: flex; flex-direction: column; align-items: center; gap: 6px;
-                     user-select: none; pointer-events: none; }
-    #joystick-base { width: 120px; height: 120px; border-radius: 50%;
-                     background: rgba(255,255,255,0.07); border: 2px solid rgba(255,255,255,0.18);
-                     position: relative; pointer-events: all; cursor: default; }
-    #joystick-knob { width: 44px; height: 44px; border-radius: 50%;
-                     background: rgba(200,200,200,0.25); border: 2px solid rgba(255,255,255,0.5);
-                     position: absolute; top: 50%; left: 50%;
-                     transform: translate(-50%, -50%);
-                     transition: background 0.1s;
-                     pointer-events: all; cursor: grab; }
-    #joystick-knob.active { cursor: grabbing; }
-    #joystick-knob.moving { background: rgba(76,175,80,0.55); }
-    #joystick-readout { font-size: 0.65em; color: rgba(255,255,255,0.5);
-                        pointer-events: none; text-align: center; letter-spacing: 0.05em; }
+    /* Videos side by side */
+    .videos-row { flex: 1; display: flex; flex-direction: row; background: #000;
+                  gap: 2px; overflow: hidden; min-height: 0; }
     .video-box { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
     .video-box .label { background: #111; color: #555; font-size: 0.68em;
                         text-transform: uppercase; letter-spacing: 0.1em;
                         padding: 4px 10px; flex-shrink: 0; }
     .video-box img { flex: 1; width: 100%; object-fit: contain; display: block; min-height: 0; }
+
+    /* Bottom bar */
+    .bottom-bar { height: 190px; display: flex; flex-direction: row; flex-shrink: 0;
+                  background: #111; border-top: 1px solid #2a2a2a; }
+
+    /* Chat */
+    .chat-section { flex: 1; display: flex; flex-direction: column;
+                    padding: 8px 12px; gap: 6px; overflow: hidden; min-width: 0; }
+    .chat-history { flex: 1; overflow-y: auto; display: flex; flex-direction: column;
+                    gap: 4px; justify-content: flex-end; }
+    .chat-msg { font-size: 0.78em; padding: 4px 10px; border-radius: 4px;
+                max-width: 85%; word-break: break-word; line-height: 1.4; }
+    .chat-msg.user  { align-self: flex-end; background: #1a3a5c; color: #7ecfff; }
+    .chat-msg.agent { align-self: flex-start; background: #1e2a1e; color: #4caf50; }
+    .chat-msg.err   { align-self: flex-start; background: #2a1a1a; color: #f44336; }
+    .chat-input-row { display: flex; gap: 6px; flex-shrink: 0; }
+    .chat-input-row input { flex: 1; background: #0a0a0a; border: 1px solid #333;
+                             color: #e0e0e0; padding: 7px 10px; font-family: monospace;
+                             font-size: 0.85em; border-radius: 4px; outline: none; }
+    .chat-input-row input:focus { border-color: #7ecfff; }
+    .chat-input-row input::placeholder { color: #444; }
+    .chat-input-row button { padding: 7px 16px; background: #1a3a5c; border: none;
+                              color: #7ecfff; font-family: monospace; font-size: 0.85em;
+                              border-radius: 4px; cursor: pointer; white-space: nowrap; }
+    .chat-input-row button:hover { background: #234d7a; }
+
+    /* Controls: joystick + pause */
+    .controls-section { width: 190px; display: flex; flex-direction: column;
+                        align-items: center; justify-content: center; gap: 10px;
+                        border-left: 1px solid #2a2a2a; flex-shrink: 0; padding: 10px 8px; }
+    #pause-btn { padding: 6px 0; width: 110px; border: none; border-radius: 4px;
+                 cursor: pointer; font-family: monospace; font-size: 0.82em;
+                 font-weight: bold; background: #c0392b; color: #fff;
+                 transition: background 0.15s; }
+    #pause-btn:hover { filter: brightness(1.2); }
+    #pause-btn.paused { background: #27ae60; }
+
+    /* Joystick */
+    #joystick-wrap { display: flex; flex-direction: column; align-items: center;
+                     gap: 4px; user-select: none; }
+    #joystick-base { width: 100px; height: 100px; border-radius: 50%;
+                     background: rgba(255,255,255,0.07); border: 2px solid rgba(255,255,255,0.18);
+                     position: relative; cursor: default; }
+    #joystick-knob { width: 36px; height: 36px; border-radius: 50%;
+                     background: rgba(200,200,200,0.25); border: 2px solid rgba(255,255,255,0.5);
+                     position: absolute; top: 50%; left: 50%;
+                     transform: translate(-50%, -50%);
+                     transition: background 0.1s; cursor: grab; }
+    #joystick-knob.active { cursor: grabbing; }
+    #joystick-knob.moving { background: rgba(76,175,80,0.55); }
+    #joystick-readout { font-size: 0.6em; color: rgba(255,255,255,0.4);
+                        text-align: center; letter-spacing: 0.04em; }
 
     /* Status panel */
     .status-panel { width: 300px; background: #141414; border-left: 1px solid #2a2a2a;
@@ -94,43 +126,57 @@ _HTML = """<!DOCTYPE html>
     .status-ok   { color: #4caf50; }
     .status-done { color: #2196f3; }
     .status-err  { color: #f44336; }
-
     .history { flex: 1; overflow-y: auto; padding: 8px 12px; }
     .history-item { font-size: 0.78em; color: #666; padding: 3px 0;
                     border-bottom: 1px solid #1a1a1a; }
     .history-item span { color: #999; }
     .log-link { display: block; font-size: 0.75em; padding: 4px 0;
-                border-bottom: 1px solid #1a1a1a; color: #7ecfff;
-                text-decoration: none; }
+                border-bottom: 1px solid #1a1a1a; color: #7ecfff; text-decoration: none; }
     .log-link:hover { color: #fff; }
   </style>
 </head>
 <body>
   <header>
     <span>&#x25B6; Rover Navigation Agent</span>
-    <button id="pause-btn" onclick="togglePause()">&#x23F8; Pause</button>
     <div id="agent-indicator">
       <span id="agent-dot" class="disconnected">&#x25CF;</span>
       <span id="agent-label">Agent disconnected</span>
     </div>
   </header>
-  <div class="main">
 
-    <div class="video-column">
-      <div class="video-box">
-        <div class="label">&#x1F534; Live camera</div>
-        <img src="/video/realtime" alt="live feed">
-      </div>
-      <div class="video-box">
-        <div class="label">&#x1F9E0; Last query — with waypoints</div>
-        <img src="/video/llm" alt="LLM frame">
-      </div>
-      <div id="joystick-wrap">
-        <div id="joystick-base">
-          <div id="joystick-knob"></div>
+  <div class="main">
+    <div class="content-area">
+
+      <div class="videos-row">
+        <div class="video-box">
+          <div class="label">&#x1F534; Live camera</div>
+          <img src="/video/realtime" alt="live feed">
         </div>
-        <div id="joystick-readout">joystick</div>
+        <div class="video-box">
+          <div class="label">&#x1F9E0; Last query — with waypoints</div>
+          <img src="/video/llm" alt="LLM frame">
+        </div>
       </div>
+
+      <div class="bottom-bar">
+        <div class="chat-section">
+          <div class="chat-history" id="chat-history"></div>
+          <div class="chat-input-row">
+            <input type="text" id="chat-input"
+                   placeholder="Set goal, e.g. Follow the dirt path…"
+                   onkeydown="if(event.key==='Enter') sendChat()">
+            <button onclick="sendChat()">&#x27A4; Send</button>
+          </div>
+        </div>
+        <div class="controls-section">
+          <div id="joystick-wrap">
+            <div id="joystick-base"><div id="joystick-knob"></div></div>
+            <div id="joystick-readout">joystick</div>
+          </div>
+          <button id="pause-btn" onclick="togglePause()">&#x23F8; Pause</button>
+        </div>
+      </div>
+
     </div>
 
     <div class="status-panel">
@@ -158,7 +204,6 @@ _HTML = """<!DOCTYPE html>
       <h2 style="margin-top:4px">Logs</h2>
       <div id="log-list" style="padding:8px 12px; overflow-y:auto; max-height:120px;"></div>
     </div>
-
   </div>
 
   <script>
@@ -170,20 +215,15 @@ _HTML = """<!DOCTYPE html>
       path_lost:        'status-err',
       initializing:     '',
     };
-    const navModeColors = {
-      aligning:  '#ffeb3b',
-      following: '#4caf50',
-    };
+    const navModeColors = { aligning: '#ffeb3b', following: '#4caf50' };
 
-    let _queryStart = 0;
-    let _lastResponseS = 0;
-    let _timerInterval = null;
+    let _queryStart = 0, _lastResponseS = 0, _timerInterval = null;
+    let _paused = false;
 
     function updateTimer() {
       const el = document.getElementById('llm-timer');
       if (_queryStart > 0) {
-        const elapsed = (Date.now() / 1000 - _queryStart).toFixed(1);
-        el.textContent = '⏱ querying... ' + elapsed + 's';
+        el.textContent = '⏱ querying... ' + (Date.now()/1000 - _queryStart).toFixed(1) + 's';
         el.style.color = '#ffeb3b';
       } else if (_lastResponseS > 0) {
         el.textContent = '✓ responded in ' + _lastResponseS.toFixed(2) + 's';
@@ -196,44 +236,71 @@ _HTML = """<!DOCTYPE html>
         const r = await fetch('/logs');
         const files = await r.json();
         document.getElementById('log-list').innerHTML = files.length
-          ? files.map(f =>
-              `<a class="log-link" href="/logs/${encodeURIComponent(f)}" download="${f}">&#x2B07; ${f}</a>`
-            ).join('')
+          ? files.map(f => `<a class="log-link" href="/logs/${encodeURIComponent(f)}" download="${f}">&#x2B07; ${f}</a>`).join('')
           : '<span style="font-size:0.75em;color:#555">No logs yet</span>';
       } catch(_) {}
     }
     loadLogs();
     setInterval(loadLogs, 10000);
 
+    // ── Chat ──────────────────────────────────────────────────────────────
+    function addChatMsg(text, type) {
+      const el = document.createElement('div');
+      el.className = 'chat-msg ' + type;
+      el.textContent = text;
+      const hist = document.getElementById('chat-history');
+      hist.appendChild(el);
+      hist.scrollTop = hist.scrollHeight;
+    }
+
+    async function chat(payload) {
+      const r = await fetch('/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      return r.json();
+    }
+
+    async function sendChat() {
+      const input = document.getElementById('chat-input');
+      const text  = input.value.trim();
+      if (!text) return;
+      input.value = '';
+      addChatMsg(text, 'user');
+      try {
+        const d = await chat({ type: 'goal', text });
+        addChatMsg(d.message ?? 'Goal set', 'agent');
+      } catch(e) {
+        addChatMsg('Error: could not reach server', 'err');
+      }
+    }
+
+    // ── Pause / Resume ────────────────────────────────────────────────────
     async function togglePause() {
-      const r = await fetch('/pause', { method: 'POST' });
-      const d = await r.json();
-      updatePauseButton(d.paused);
+      const action = _paused ? 'resume' : 'pause';
+      try {
+        const d = await chat({ type: 'control', action });
+        _paused = d.paused ?? (_paused);
+        updatePauseButton(_paused);
+      } catch(_) {}
     }
 
     function updatePauseButton(paused) {
+      _paused = paused;
       const btn = document.getElementById('pause-btn');
-      if (paused) {
-        btn.textContent = '▶ Resume';
-        btn.classList.add('paused');
-      } else {
-        btn.textContent = '⏸ Pause';
-        btn.classList.remove('paused');
-      }
+      btn.textContent = paused ? '▶ Resume' : '⏸ Pause';
+      btn.classList.toggle('paused', paused);
     }
 
     function updateAgentIndicator(connected) {
-      const dot   = document.getElementById('agent-dot');
-      const label = document.getElementById('agent-label');
-      if (connected) {
-        dot.className = 'connected';
-        label.textContent = 'Agent connected';
-      } else {
-        dot.className = 'disconnected';
-        label.textContent = 'Agent disconnected';
-      }
+      const dot = document.getElementById('agent-dot');
+      dot.className = connected ? 'connected' : 'disconnected';
+      document.getElementById('agent-label').textContent =
+        connected ? 'Agent connected' : 'Agent disconnected';
     }
 
+    // ── Status poll ───────────────────────────────────────────────────────
     async function poll() {
       try {
         const r = await fetch('/status');
@@ -249,8 +316,8 @@ _HTML = """<!DOCTYPE html>
         document.getElementById('reasoning').textContent  = d.reasoning ?? '—';
 
         const statusEl = document.getElementById('status');
-        statusEl.textContent  = d.goal_status ?? '—';
-        statusEl.className    = 'value ' + (statusColors[d.goal_status] ?? '');
+        statusEl.textContent = d.goal_status ?? '—';
+        statusEl.className   = 'value ' + (statusColors[d.goal_status] ?? '');
 
         const navEl = document.getElementById('nav-mode');
         navEl.textContent = d.navigation_mode ?? '—';
@@ -260,43 +327,37 @@ _HTML = """<!DOCTYPE html>
         document.getElementById('waypoints').innerHTML = wps.length
           ? wps.map(w =>
               `<div style="margin-bottom:4px">
-                <span style="color:${['#4caf50','#ffeb3b','#ff9800'][w.rank-1] ?? '#fff'}">
+                <span style="color:${['#4caf50','#ffeb3b','#ff9800'][w.rank-1]??'#fff'}">
                   #${w.rank} ${(w.probability*100).toFixed(0)}%
-                </span>
-                (${w.x}, ${w.y}) ${w.description ?? ''}
+                </span> (${w.x},${w.y}) ${w.description??''}
               </div>`).join('')
           : 'none';
 
-        const hist = document.getElementById('history');
-        hist.innerHTML = (d.history ?? []).slice().reverse()
-          .map(h => `<div class="history-item"><span>${h}</span></div>`)
-          .join('');
+        document.getElementById('history').innerHTML =
+          (d.history ?? []).slice().reverse()
+            .map(h => `<div class="history-item"><span>${h}</span></div>`).join('');
 
-        _queryStart    = d.llm_query_start ?? 0;
-        _lastResponseS = d.llm_response_s  ?? 0;
-        if (_queryStart > 0 && !_timerInterval) {
+        _queryStart = d.llm_query_start ?? 0;
+        _lastResponseS = d.llm_response_s ?? 0;
+        if (_queryStart > 0 && !_timerInterval)
           _timerInterval = setInterval(updateTimer, 100);
-        } else if (_queryStart === 0 && _timerInterval) {
-          clearInterval(_timerInterval);
-          _timerInterval = null;
-          updateTimer();
+        else if (_queryStart === 0 && _timerInterval) {
+          clearInterval(_timerInterval); _timerInterval = null; updateTimer();
         }
       } catch(_) {}
       setTimeout(poll, 1000);
     }
     poll();
 
-    // ── Joystick ───────────────────────────────────────────────────────────
+    // ── Joystick ──────────────────────────────────────────────────────────
     (function () {
-      const BASE_R  = 58;   // usable radius (half of 120px base)
-      const KNOB_R  = 22;   // half of knob width
-      const DEAD    = 8;    // dead-zone radius in px
-      const base    = document.getElementById('joystick-base');
-      const knob    = document.getElementById('joystick-knob');
+      const BASE_R = 48, KNOB_R = 18, DEAD = 7;
+      const base   = document.getElementById('joystick-base');
+      const knob   = document.getElementById('joystick-knob');
       const readout = document.getElementById('joystick-readout');
 
-      let dragging = false;
-      let rect;
+      let dragging = false, rect;
+      let _joyFwd = 0, _joyTurn = 0, _joyTimer = null;
 
       function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
 
@@ -304,23 +365,26 @@ _HTML = """<!DOCTYPE html>
         const dist  = Math.hypot(cx, cy);
         const limit = BASE_R - KNOB_R;
         const scale = dist > limit ? limit / dist : 1;
-        const kx = cx * scale;
-        const ky = cy * scale;
-        knob.style.transform = `translate(calc(-50% + ${kx}px), calc(-50% + ${ky}px))`;
+        knob.style.transform =
+          `translate(calc(-50% + ${cx*scale}px), calc(-50% + ${cy*scale}px))`;
         const moving = dist > DEAD;
         knob.classList.toggle('moving', moving);
-        if (!moving) { readout.textContent = 'joystick'; return; }
-        const fwd  = clamp(Math.round(-ky / (BASE_R - KNOB_R) * 100), -100, 100);
-        const turn = clamp(Math.round( kx / (BASE_R - KNOB_R) * 100), -100, 100);
-        const fwdS  = fwd  >= 0 ? `FWD ${fwd}%`    : `REV ${-fwd}%`;
-        const turnS = turn >= 0 ? `RIGHT ${turn}%`  : `LEFT ${-turn}%`;
-        readout.textContent = `${fwdS}  ${turnS}`;
+        if (!moving) {
+          _joyFwd = 0; _joyTurn = 0;
+          readout.textContent = 'joystick'; return;
+        }
+        _joyFwd  = clamp(Math.round(-cy / (BASE_R - KNOB_R) * 100), -100, 100);
+        _joyTurn = clamp(Math.round( cx / (BASE_R - KNOB_R) * 100), -100, 100);
+        const fwdS  = _joyFwd  >= 0 ? `FWD ${_joyFwd}%`   : `REV ${-_joyFwd}%`;
+        const turnS = _joyTurn >= 0 ? `R ${_joyTurn}%`     : `L ${-_joyTurn}%`;
+        readout.textContent = `${fwdS} ${turnS}`;
       }
 
       function centre() {
         knob.style.transform = 'translate(-50%, -50%)';
         knob.classList.remove('moving', 'active');
         readout.textContent = 'joystick';
+        _joyFwd = 0; _joyTurn = 0;
       }
 
       function startDrag(e) {
@@ -328,21 +392,26 @@ _HTML = """<!DOCTYPE html>
         dragging = true;
         rect = base.getBoundingClientRect();
         knob.classList.add('active');
+        // Send at 10 Hz while held
+        _joyTimer = setInterval(() => {
+          if (_joyFwd !== 0 || _joyTurn !== 0)
+            chat({ type: 'movement', fwd: _joyFwd, turn: _joyTurn }).catch(()=>{});
+        }, 100);
       }
 
       function moveDrag(e) {
         if (!dragging) return;
         e.preventDefault();
-        const client = e.touches ? e.touches[0] : e;
-        const cx = client.clientX - rect.left  - BASE_R;
-        const cy = client.clientY - rect.top   - BASE_R;
-        applyPos(cx, cy);
+        const c = e.touches ? e.touches[0] : e;
+        applyPos(c.clientX - rect.left - BASE_R, c.clientY - rect.top - BASE_R);
       }
 
       function endDrag() {
         if (!dragging) return;
         dragging = false;
+        clearInterval(_joyTimer); _joyTimer = null;
         centre();
+        chat({ type: 'movement', fwd: 0, turn: 0 }).catch(()=>{});
       }
 
       knob.addEventListener('mousedown',  startDrag, { passive: false });
@@ -369,6 +438,8 @@ class _ServerState:
         self.status      = {}            # latest JSON from agent
         self.paused      = False
         self.last_push   = 0.0           # epoch seconds
+        self.goal        = ""            # latest goal set via /chat
+        self.movement    = {"fwd": 0, "turn": 0}  # latest joystick from /chat
 
     @property
     def agent_connected(self) -> bool:
@@ -421,6 +492,7 @@ class WebServer:
         app.add_url_rule("/pause",                  "pause",        self._pause,        methods=["POST"])
         app.add_url_rule("/agent/frame",            "agent_frame",  self._agent_frame,  methods=["POST"])
         app.add_url_rule("/agent/status",           "agent_status", self._agent_status, methods=["POST"])
+        app.add_url_rule("/chat",                   "chat",         self._chat,         methods=["POST"])
         app.add_url_rule("/logs",                   "list_logs",    self._list_logs)
         app.add_url_rule("/logs/<path:filename>",   "dl_log",       self._download_log)
 
@@ -465,8 +537,40 @@ class WebServer:
             mimetype="multipart/x-mixed-replace; boundary=frame",
         )
 
+    def _chat(self):
+        """POST /chat — unified command endpoint from the browser UI."""
+        data     = request.get_json(force=True) or {}
+        msg_type = data.get("type")
+
+        if msg_type == "goal":
+            text = data.get("text", "").strip()
+            with self._state.lock:
+                self._state.goal = text
+            log.info("Goal set via chat: %s", text)
+            return jsonify({"ok": True, "message": f"Goal set: {text}"})
+
+        elif msg_type == "movement":
+            fwd  = int(data.get("fwd",  0))
+            turn = int(data.get("turn", 0))
+            with self._state.lock:
+                self._state.movement = {"fwd": fwd, "turn": turn}
+            return jsonify({"ok": True})
+
+        elif msg_type == "control":
+            action = data.get("action")
+            if action in ("pause", "resume"):
+                with self._state.lock:
+                    self._state.paused = (action == "pause")
+                    paused = self._state.paused
+                log.info("Control action: %s", action)
+                return jsonify({"ok": True, "paused": paused,
+                                "message": "Paused" if paused else "Resumed"})
+            return jsonify({"ok": False, "message": f"Unknown action: {action}"}), 400
+
+        return jsonify({"ok": False, "message": f"Unknown type: {msg_type}"}), 400
+
     def _pause(self):
-        """Toggle pause. The agent reads the new state on its next push."""
+        """Toggle pause (legacy endpoint — kept for agent_publisher compatibility)."""
         with self._state.lock:
             self._state.paused = not self._state.paused
             paused = self._state.paused
@@ -475,9 +579,10 @@ class WebServer:
 
     def _status(self):
         with self._state.lock:
-            result              = dict(self._state.status)
-            result["paused"]    = self._state.paused
+            result                    = dict(self._state.status)
+            result["paused"]          = self._state.paused
             result["agent_connected"] = self._state.agent_connected
+            result["goal"]            = self._state.goal
         return jsonify(result)
 
     def _list_logs(self):
