@@ -113,6 +113,8 @@ _HTML = """<!DOCTYPE html>
     #joystick-knob.moving { background: rgba(76,175,80,0.55); }
     #joystick-readout { font-size: 0.6em; color: rgba(255,255,255,0.4);
                         text-align: center; letter-spacing: 0.04em; }
+    #joy-status { font-size: 0.68em; color: #555; padding: 2px 0;
+                  white-space: nowrap; flex-shrink: 0; letter-spacing: 0.03em; }
 
     /* Status panel */
     .status-panel { width: 300px; background: #141414; border-left: 1px solid #2a2a2a;
@@ -161,6 +163,7 @@ _HTML = """<!DOCTYPE html>
       <div class="bottom-bar">
         <div class="chat-section">
           <div class="chat-history" id="chat-history"></div>
+          <div id="joy-status">—</div>
           <div class="chat-input-row">
             <input type="text" id="chat-input"
                    placeholder="Set goal, e.g. Follow the dirt path…"
@@ -281,8 +284,9 @@ _HTML = """<!DOCTYPE html>
       const action = _paused ? 'resume' : 'pause';
       try {
         const d = await chat({ type: 'control', action });
-        _paused = d.paused ?? (_paused);
+        _paused = d.paused ?? _paused;
         updatePauseButton(_paused);
+        addChatMsg(d.message ?? action, 'agent');
       } catch(_) {}
     }
 
@@ -356,6 +360,7 @@ _HTML = """<!DOCTYPE html>
       const knob   = document.getElementById('joystick-knob');
       const readout = document.getElementById('joystick-readout');
 
+      const joyStatus = document.getElementById('joy-status');
       let dragging = false, rect;
       let _joyFwd = 0, _joyTurn = 0, _joyTimer = null;
 
@@ -371,19 +376,26 @@ _HTML = """<!DOCTYPE html>
         knob.classList.toggle('moving', moving);
         if (!moving) {
           _joyFwd = 0; _joyTurn = 0;
-          readout.textContent = 'joystick'; return;
+          readout.textContent = 'joystick';
+          joyStatus.textContent = '—';
+          joyStatus.style.color = '#555';
+          return;
         }
         _joyFwd  = clamp(Math.round(-cy / (BASE_R - KNOB_R) * 100), -100, 100);
         _joyTurn = clamp(Math.round( cx / (BASE_R - KNOB_R) * 100), -100, 100);
         const fwdS  = _joyFwd  >= 0 ? `FWD ${_joyFwd}%`   : `REV ${-_joyFwd}%`;
         const turnS = _joyTurn >= 0 ? `R ${_joyTurn}%`     : `L ${-_joyTurn}%`;
         readout.textContent = `${fwdS} ${turnS}`;
+        joyStatus.textContent = `● manual  ${fwdS}  ${turnS}`;
+        joyStatus.style.color = '#4caf50';
       }
 
       function centre() {
         knob.style.transform = 'translate(-50%, -50%)';
         knob.classList.remove('moving', 'active');
         readout.textContent = 'joystick';
+        joyStatus.textContent = '—';
+        joyStatus.style.color = '#555';
         _joyFwd = 0; _joyTurn = 0;
       }
 
