@@ -253,6 +253,10 @@ def main():
                         metavar="URL",
                         help="Ollama API URL for Qwen models "
                              "(default: http://localhost:11434)")
+    parser.add_argument("--control-port",  type=int, default=5002,
+                        metavar="PORT",
+                        help="WebSocket joystick control port for browser/Android "
+                             "(default: 5002, 0 = disabled)")
     args = parser.parse_args()
 
     rover_port = args.atlas_port if args.rover == "atlas" else args.roomba_port
@@ -318,6 +322,12 @@ def main():
     def _on_sigterm(signum, frame):
         sys.exit(0)
     signal.signal(signal.SIGTERM, _on_sigterm)
+
+    # WebSocket control server — direct joystick channel for browser / Android
+    if args.control_port:
+        from control_server import ControlServer
+        ControlServer(state, rover_ctrl, port=args.control_port).start()
+        log.info("WS control     : ws://0.0.0.0:%d", args.control_port)
 
     # Agent loop (camera + inference dispatch)
     threading.Thread(

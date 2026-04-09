@@ -247,6 +247,29 @@ _HTML = """<!DOCTYPE html>
     loadLogs();
     setInterval(loadLogs, 10000);
 
+    // ── WebSocket control channel (port 5002) ────────────────────────────
+    // Direct path to drive_raw() — bypasses the 50 ms agent_publisher poll.
+    // Falls back to HTTP /chat if WS is unavailable (agent not running yet,
+    // port blocked, etc.).
+    let _ctrlWs = null;
+    (function _connectCtrl() {
+      try {
+        _ctrlWs = new WebSocket(`ws://${location.hostname}:5002`);
+        _ctrlWs.onopen  = () => log.debug && console.debug('ctrl-ws open');
+        _ctrlWs.onclose = () => { _ctrlWs = null; setTimeout(_connectCtrl, 2000); };
+        _ctrlWs.onerror = () => {};   // onclose fires after onerror; suppress console noise
+      } catch(_) {}
+    })();
+
+    function sendMovement(fwd, turn) {
+      if (_ctrlWs && _ctrlWs.readyState === WebSocket.OPEN) {
+        _ctrlWs.send(JSON.stringify({fwd, turn}));
+      } else {
+        // HTTP fallback (agent_publisher path, ~50ms latency)
+        chat({ type: 'movement', fwd, turn }).catch(() => {});
+      }
+    }
+
     // ── Chat ──────────────────────────────────────────────────────────────
     function addChatMsg(text, type) {
       const el = document.createElement('div');
@@ -405,7 +428,7 @@ _HTML = """<!DOCTYPE html>
         // Send immediately on first non-zero position (no waiting for timer)
         if (!_joyWasActive) {
           _joyWasActive = true;
-          chat({ type: 'movement', fwd: _joyFwd, turn: _joyTurn }).catch(()=>{});
+          sendMovement(_joyFwd, _joyTurn);
         }
       }
 
@@ -426,7 +449,7 @@ _HTML = """<!DOCTYPE html>
         // Send at 20 Hz while held to keep the publisher's 350 ms safety window open
         _joyTimer = setInterval(() => {
           if (_joyFwd !== 0 || _joyTurn !== 0)
-            chat({ type: 'movement', fwd: _joyFwd, turn: _joyTurn }).catch(()=>{});
+            sendMovement(_joyFwd, _joyTurn);
         }, 50);
       }
 
@@ -442,7 +465,7 @@ _HTML = """<!DOCTYPE html>
         dragging = false;
         clearInterval(_joyTimer); _joyTimer = null;
         centre();
-        chat({ type: 'movement', fwd: 0, turn: 0 }).catch(()=>{});
+        sendMovement(0, 0);
       }
 
       knob.addEventListener('mousedown',  startDrag, { passive: false });
