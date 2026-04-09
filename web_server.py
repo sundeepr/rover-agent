@@ -282,12 +282,15 @@ _HTML = """<!DOCTYPE html>
     // ── Pause / Resume ────────────────────────────────────────────────────
     async function togglePause() {
       const action = _paused ? 'resume' : 'pause';
+      addChatMsg(action, 'user');
       try {
         const d = await chat({ type: 'control', action });
         _paused = d.paused ?? _paused;
         updatePauseButton(_paused);
         addChatMsg(d.message ?? action, 'agent');
-      } catch(_) {}
+      } catch(_) {
+        addChatMsg('Error: could not reach server', 'err');
+      }
     }
 
     function updatePauseButton(paused) {
