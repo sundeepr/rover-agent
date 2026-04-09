@@ -62,10 +62,11 @@ from omnivla_strategy import (
 
 log = logging.getLogger("rover.qwen_omnivla")
 
-# Default Qwen vision model served by Ollama.
-# Use a custom model built with num_ctx=2048 to cap KV cache at load time:
-#   ollama create qwen2.5vl-3b-ctx2k -f Modelfile  (FROM qwen2.5vl:3b, PARAMETER num_ctx 2048)
-_VISION_MODEL = "qwen2.5vl-3b-ctx2k"
+# Default vision model served by Ollama.
+# moondream (~1.7 GB) fits comfortably on Jetson Orin Nano Super alongside
+# OmniVLA. It returns free-text answers; _detect_path() parses yes/no.
+# To use a Qwen-style model that returns JSON set vision_model="qwen2.5vl:3b".
+_VISION_MODEL = "moondream"
 
 
 # ── State machine ──────────────────────────────────────────────────────────────
@@ -116,8 +117,10 @@ class QwenOmniVLAStrategy(NavigationStrategy):
         self._ollama_url     = ollama_url.rstrip("/")
         self._vision_model   = vision_model
 
-        # Detection prompt built once from goal
-        self._detection_prompt = (
+        # Detection prompt — two variants depending on model family.
+        # moondream returns free text; Qwen-style models can return JSON.
+        self._detection_prompt = f"Is the following visible in this image: {goal}? Answer yes or no."
+        self._json_prompt = (
             f"Goal: {goal}\n\n"
             "Look at this robot camera image. "
             "Is the navigation target currently visible in the image?\n\n"
@@ -278,13 +281,15 @@ class QwenOmniVLAStrategy(NavigationStrategy):
 
     def _detect_path(self, jpeg_bytes: bytes) -> dict:
         """
-        Ask Qwen2.5-VL via Ollama whether the navigation target is visible.
+        Ask the vision model via Ollama whether the navigation target is visible.
 
         Returns {"visible": bool, "confidence": float, "reason": str}.
         On any error returns visible=False, confidence=0.0.
 
-        num_ctx=2048 caps the context window, which reduces KV cache size
-        and allows the model to fit within available memory.
+        Supports two response styles:
+          - moondream / free-text models: prompt asks "yes or no", answer parsed
+            as visible=True/False with confidence 0.9/0.1.
+          - Qwen-style models: prompt asks for JSON; extracted with regex.
         """
         import requests
 
@@ -298,11 +303,7 @@ class QwenOmniVLAStrategy(NavigationStrategy):
                 "images":  [b64],
             }],
             "stream":  False,
-            # No format=json — not supported by all Ollama versions for vision
-            # models. We extract JSON from free-text response instead.
-            # num_ctx=2048: our prompt + image tokens + short answer fit easily
-            # in 2048 tokens; smaller context = much smaller KV cache.
-            "options": {"temperature": 0.1, "num_ctx": 2048},
+            "options": {"temperature": 0.1},
         }
         try:
             r = requests.post(
@@ -315,23 +316,32 @@ class QwenOmniVLAStrategy(NavigationStrategy):
                     err_body = r.json().get("error", r.text[:200])
                 except Exception:
                     err_body = r.text[:200]
-                log.warning("Qwen detection failed: HTTP %d — %s", r.status_code, err_body)
+                log.warning("Vision detection failed: HTTP %d — %s", r.status_code, err_body)
                 return {"visible": False, "confidence": 0.0, "reason": f"ollama: {err_body}"}
 
-            content = r.json()["message"]["content"]
-            # Extract the first JSON object from the response text — handles
-            # cases where the model adds preamble or markdown code fences.
+            content = r.json()["message"]["content"].strip()
+            log.debug("Vision model raw response: %s", content[:120])
+
+            # Try JSON first (Qwen-style models)
             m = re.search(r"\{.*\}", content, re.DOTALL)
-            if not m:
-                raise ValueError(f"no JSON found in response: {content[:200]}")
-            data = json.loads(m.group())
+            if m:
+                data = json.loads(m.group())
+                return {
+                    "visible":    bool(data.get("visible", False)),
+                    "confidence": float(data.get("confidence", 0.0)),
+                    "reason":     str(data.get("reason", "")),
+                }
+
+            # Free-text fallback (moondream and similar)
+            lower = content.lower()
+            visible = lower.startswith("yes") or " yes" in lower[:30]
             return {
-                "visible":    bool(data.get("visible", False)),
-                "confidence": float(data.get("confidence", 0.0)),
-                "reason":     str(data.get("reason", "")),
+                "visible":    visible,
+                "confidence": 0.9 if visible else 0.1,
+                "reason":     content[:80],
             }
         except Exception as e:
-            log.warning("Qwen detection failed: %s", e)
+            log.warning("Vision detection failed: %s", e)
             return {"visible": False, "confidence": 0.0, "reason": f"error: {e}"}
 
     # ── OmniVLA inference (local) ──────────────────────────────────────────────
