@@ -375,6 +375,7 @@ _HTML = """<!DOCTYPE html>
       const joyStatus = document.getElementById('joy-status');
       let dragging = false, rect;
       let _joyFwd = 0, _joyTurn = 0, _joyTimer = null;
+      let _joyWasActive = false;   // tracks transition into dead-zone
 
       function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
 
@@ -391,6 +392,7 @@ _HTML = """<!DOCTYPE html>
           readout.textContent = 'joystick';
           joyStatus.textContent = '—';
           joyStatus.style.color = '#555';
+          _joyWasActive = false;
           return;
         }
         _joyFwd  = clamp(Math.round(-cy / (BASE_R - KNOB_R) * 100), -100, 100);
@@ -400,6 +402,11 @@ _HTML = """<!DOCTYPE html>
         readout.textContent = `${fwdS} ${turnS}`;
         joyStatus.textContent = `● manual  ${fwdS}  ${turnS}`;
         joyStatus.style.color = '#4caf50';
+        // Send immediately on first non-zero position (no waiting for timer)
+        if (!_joyWasActive) {
+          _joyWasActive = true;
+          chat({ type: 'movement', fwd: _joyFwd, turn: _joyTurn }).catch(()=>{});
+        }
       }
 
       function centre() {
@@ -408,7 +415,7 @@ _HTML = """<!DOCTYPE html>
         readout.textContent = 'joystick';
         joyStatus.textContent = '—';
         joyStatus.style.color = '#555';
-        _joyFwd = 0; _joyTurn = 0;
+        _joyFwd = 0; _joyTurn = 0; _joyWasActive = false;
       }
 
       function startDrag(e) {
@@ -416,11 +423,11 @@ _HTML = """<!DOCTYPE html>
         dragging = true;
         rect = base.getBoundingClientRect();
         knob.classList.add('active');
-        // Send at 10 Hz while held
+        // Send at 20 Hz while held to keep the publisher's 350 ms safety window open
         _joyTimer = setInterval(() => {
           if (_joyFwd !== 0 || _joyTurn !== 0)
             chat({ type: 'movement', fwd: _joyFwd, turn: _joyTurn }).catch(()=>{});
-        }, 100);
+        }, 50);
       }
 
       function moveDrag(e) {
@@ -546,10 +553,10 @@ class WebServer:
             paused = self._state.paused
             goal   = self._state.goal
             mv     = dict(self._state.movement)
-            # Single-consume: reset movement after delivering it so the rover
-            # isn't driven again on the next status cycle if joystick went silent.
-            if mv.get("fwd", 0) != 0 or mv.get("turn", 0) != 0:
-                self._state.movement = {"fwd": 0, "turn": 0}
+            # Movement is NOT single-consumed here — the publisher reads it every
+            # cycle and drives continuously. The browser sends fwd:0,turn:0 on
+            # release; the publisher's 350 ms safety expiry stops the rover if
+            # the browser goes silent before sending the release.
         return jsonify({"ok": True, "paused": paused, "goal": goal, "movement": mv})
 
     def _agent_chat(self):

@@ -34,9 +34,10 @@ class AgentPublisher:
     """
 
     def __init__(self, server_url: str, http_timeout: float = 2.0):
-        self._url       = server_url.rstrip("/")
-        self._timeout   = http_timeout
-        self._last_goal = ""   # tracks last goal forwarded to strategy
+        self._url                  = server_url.rstrip("/")
+        self._timeout              = http_timeout
+        self._last_goal            = ""    # tracks last goal forwarded to strategy
+        self._operator_cmd_expires = 0.0   # safety expiry for continuous joystick drive
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -178,22 +179,42 @@ class AgentPublisher:
             state.goal = server_goal
         state.goal_ready.set()
 
-    @staticmethod
-    def _sync_movement(state, rover_ctrl, resp: dict) -> None:
-        """Apply operator joystick movement from the web server response."""
-        mv = resp.get("movement")
-        if not mv or (mv.get("fwd", 0) == 0 and mv.get("turn", 0) == 0):
-            return
+    def _sync_movement(self, state, rover_ctrl, resp: dict) -> None:
+        """Apply operator joystick movement from the web server response.
+
+        Movement is driven at full publisher rate (20 Hz) for smooth continuous
+        motion. A 350 ms safety expiry stops the rover if the browser goes silent
+        (tab closed, network loss, joystick released).
+        """
+        mv  = resp.get("movement")
         now = time.time()
-        with state.result_lock:
-            state.operator_control = mv
-            state.operator_until   = now + state.query_interval + 0.5
-        if rover_ctrl and not state.paused.is_set():
-            fwd  = mv.get("fwd", 0)
+
+        if mv is not None:
+            fwd  = mv.get("fwd",  0)
             turn = mv.get("turn", 0)
-            vel    = fwd * 50 // 100   # cap at 50 mm/s for manual control
-            radius = 0x8000 if turn == 0 else int(-2000 / (turn / 100))
-            try:
-                rover_ctrl.drive_raw(vel, radius)
-            except Exception as e:
-                log.warning("Manual drive error: %s", e)
+            with state.result_lock:
+                if fwd != 0 or turn != 0:
+                    state.operator_control     = mv
+                    state.operator_until       = now + state.query_interval + 0.5
+                    self._operator_cmd_expires = now + 0.35   # 350 ms safety window
+                else:
+                    # Explicit zero — joystick released; clear immediately
+                    state.operator_control     = None
+                    state.operator_until       = 0.0
+                    self._operator_cmd_expires = 0.0
+
+        # Drive every publisher cycle while the safety window is open
+        if self._operator_cmd_expires <= now:
+            return
+        with state.result_lock:
+            oc = state.operator_control
+        if not oc or state.paused.is_set() or rover_ctrl is None:
+            return
+        fwd    = oc.get("fwd",  0)
+        turn   = oc.get("turn", 0)
+        vel    = fwd * 50 // 100   # cap at 50 mm/s for manual control
+        radius = 0x8000 if turn == 0 else int(-2000 / (turn / 100))
+        try:
+            rover_ctrl.drive_raw(vel, radius)
+        except Exception as e:
+            log.warning("Manual drive error: %s", e)
