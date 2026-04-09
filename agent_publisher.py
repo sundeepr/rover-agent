@@ -17,6 +17,8 @@ import time
 import cv2
 import numpy as np
 
+from control_server import _joy_to_drive
+
 log = logging.getLogger("rover.publisher")
 
 # How often the publish loop runs (seconds). Raw frames are sent every cycle;
@@ -210,10 +212,9 @@ class AgentPublisher:
             oc = state.operator_control
         if not oc or state.paused.is_set() or rover_ctrl is None:
             return
-        fwd    = oc.get("fwd",  0)
-        turn   = oc.get("turn", 0)
-        vel    = fwd * 50 // 100   # cap at 50 mm/s for manual control
-        radius = 0x8000 if turn == 0 else int(-2000 / (turn / 100))
+        fwd  = oc.get("fwd",  0)
+        turn = oc.get("turn", 0)
+        vel, radius = _joy_to_drive(fwd, turn, max_vel=50)
         try:
             rover_ctrl.drive_raw(vel, radius)
         except Exception as e:

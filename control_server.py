@@ -35,6 +35,37 @@ _MAX_VEL_MM_S = 150
 _WATCHDOG_S = 0.3
 
 
+def _joy_to_drive(fwd: int, turn: int, max_vel: int) -> tuple[int, int]:
+    """Convert joystick axes to (velocity mm/s, radius mm) for drive_raw().
+
+    fwd  ∈ [-100, 100]  — forward/back
+    turn ∈ [-100, 100]  — right is positive, left is negative
+
+    Roomba OI / Atlas drive_raw conventions:
+      radius = 0x8000 → straight
+      radius = -1     → spin CW  (right in place)
+      radius =  1     → spin CCW (left  in place)
+      radius negative → arc right;  positive → arc left
+    """
+    if turn == 0:
+        # Straight forward/back
+        return fwd * max_vel // 100, 0x8000
+
+    if fwd == 0:
+        # Pure rotation — spin in place, speed proportional to turn amount
+        vel    = abs(turn) * max_vel // 100
+        radius = -1 if turn > 0 else 1   # right=CW=-1, left=CCW=1
+        return vel, radius
+
+    # Arc: linear radius mapping keeps gentle turns gentle.
+    # turn=100 → radius=-2000 (tight right)
+    # turn=10  → radius= -200 (gentle right arc)
+    # (old formula used division which gave -20000 for turn=10 — always tight)
+    vel    = fwd * max_vel // 100
+    radius = int(-2000 * turn / 100)
+    return vel, radius
+
+
 class ControlServer:
     """
     WebSocket control server for real-time joystick input.
@@ -110,8 +141,7 @@ class ControlServer:
         now  = time.time()
 
         if fwd != 0 or turn != 0:
-            vel    = fwd * _MAX_VEL_MM_S // 100
-            radius = 0x8000 if turn == 0 else int(-2000 / (turn / 100))
+            vel, radius = _joy_to_drive(fwd, turn, _MAX_VEL_MM_S)
 
             if self._rover_ctrl is not None:
                 try:
