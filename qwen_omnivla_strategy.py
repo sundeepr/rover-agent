@@ -303,7 +303,10 @@ class QwenOmniVLAStrategy(NavigationStrategy):
                 "images":  [b64],
             }],
             "stream":  False,
-            "options": {"temperature": 0.1},
+            # num_gpu=0: run vision model on CPU so OmniVLA/CLIP keep the GPU.
+            # On Jetson unified memory the GPU and CPU share 8 GB — without this
+            # the llama runner crashes when it tries to co-load onto the GPU.
+            "options": {"temperature": 0.1, "num_gpu": 0},
         }
         try:
             r = requests.post(
