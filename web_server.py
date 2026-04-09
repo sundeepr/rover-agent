@@ -57,7 +57,25 @@ _HTML = """<!DOCTYPE html>
 
     /* Video column */
     .video-column { flex: 1; display: flex; flex-direction: column; background: #000;
-                    gap: 2px; overflow: hidden; }
+                    gap: 2px; overflow: hidden; position: relative; }
+
+    /* Joystick overlay */
+    #joystick-wrap { position: absolute; bottom: 24px; right: 24px;
+                     display: flex; flex-direction: column; align-items: center; gap: 6px;
+                     user-select: none; pointer-events: none; }
+    #joystick-base { width: 120px; height: 120px; border-radius: 50%;
+                     background: rgba(255,255,255,0.07); border: 2px solid rgba(255,255,255,0.18);
+                     position: relative; pointer-events: all; cursor: default; }
+    #joystick-knob { width: 44px; height: 44px; border-radius: 50%;
+                     background: rgba(200,200,200,0.25); border: 2px solid rgba(255,255,255,0.5);
+                     position: absolute; top: 50%; left: 50%;
+                     transform: translate(-50%, -50%);
+                     transition: background 0.1s;
+                     pointer-events: all; cursor: grab; }
+    #joystick-knob.active { cursor: grabbing; }
+    #joystick-knob.moving { background: rgba(76,175,80,0.55); }
+    #joystick-readout { font-size: 0.65em; color: rgba(255,255,255,0.5);
+                        pointer-events: none; text-align: center; letter-spacing: 0.05em; }
     .video-box { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
     .video-box .label { background: #111; color: #555; font-size: 0.68em;
                         text-transform: uppercase; letter-spacing: 0.1em;
@@ -106,6 +124,12 @@ _HTML = """<!DOCTYPE html>
       <div class="video-box">
         <div class="label">&#x1F9E0; Last query — with waypoints</div>
         <img src="/video/llm" alt="LLM frame">
+      </div>
+      <div id="joystick-wrap">
+        <div id="joystick-base">
+          <div id="joystick-knob"></div>
+        </div>
+        <div id="joystick-readout">joystick</div>
       </div>
     </div>
 
@@ -261,6 +285,73 @@ _HTML = """<!DOCTYPE html>
       setTimeout(poll, 1000);
     }
     poll();
+
+    // ── Joystick ───────────────────────────────────────────────────────────
+    (function () {
+      const BASE_R  = 58;   // usable radius (half of 120px base)
+      const KNOB_R  = 22;   // half of knob width
+      const DEAD    = 8;    // dead-zone radius in px
+      const base    = document.getElementById('joystick-base');
+      const knob    = document.getElementById('joystick-knob');
+      const readout = document.getElementById('joystick-readout');
+
+      let dragging = false;
+      let rect;
+
+      function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+      function applyPos(cx, cy) {
+        const dist  = Math.hypot(cx, cy);
+        const limit = BASE_R - KNOB_R;
+        const scale = dist > limit ? limit / dist : 1;
+        const kx = cx * scale;
+        const ky = cy * scale;
+        knob.style.transform = `translate(calc(-50% + ${kx}px), calc(-50% + ${ky}px))`;
+        const moving = dist > DEAD;
+        knob.classList.toggle('moving', moving);
+        if (!moving) { readout.textContent = 'joystick'; return; }
+        const fwd  = clamp(Math.round(-ky / (BASE_R - KNOB_R) * 100), -100, 100);
+        const turn = clamp(Math.round( kx / (BASE_R - KNOB_R) * 100), -100, 100);
+        const fwdS  = fwd  >= 0 ? `FWD ${fwd}%`    : `REV ${-fwd}%`;
+        const turnS = turn >= 0 ? `RIGHT ${turn}%`  : `LEFT ${-turn}%`;
+        readout.textContent = `${fwdS}  ${turnS}`;
+      }
+
+      function centre() {
+        knob.style.transform = 'translate(-50%, -50%)';
+        knob.classList.remove('moving', 'active');
+        readout.textContent = 'joystick';
+      }
+
+      function startDrag(e) {
+        e.preventDefault();
+        dragging = true;
+        rect = base.getBoundingClientRect();
+        knob.classList.add('active');
+      }
+
+      function moveDrag(e) {
+        if (!dragging) return;
+        e.preventDefault();
+        const client = e.touches ? e.touches[0] : e;
+        const cx = client.clientX - rect.left  - BASE_R;
+        const cy = client.clientY - rect.top   - BASE_R;
+        applyPos(cx, cy);
+      }
+
+      function endDrag() {
+        if (!dragging) return;
+        dragging = false;
+        centre();
+      }
+
+      knob.addEventListener('mousedown',  startDrag, { passive: false });
+      knob.addEventListener('touchstart', startDrag, { passive: false });
+      window.addEventListener('mousemove',  moveDrag, { passive: false });
+      window.addEventListener('touchmove',  moveDrag, { passive: false });
+      window.addEventListener('mouseup',    endDrag);
+      window.addEventListener('touchend',   endDrag);
+    })();
   </script>
 </body>
 </html>"""
