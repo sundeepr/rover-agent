@@ -103,7 +103,7 @@ class QwenOmniVLAStrategy(NavigationStrategy):
 
     def __init__(
         self,
-        goal: str = "navigate forward",
+        goal: str = "",
         goal_image_path: str | None = None,
         server_addr: str | None = None,
         path_threshold: float = 0.6,
@@ -117,17 +117,8 @@ class QwenOmniVLAStrategy(NavigationStrategy):
         self._ollama_url     = ollama_url.rstrip("/")
         self._vision_model   = vision_model
 
-        # Detection prompt — two variants depending on model family.
-        # moondream returns free text; Qwen-style models can return JSON.
-        self._detection_prompt = f"Is the following visible in this image: {goal}? Answer yes or no."
-        self._json_prompt = (
-            f"Goal: {goal}\n\n"
-            "Look at this robot camera image. "
-            "Is the navigation target currently visible in the image?\n\n"
-            "Respond with JSON only:\n"
-            '{"visible": true/false, "confidence": 0.0-1.0, '
-            '"reason": "one sentence"}'
-        )
+        self._detection_prompt = self._make_detection_prompt(goal)
+        self._json_prompt      = self._make_json_prompt(goal)
 
         self._nav_state  = _NavState.INITIALIZING
         self._state_lock = threading.Lock()
@@ -154,7 +145,8 @@ class QwenOmniVLAStrategy(NavigationStrategy):
                     self._goal_image_bytes = fh.read()
             self._loaded.set()
             with self._state_lock:
-                self._nav_state = _NavState.PATH_LOST
+                if self._goal:
+                    self._nav_state = _NavState.PATH_LOST
             log.info("QwenOmniVLAStrategy: connected to OmniVLA server at %s", server_addr)
         else:
             # ── Local mode ────────────────────────────────────────────────
@@ -181,6 +173,47 @@ class QwenOmniVLAStrategy(NavigationStrategy):
             if self._nav_state != _NavState.INITIALIZING:
                 self._nav_state = _NavState.PATH_LOST
         log.info("QwenOmniVLAStrategy reset")
+
+    def set_goal(self, goal: str) -> None:
+        """Update navigation goal at runtime (called from web UI)."""
+        self._goal             = goal
+        self._detection_prompt = self._make_detection_prompt(goal)
+        self._json_prompt      = self._make_json_prompt(goal)
+        # Re-encode goal text for OmniVLA FiLM in local mode if loaded
+        if not self._server_addr and self._loaded.is_set() and self._clip_model is not None:
+            self._encode_goal_text()
+        with self._state_lock:
+            self._nav_state = _NavState.PATH_LOST
+        log.info("Goal updated: '%s' — entering PATH_LOST", goal)
+
+    def _encode_goal_text(self) -> None:
+        """Re-encode CLIP goal text for OmniVLA FiLM conditioning."""
+        import torch
+        import clip as clip_lib
+        with torch.no_grad():
+            self._feat_text = self._clip_model.encode_text(
+                clip_lib.tokenize([self._goal], truncate=True).to(self._device)
+            ).float()
+        log.info("QwenOmniVLA: goal text re-encoded for OmniVLA FiLM")
+
+    @staticmethod
+    def _make_detection_prompt(goal: str) -> str:
+        if not goal:
+            return ""
+        return f"Is the following visible in this image: {goal}? Answer yes or no."
+
+    @staticmethod
+    def _make_json_prompt(goal: str) -> str:
+        if not goal:
+            return ""
+        return (
+            f"Goal: {goal}\n\n"
+            "Look at this robot camera image. "
+            "Is the navigation target currently visible in the image?\n\n"
+            "Respond with JSON only:\n"
+            '{"visible": true/false, "confidence": 0.0-1.0, '
+            '"reason": "one sentence"}'
+        )
 
     # ── Ollama health check ────────────────────────────────────────────────────
 
@@ -263,19 +296,25 @@ class QwenOmniVLAStrategy(NavigationStrategy):
                 ).float()
             log.info("QwenOmniVLA: image+language goal (modality %d)", MODALITY_GOAL_IMG)
         else:
-            log.info("QwenOmniVLA: encoding goal '%s' with CLIP…", self._goal)
-            with torch.no_grad():
-                self._feat_text = clip_model.encode_text(
-                    clip_lib.tokenize([self._goal], truncate=True).to(device)
-                ).float()
+            if self._goal:
+                log.info("QwenOmniVLA: encoding goal '%s' with CLIP…", self._goal)
+                with torch.no_grad():
+                    self._feat_text = clip_model.encode_text(
+                        clip_lib.tokenize([self._goal], truncate=True).to(device)
+                    ).float()
+            else:
+                self._feat_text = torch.zeros(1, ENC_SIZE, device=device)
+                log.info("QwenOmniVLA: no goal yet — text feature deferred to set_goal()")
             self._goal_img    = torch.zeros(1, 3, *IMG_OBS, device=device)
             self._modality_id = torch.tensor([MODALITY_LANG], device=device)
             log.info("QwenOmniVLA: language-only goal (modality %d)", MODALITY_LANG)
 
         self._loaded.set()
         with self._state_lock:
-            self._nav_state = _NavState.PATH_LOST
-        log.info("QwenOmniVLAStrategy ready — goal: '%s'", self._goal)
+            if self._goal:
+                self._nav_state = _NavState.PATH_LOST
+            # else: remain INITIALIZING until set_goal() provides a goal
+        log.info("QwenOmniVLAStrategy ready — goal: '%s'", self._goal or "(none)")
 
     # ── Path detection via Qwen2.5-VL ─────────────────────────────────────────
 
@@ -415,6 +454,10 @@ class QwenOmniVLAStrategy(NavigationStrategy):
             log.info("QwenOmniVLA: models not ready — skipping step")
             return
 
+        if not self._goal:
+            log.info("QwenOmniVLA: no goal yet — waiting for goal from web UI")
+            return
+
         t0 = time.time()
         with state.result_lock:
             step  = state.step
@@ -444,6 +487,8 @@ class QwenOmniVLAStrategy(NavigationStrategy):
         # ── State machine ──────────────────────────────────────────────────
         waypoints = None
         vel = radius = 0
+        operator_active = (state.operator_control is not None and
+                           state.operator_until > time.time())
 
         if current_state == _NavState.INITIALIZING:
             log.info("QwenOmniVLA: still initializing — skipping")
@@ -456,12 +501,14 @@ class QwenOmniVLAStrategy(NavigationStrategy):
                 with self._state_lock:
                     self._nav_state = _NavState.PATH_LOST
                 log.info("Step %d | PATH LOST (conf=%.2f) — stopping rover", step, confidence)
-                if rover_ctrl and not state.paused.is_set():
+                if rover_ctrl and not state.paused.is_set() and not operator_active:
                     rover_ctrl.stop()
             else:
                 waypoints, vel, radius = self._run_inference(pil, current_jpeg)
-                if rover_ctrl and not state.paused.is_set():
+                if rover_ctrl and not state.paused.is_set() and not operator_active:
                     rover_ctrl.drive_raw(vel, radius)
+                elif operator_active:
+                    log.info("Step %d | operator control active — skipping OmniVLA drive", step)
 
         elif current_state == _NavState.PATH_LOST:
             if path_active:
@@ -469,8 +516,10 @@ class QwenOmniVLAStrategy(NavigationStrategy):
                     self._nav_state = _NavState.NAVIGATING
                 log.info("Step %d | PATH FOUND (conf=%.2f) — resuming", step, confidence)
                 waypoints, vel, radius = self._run_inference(pil, current_jpeg)
-                if rover_ctrl and not state.paused.is_set():
+                if rover_ctrl and not state.paused.is_set() and not operator_active:
                     rover_ctrl.drive_raw(vel, radius)
+                elif operator_active:
+                    log.info("Step %d | operator control active — skipping OmniVLA drive", step)
             else:
                 log.info("Step %d | path_lost (conf=%.2f)", step, confidence)
 

@@ -222,6 +222,7 @@ _HTML = """<!DOCTYPE html>
 
     let _queryStart = 0, _lastResponseS = 0, _timerInterval = null;
     let _paused = false;
+    let _chatIdx = 0;   // how many agent chat_history entries we've already shown
 
     function updateTimer() {
       const el = document.getElementById('llm-timer');
@@ -351,6 +352,14 @@ _HTML = """<!DOCTYPE html>
         else if (_queryStart === 0 && _timerInterval) {
           clearInterval(_timerInterval); _timerInterval = null; updateTimer();
         }
+
+        // Merge new agent-pushed chat messages (e.g. "Ready")
+        const serverChat = d.chat_history ?? [];
+        for (let i = _chatIdx; i < serverChat.length; i++) {
+          const m = serverChat[i];
+          addChatMsg(m.text, m.role === 'user' ? 'user' : 'agent');
+        }
+        _chatIdx = serverChat.length;
       } catch(_) {}
       setTimeout(poll, 1000);
     }
@@ -447,14 +456,15 @@ class _ServerState:
     """Thread-safe buffer for frames and status received from the agent."""
 
     def __init__(self):
-        self._lock       = threading.Lock()
-        self.raw_jpeg    = None          # bytes | None
-        self.llm_jpeg    = None          # bytes | None
-        self.status      = {}            # latest JSON from agent
-        self.paused      = False
-        self.last_push   = 0.0           # epoch seconds
-        self.goal        = ""            # latest goal set via /chat
-        self.movement    = {"fwd": 0, "turn": 0}  # latest joystick from /chat
+        self._lock        = threading.Lock()
+        self.raw_jpeg     = None          # bytes | None
+        self.llm_jpeg     = None          # bytes | None
+        self.status       = {}            # latest JSON from agent
+        self.paused       = False
+        self.last_push    = 0.0           # epoch seconds
+        self.goal         = ""            # latest goal set via /chat
+        self.movement     = {"fwd": 0, "turn": 0}  # latest joystick from /chat
+        self.chat_history: list = []      # [{"role","text","ts"}] — agent-pushed messages
 
     @property
     def agent_connected(self) -> bool:
@@ -508,6 +518,7 @@ class WebServer:
         app.add_url_rule("/agent/frame",            "agent_frame",  self._agent_frame,  methods=["POST"])
         app.add_url_rule("/agent/status",           "agent_status", self._agent_status, methods=["POST"])
         app.add_url_rule("/chat",                   "chat",         self._chat,         methods=["POST"])
+        app.add_url_rule("/agent/chat",             "agent_chat",   self._agent_chat,   methods=["POST"])
         app.add_url_rule("/logs",                   "list_logs",    self._list_logs)
         app.add_url_rule("/logs/<path:filename>",   "dl_log",       self._download_log)
 
@@ -533,7 +544,23 @@ class WebServer:
             self._state.touch()
             self._state.status = data
             paused = self._state.paused
-        return jsonify({"ok": True, "paused": paused})
+            goal   = self._state.goal
+            mv     = dict(self._state.movement)
+            # Single-consume: reset movement after delivering it so the rover
+            # isn't driven again on the next status cycle if joystick went silent.
+            if mv.get("fwd", 0) != 0 or mv.get("turn", 0) != 0:
+                self._state.movement = {"fwd": 0, "turn": 0}
+        return jsonify({"ok": True, "paused": paused, "goal": goal, "movement": mv})
+
+    def _agent_chat(self):
+        """POST /agent/chat  body: {"role": "agent", "text": "..."}"""
+        data = request.get_json(force=True) or {}
+        msg  = {"role": data.get("role", "agent"),
+                "text": data.get("text", ""),
+                "ts":   time.time()}
+        with self._state.lock:
+            self._state.chat_history.append(msg)
+        return jsonify({"ok": True})
 
     # ── Browser endpoints ─────────────────────────────────────────────────────
 
@@ -598,6 +625,7 @@ class WebServer:
             result["paused"]          = self._state.paused
             result["agent_connected"] = self._state.agent_connected
             result["goal"]            = self._state.goal
+            result["chat_history"]    = list(self._state.chat_history[-50:])
         return jsonify(result)
 
     def _list_logs(self):

@@ -147,8 +147,11 @@ def agent_loop(
 
         now = time.time()
 
-        # Fire strategy query in a separate thread so camera loop never blocks
-        if now - last_query_time >= interval and not state.paused.is_set():
+        # Fire strategy query in a separate thread so camera loop never blocks.
+        # Gate on goal_ready so no queries fire until a goal has been received.
+        if (state.goal_ready.is_set()
+                and now - last_query_time >= interval
+                and not state.paused.is_set()):
             if state.query_in_flight.is_set():
                 if not _logged_in_flight:
                     log.info("Previous query still in-flight — skipping until complete")
@@ -232,8 +235,9 @@ def main():
     parser.add_argument("--strategy",    type=str,   default="gemini",
                         choices=["gemini", "omnivla", "clip_omnivla", "qwen_omnivla", "hough_crop_row"],
                         help="Navigation strategy (default: gemini)")
-    parser.add_argument("--goal",        type=str,   default="navigate forward",
-                        help="Language goal for omnivla strategy")
+    parser.add_argument("--goal",        type=str,   default="",
+                        help="Language goal for omnivla strategies. "
+                             "If omitted, wait for goal via web chat UI.")
     parser.add_argument("--goal-image",  type=str,   default=None,
                         help="Path to a goal image for omnivla strategy (optional)")
     parser.add_argument("--omnivla-server", type=str, default=None,
@@ -282,9 +286,22 @@ def main():
         log.info("Rover         : disabled (pass --roomba-port or --atlas-port to enable)")
 
     from session_recorder import SessionRecorder
-    state          = AgentState()
-    state.recorder = SessionRecorder()
-    strategy       = _build_strategy(args.strategy, args)
+    state               = AgentState()
+    state.recorder      = SessionRecorder()
+    state.query_interval = args.interval
+    strategy             = _build_strategy(args.strategy, args)
+
+    # If a goal was given on the CLI, apply it immediately so the agent
+    # starts navigating without waiting for web chat input.
+    if args.goal and args.strategy not in ("gemini",):
+        strategy.set_goal(args.goal)
+        with state.result_lock:
+            state.goal = args.goal
+        state.goal_ready.set()
+        log.info("CLI goal applied: '%s'", args.goal)
+    elif args.strategy == "gemini":
+        # Gemini strategy manages its own goal; always ready to start.
+        state.goal_ready.set()
 
     # Open rover connection on the main thread so stop() is guaranteed to
     # run on shutdown — daemon threads are killed hard and cannot clean up.
@@ -313,7 +330,7 @@ def main():
     publisher = AgentPublisher(args.web_server)
     threading.Thread(
         target=publisher.run,
-        args=(state, rover_ctrl),
+        args=(state, rover_ctrl, strategy),
         daemon=True,
     ).start()
 

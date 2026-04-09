@@ -86,7 +86,7 @@ class ClipOmniVLAStrategy(NavigationStrategy):
 
     def __init__(
         self,
-        goal: str = "navigate forward",
+        goal: str = "",
         goal_image_path: str | None = None,
         server_addr: str | None = None,
         path_threshold: float = 0.5,
@@ -96,11 +96,17 @@ class ClipOmniVLAStrategy(NavigationStrategy):
         self._goal_image_path = goal_image_path
         self._server_addr     = server_addr
         self._path_threshold  = path_threshold
+        self._ollama_url      = ollama_url
+        self._path_cache: dict = {}  # keyed by (tuple(pos), tuple(neg))
 
-        # Generate CLIP prompts from goal via Qwen3 (falls back to templates)
-        _prompts = generate_clip_prompts(goal, ollama_url=ollama_url)
-        self._pos_prompts: list = _prompts["positive"]
-        self._neg_prompts: list = _prompts["negative"]
+        # Generate CLIP prompts if goal provided; otherwise deferred to set_goal()
+        if goal:
+            _prompts = generate_clip_prompts(goal, ollama_url=ollama_url)
+            self._pos_prompts: list = _prompts["positive"]
+            self._neg_prompts: list = _prompts["negative"]
+        else:
+            self._pos_prompts = []
+            self._neg_prompts = []
 
         self._nav_state = _NavState.INITIALIZING
         # query_in_flight serialises query threads so no separate lock needed,
@@ -157,6 +163,36 @@ class ClipOmniVLAStrategy(NavigationStrategy):
             if self._nav_state != _NavState.INITIALIZING:
                 self._nav_state = _NavState.PATH_LOST
         log.info("ClipOmniVLAStrategy reset")
+
+    def set_goal(self, goal: str) -> None:
+        """Update navigation goal at runtime (called from web UI)."""
+        self._goal = goal
+        _prompts = generate_clip_prompts(goal, ollama_url=self._ollama_url)
+        self._pos_prompts = _prompts["positive"]
+        self._neg_prompts = _prompts["negative"]
+        self._path_cache.clear()
+        # Re-encode path detection prompts in local mode if CLIP is loaded
+        if not self._server_addr and self._loaded.is_set() and self._clip_model is not None:
+            self._encode_path_prompts()
+        with self._state_lock:
+            self._nav_state = _NavState.PATH_LOST
+        log.info("Goal updated: '%s' — entering PATH_LOST", goal)
+
+    def _encode_path_prompts(self) -> None:
+        """Re-encode CLIP path detection prompts (local mode only)."""
+        import torch
+        import clip as clip_lib
+        with torch.no_grad():
+            pos = self._clip_model.encode_text(
+                clip_lib.tokenize(self._pos_prompts, truncate=True).to(self._device)
+            ).float()
+            neg = self._clip_model.encode_text(
+                clip_lib.tokenize(self._neg_prompts, truncate=True).to(self._device)
+            ).float()
+        self._path_pos_feat = (pos / pos.norm(dim=-1, keepdim=True)).mean(dim=0, keepdim=True)
+        self._path_neg_feat = (neg / neg.norm(dim=-1, keepdim=True)).mean(dim=0, keepdim=True)
+        log.info("ClipOmniVLA: path prompts re-encoded (%d pos, %d neg)",
+                 len(self._pos_prompts), len(self._neg_prompts))
 
     # ── Local model loading ───────────────────────────────────────────────────
 
@@ -228,32 +264,43 @@ class ClipOmniVLAStrategy(NavigationStrategy):
                 ).float()
             log.info("ClipOmniVLA: image+language goal (modality %d)", MODALITY_GOAL_IMG)
         else:
-            log.info("ClipOmniVLA: encoding goal '%s' with CLIP…", self._goal)
-            with torch.no_grad():
-                self._feat_text = clip_model.encode_text(
-                    clip_lib.tokenize([self._goal], truncate=True).to(device)
-                ).float()
+            if self._goal:
+                log.info("ClipOmniVLA: encoding goal '%s' with CLIP…", self._goal)
+                with torch.no_grad():
+                    self._feat_text = clip_model.encode_text(
+                        clip_lib.tokenize([self._goal], truncate=True).to(device)
+                    ).float()
+            else:
+                self._feat_text = torch.zeros(1, ENC_SIZE, device=device)
+                log.info("ClipOmniVLA: no goal yet — text feature deferred to set_goal()")
             self._goal_img    = torch.zeros(1, 3, *IMG_OBS, device=device)
             self._modality_id = torch.tensor([MODALITY_LANG], device=device)
             log.info("ClipOmniVLA: language-only goal (modality %d)", MODALITY_LANG)
 
         # Encode path detection prompts (generated from goal by Qwen3 at startup)
-        with torch.no_grad():
-            pos = clip_model.encode_text(
-                clip_lib.tokenize(self._pos_prompts, truncate=True).to(device)
-            ).float()
-            neg = clip_model.encode_text(
-                clip_lib.tokenize(self._neg_prompts, truncate=True).to(device)
-            ).float()
-        self._path_pos_feat = (pos / pos.norm(dim=-1, keepdim=True)).mean(dim=0, keepdim=True)
-        self._path_neg_feat = (neg / neg.norm(dim=-1, keepdim=True)).mean(dim=0, keepdim=True)
-        log.info("ClipOmniVLA: path detection prompts encoded (%d pos, %d neg)",
-                 len(self._pos_prompts), len(self._neg_prompts))
+        if self._pos_prompts and self._neg_prompts:
+            with torch.no_grad():
+                pos = clip_model.encode_text(
+                    clip_lib.tokenize(self._pos_prompts, truncate=True).to(device)
+                ).float()
+                neg = clip_model.encode_text(
+                    clip_lib.tokenize(self._neg_prompts, truncate=True).to(device)
+                ).float()
+            self._path_pos_feat = (pos / pos.norm(dim=-1, keepdim=True)).mean(dim=0, keepdim=True)
+            self._path_neg_feat = (neg / neg.norm(dim=-1, keepdim=True)).mean(dim=0, keepdim=True)
+            log.info("ClipOmniVLA: path detection prompts encoded (%d pos, %d neg)",
+                     len(self._pos_prompts), len(self._neg_prompts))
+        else:
+            self._path_pos_feat = None
+            self._path_neg_feat = None
+            log.info("ClipOmniVLA: no prompts yet — path detection deferred to set_goal()")
 
         self._loaded.set()
         with self._state_lock:
-            self._nav_state = _NavState.PATH_LOST   # ready; wait for first detection
-        log.info("ClipOmniVLAStrategy ready — goal: '%s'", self._goal)
+            if self._goal:
+                self._nav_state = _NavState.PATH_LOST   # ready; wait for first detection
+            # else: remain INITIALIZING until set_goal() provides a goal
+        log.info("ClipOmniVLAStrategy ready — goal: '%s'", self._goal or "(none)")
 
     # ── Path detection (local) ────────────────────────────────────────────────
 
@@ -328,6 +375,10 @@ class ClipOmniVLAStrategy(NavigationStrategy):
             log.info("ClipOmniVLA: models not ready — skipping step")
             return
 
+        if not self._goal or not self._pos_prompts:
+            log.info("ClipOmniVLA: no goal yet — waiting for goal from web UI")
+            return
+
         t0 = time.time()
         with state.result_lock:
             step  = state.step
@@ -361,6 +412,8 @@ class ClipOmniVLAStrategy(NavigationStrategy):
         # ── State machine ─────────────────────────────────────────────────────
         waypoints = None
         vel = radius = 0
+        operator_active = (state.operator_control is not None and
+                           state.operator_until > time.time())
 
         if current_state == _NavState.INITIALIZING:
             # Should not reach here (_loaded guards entry), but be safe
@@ -377,13 +430,15 @@ class ClipOmniVLAStrategy(NavigationStrategy):
                     self._nav_state = _NavState.PATH_LOST
                 log.info("Step %d | PATH LOST (score=%.2f < %.2f) — stopping rover",
                          step, path_score, self._path_threshold)
-                if rover_ctrl and not state.paused.is_set():
+                if rover_ctrl and not state.paused.is_set() and not operator_active:
                     rover_ctrl.stop()
             else:
                 # Continue navigating
                 waypoints, vel, radius = self._run_inference(pil, current_jpeg)
-                if rover_ctrl and not state.paused.is_set():
+                if rover_ctrl and not state.paused.is_set() and not operator_active:
                     rover_ctrl.drive_raw(vel, radius)
+                elif operator_active:
+                    log.info("Step %d | operator control active — skipping OmniVLA drive", step)
 
         elif current_state == _NavState.PATH_LOST:
             if path_score >= self._path_threshold:
@@ -393,8 +448,10 @@ class ClipOmniVLAStrategy(NavigationStrategy):
                 log.info("Step %d | PATH FOUND (score=%.2f ≥ %.2f) — resuming",
                          step, path_score, self._path_threshold)
                 waypoints, vel, radius = self._run_inference(pil, current_jpeg)
-                if rover_ctrl and not state.paused.is_set():
+                if rover_ctrl and not state.paused.is_set() and not operator_active:
                     rover_ctrl.drive_raw(vel, radius)
+                elif operator_active:
+                    log.info("Step %d | operator control active — skipping OmniVLA drive", step)
             else:
                 log.info("Step %d | path_lost (score=%.2f)", step, path_score)
 

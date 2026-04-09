@@ -53,6 +53,17 @@ class AgentState:
     # The rover is stopped immediately when this is set via the web UI.
     paused: threading.Event = field(default_factory=threading.Event)
 
+    # Goal management — goal arrives from web chat; goal_ready gates query dispatch
+    goal: str = ""
+    goal_ready: threading.Event = field(default_factory=threading.Event)
+
+    # Operator (joystick/voice) override — active while operator_until > time.time()
+    # Each joystick POST refreshes operator_until to now + query_interval + 0.5s.
+    # When expired OmniVLA automatically resumes on the next query cycle.
+    operator_control: Optional[dict] = None   # {"fwd": int, "turn": int}
+    operator_until: float = 0.0
+    query_interval: float = 3.0              # mirrors --interval; set by rover_agent
+
     # Optional SessionRecorder — set by rover_agent.main(); None disables recording
     recorder: object = None
 
@@ -111,3 +122,11 @@ class NavigationStrategy(ABC):
         Called when the agent is restarted externally.
         """
         ...
+
+    def set_goal(self, goal: str) -> None:
+        """
+        Update the navigation goal at runtime (called when user sends goal
+        via the web chat interface). Default implementation is a no-op;
+        strategies that support dynamic goals should override this.
+        """
+        pass
