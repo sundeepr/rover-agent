@@ -385,16 +385,6 @@ class ClipOmniVLAStrategy(NavigationStrategy):
             phase = state.phase
             state.llm_query_start = t0
 
-        # Crop to the region most relevant for path following:
-        # 110 px either side of centre-x, 280 px up from the bottom.
-        full_frame = frame
-        h, w = frame.shape[:2]
-        cx   = w // 2
-        x1   = max(0, cx - 110)
-        x2   = min(w, cx + 110)
-        y1   = max(0, h - 280)
-        frame = frame[y1:h, x1:x2]
-
         pil = PIL_Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
         # Encode current frame as JPEG once (used for both detect_path and infer)
@@ -476,13 +466,11 @@ class ClipOmniVLAStrategy(NavigationStrategy):
         log.info("Step %d | state=%s score=%.2f vel=%d | %.2fs",
                  step, self._nav_state.name, path_score, vel, elapsed)
 
-        # Annotate on the full frame; waypoint overlay uses the cropped frame
+        # Annotate frame
         if waypoints is not None:
-            annotated = _annotate(full_frame, waypoints, vel, radius, self._goal)
+            annotated = _annotate(frame, waypoints, vel, radius, self._goal)
         else:
-            annotated = full_frame.copy()
-        # Draw crop rectangle so the web UI shows exactly what the model sees
-        cv2.rectangle(annotated, (x1, y1), (x2, h), (0, 255, 200), 2)
+            annotated = frame.copy()
         _draw_path_hud(annotated, path_score, self._path_threshold,
                        self._nav_state, pos_sim, neg_sim)
         with state.llm_lock:
