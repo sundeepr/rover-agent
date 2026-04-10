@@ -18,10 +18,12 @@ Creates a new timestamped directory under the resolved sessions root each run:
 
     <sessions_dir>/
       YYYYMMDD_HHMMSS/
-        raw.mp4           — continuous raw camera feed (camera fps)
-        annotated.mp4     — LLM-annotated frames (same fps; last decision held
+        raw.avi           — continuous raw camera feed (MJPG; crash-safe)
+        annotated.avi     — LLM-annotated frames (MJPG; last decision held
                             until the next one arrives)
         decisions.jsonl   — one JSON record per LLM/VLM decision step
+        raw.avi           — raw video (MJPG; replaces raw.mp4)
+        annotated.avi     — annotated video (MJPG; replaces annotated.mp4)
         events.jsonl      — every drive command, goal change, pause/resume, and
                             operator joystick input; each record has ts (epoch
                             float) and frame_idx for video correlation
@@ -174,15 +176,19 @@ class SessionRecorder:
         h, w = raw.shape[:2]
 
         if self._raw_writer is None:
-            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            # MJPG in .avi writes the index incrementally — files are playable
+            # even if the process is killed before close() is called.
+            # mp4v/.mp4 writes the moov atom only on release(), so any crash
+            # produces an unplayable file.
+            fourcc = cv2.VideoWriter_fourcc(*"MJPG")
             self._raw_writer = cv2.VideoWriter(
-                str(self.session_dir / "raw.mp4"), fourcc, self._fps, (w, h)
+                str(self.session_dir / "raw.avi"), fourcc, self._fps, (w, h)
             )
 
         if self._ann_writer is None:
-            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            fourcc = cv2.VideoWriter_fourcc(*"MJPG")
             self._ann_writer = cv2.VideoWriter(
-                str(self.session_dir / "annotated.mp4"), fourcc, self._fps, (w, h)
+                str(self.session_dir / "annotated.avi"), fourcc, self._fps, (w, h)
             )
 
         self._raw_writer.write(raw)
