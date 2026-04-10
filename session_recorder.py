@@ -22,6 +22,9 @@ Creates a new timestamped directory under the resolved sessions root each run:
         annotated.mp4     — LLM-annotated frames (same fps; last decision held
                             until the next one arrives)
         decisions.jsonl   — one JSON record per LLM/VLM decision step
+        events.jsonl      — every drive command, goal change, pause/resume, and
+                            operator joystick input; each record has ts (epoch
+                            float) and frame_idx for video correlation
 
 write_frames() is called from the agent_loop thread on every camera tick.
 write_decision() is called from strategy threads (thread-safe via lock).
@@ -32,6 +35,7 @@ import json
 import logging
 import shutil
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -137,9 +141,18 @@ class SessionRecorder:
         self._raw_writer: Optional[cv2.VideoWriter] = None
         self._ann_writer: Optional[cv2.VideoWriter] = None
 
+        # Frame counter — incremented on every write_frames() call so that
+        # decisions and events can be correlated with a specific video frame.
+        self._frame_idx = 0
+
         self._decisions_path = self.session_dir / "decisions.jsonl"
         self._decisions_lock = threading.Lock()
         self._decisions_fh = open(self._decisions_path, "a", encoding="utf-8")
+
+        # Unified event log: joystick, goal changes, pause/resume, model steps.
+        self._events_path = self.session_dir / "events.jsonl"
+        self._events_lock = threading.Lock()
+        self._events_fh = open(self._events_path, "a", encoding="utf-8")
 
         log.info("Session recording started: %s", self.session_dir.resolve())
 
@@ -174,15 +187,37 @@ class SessionRecorder:
 
         self._raw_writer.write(raw)
         self._ann_writer.write(annotated if annotated is not None else raw)
+        self._frame_idx += 1
 
     # ── Decisions ──────────────────────────────────────────────────────────────
     # Called from strategy threads — guarded by a lock.
 
     def write_decision(self, record: dict) -> None:
-        """Append one JSON record to decisions.jsonl (thread-safe)."""
+        """Append one JSON record to decisions.jsonl (thread-safe).
+
+        Also mirrors the record to events.jsonl so the event log is a
+        complete single-file reconstruction source.
+        """
+        record = {"frame_idx": self._frame_idx, **record}
         with self._decisions_lock:
             self._decisions_fh.write(json.dumps(record) + "\n")
             self._decisions_fh.flush()
+        self.write_event({"type": "omnivla_step", **record})
+
+    # ── Events ─────────────────────────────────────────────────────────────────
+    # Called from any thread — guarded by a lock.
+
+    def write_event(self, record: dict) -> None:
+        """Append one JSON record to events.jsonl (thread-safe).
+
+        Automatically injects 'ts' (epoch float) and 'frame_idx' unless
+        the caller has already set them (e.g. write_decision mirror).
+        """
+        if "ts" not in record:
+            record = {"ts": time.time(), "frame_idx": self._frame_idx, **record}
+        with self._events_lock:
+            self._events_fh.write(json.dumps(record) + "\n")
+            self._events_fh.flush()
 
     # ── Cleanup ────────────────────────────────────────────────────────────────
 
@@ -196,4 +231,6 @@ class SessionRecorder:
             self._ann_writer = None
         with self._decisions_lock:
             self._decisions_fh.close()
+        with self._events_lock:
+            self._events_fh.close()
         log.info("Session recording saved: %s", self.session_dir.resolve())

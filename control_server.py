@@ -160,6 +160,17 @@ class ControlServer:
             else:
                 log.debug("WS drive (dry): vel=%d radius=%d", vel, radius)
 
+            # Log every drive command for training-data reconstruction
+            if self._state.recorder:
+                self._state.recorder.write_event({
+                    "type":      "joystick",
+                    "source":    "ws",
+                    "fwd":       fwd,
+                    "turn":      turn,
+                    "vel":       vel,
+                    "radius":    radius if radius != 0x8000 else None,
+                })
+
             # Refresh watchdog and update shared operator state
             self._watchdog_expires = now + _WATCHDOG_S
             with self._state.result_lock:
@@ -168,14 +179,19 @@ class ControlServer:
         else:
             # Explicit zero — joystick released, stop immediately
             self._watchdog_expires = 0.0
-            self._stop()
+            self._stop(source="release")
 
-    def _stop(self) -> None:
+    def _stop(self, source: str = "watchdog") -> None:
         if self._rover_ctrl is not None:
             try:
                 self._rover_ctrl.stop()
             except Exception as e:
                 log.warning("stop error: %s", e)
+        if self._state.recorder:
+            self._state.recorder.write_event({
+                "type":   "joystick_stop",
+                "source": source,
+            })
         with self._state.result_lock:
             self._state.operator_control = None
             self._state.operator_until   = 0.0
@@ -189,4 +205,4 @@ class ControlServer:
             if self._watchdog_expires > 0 and time.time() > self._watchdog_expires:
                 log.info("WS watchdog expired — stopping rover")
                 self._watchdog_expires = 0.0
-                self._stop()
+                self._stop(source="watchdog")

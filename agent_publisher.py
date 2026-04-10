@@ -165,9 +165,13 @@ class AgentPublisher:
                     rover_ctrl.stop()
                 except Exception as e:
                     log.error("Stop error on remote pause: %s", e)
+            if state.recorder:
+                state.recorder.write_event({"type": "pause", "source": "web_ui"})
         elif not remote_paused and was_paused:
             state.paused.clear()
             log.info("Resumed by web UI")
+            if state.recorder:
+                state.recorder.write_event({"type": "resume", "source": "web_ui"})
 
     def _sync_goal(self, state, strategy, server_goal: str) -> None:
         """Forward a new goal from the web UI to the strategy and AgentState."""
@@ -180,6 +184,8 @@ class AgentPublisher:
         with state.result_lock:
             state.goal = server_goal
         state.goal_ready.set()
+        if state.recorder:
+            state.recorder.write_event({"type": "goal", "goal": server_goal})
 
     def _sync_movement(self, state, rover_ctrl, resp: dict) -> None:
         """Apply operator joystick movement from the web server response.
@@ -219,3 +225,13 @@ class AgentPublisher:
             rover_ctrl.drive_raw(vel, radius)
         except Exception as e:
             log.warning("Manual drive error: %s", e)
+            return
+        if state.recorder:
+            state.recorder.write_event({
+                "type":   "joystick",
+                "source": "http",
+                "fwd":    fwd,
+                "turn":   turn,
+                "vel":    vel,
+                "radius": radius if radius != 0x8000 else None,
+            })
