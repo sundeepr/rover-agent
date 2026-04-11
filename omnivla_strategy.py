@@ -69,10 +69,14 @@ def _waypoint_to_drive(waypoints: np.ndarray) -> tuple[int, int]:
     wp = waypoints[WAYPOINT_IDX].copy()
     dx = float(wp[0]) * METRIC_SPACING   # forward (m)
     dy = float(wp[1]) * METRIC_SPACING   # lateral (m)
+    # wp[2]=cosθ, wp[3]=sinθ — OmniVLA's explicit predicted heading at the waypoint.
+    # Use this directly instead of atan2(dy, dx) which only approximates heading
+    # from position geometry and loses information when dx is small.
+    heading   = math.atan2(float(wp[3]), float(wp[2]))   # radians, 0=forward
     if abs(dx) < 1e-6 and abs(dy) < 1e-6:
         return 0, 0x8000
     lin_m_s   = np.clip(dx / DT, 0.0, MAX_LIN_MM_S / 1000.0)
-    ang_rad_s = np.clip(math.atan2(dy, dx) / DT, -MAX_ANG_RAD_S, MAX_ANG_RAD_S)
+    ang_rad_s = np.clip(heading / DT, -MAX_ANG_RAD_S, MAX_ANG_RAD_S)
     lin_mm_s  = int(lin_m_s * 1000)
     if abs(ang_rad_s) < 0.01:
         return lin_mm_s, 0x8000
