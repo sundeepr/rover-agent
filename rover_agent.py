@@ -210,6 +210,16 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
                                     ollama_url=args.ollama_server)
     if name == "crop_row":
         from crop_row_strategy import CropRowStrategy
+        if args.lab_mode:
+            log.info("crop_row: LAB MODE — yolov8n.pt, class 58 (potted plant)")
+            return CropRowStrategy(
+                crop_type="lab-plant",
+                model_path="yolov8n.pt",
+                class_ids=[58],
+                fwd_vel=args.fwd_vel,
+                kp=args.steering_kp,
+                conf=args.yolo_conf,
+            )
         return CropRowStrategy(
             crop_type=args.crop_type,
             model_path=args.yolo_model or None,
@@ -262,6 +272,10 @@ def main():
     parser.add_argument("--steering-kp", type=float, default=0.003,
                         metavar="FLOAT",
                         help="Proportional steering gain for crop_row (default: 0.003)")
+    parser.add_argument("--lab-mode",    action="store_true",
+                        help="crop_row lab testing mode: use yolov8n.pt (COCO) and detect "
+                             "'potted plant' (class 58) — works with plastic/fake plants "
+                             "on the floor. Overrides --yolo-model and --crop-type.")
     parser.add_argument("--goal",        type=str,   default="",
                         help="Language goal for omnivla strategies. "
                              "If omitted, wait for goal via web chat UI.")
