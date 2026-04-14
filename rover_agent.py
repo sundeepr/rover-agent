@@ -208,6 +208,14 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
                                     server_addr=args.omnivla_server,
                                     path_threshold=args.path_threshold,
                                     ollama_url=args.ollama_server)
+    if name == "chilli_row":
+        from chilli_row_strategy import ChilliRowStrategy
+        return ChilliRowStrategy(
+            model_path=args.yolo_model,
+            fwd_vel=args.fwd_vel,
+            kp=args.steering_kp,
+            conf=args.yolo_conf,
+        )
     raise ValueError(f"Unknown strategy: {name!r}")
 
 
@@ -233,8 +241,22 @@ def main():
     parser.add_argument("--dry-run",     action="store_true",
                         help="Log rover commands but do not send them")
     parser.add_argument("--strategy",    type=str,   default="gemini",
-                        choices=["gemini", "omnivla", "clip_omnivla", "qwen_omnivla", "hough_crop_row"],
+                        choices=["gemini", "omnivla", "clip_omnivla", "qwen_omnivla",
+                                 "hough_crop_row", "chilli_row"],
                         help="Navigation strategy (default: gemini)")
+    parser.add_argument("--yolo-model",  type=str,   default="yolov8n.pt",
+                        metavar="PATH",
+                        help="YOLOv8/v11 weights file for chilli_row strategy "
+                             "(default: yolov8n.pt)")
+    parser.add_argument("--yolo-conf",   type=float, default=0.35,
+                        metavar="FLOAT",
+                        help="YOLO detection confidence threshold (default: 0.35)")
+    parser.add_argument("--fwd-vel",     type=int,   default=80,
+                        metavar="MM_S",
+                        help="Forward velocity mm/s for chilli_row (default: 80)")
+    parser.add_argument("--steering-kp", type=float, default=0.003,
+                        metavar="FLOAT",
+                        help="Proportional steering gain for chilli_row (default: 0.003)")
     parser.add_argument("--goal",        type=str,   default="",
                         help="Language goal for omnivla strategies. "
                              "If omitted, wait for goal via web chat UI.")
