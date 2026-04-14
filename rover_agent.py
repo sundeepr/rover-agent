@@ -208,10 +208,11 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
                                     server_addr=args.omnivla_server,
                                     path_threshold=args.path_threshold,
                                     ollama_url=args.ollama_server)
-    if name == "chilli_row":
-        from chilli_row_strategy import ChilliRowStrategy
-        return ChilliRowStrategy(
-            model_path=args.yolo_model,
+    if name == "crop_row":
+        from crop_row_strategy import CropRowStrategy
+        return CropRowStrategy(
+            crop_type=args.crop_type,
+            model_path=args.yolo_model or None,
             fwd_vel=args.fwd_vel,
             kp=args.steering_kp,
             conf=args.yolo_conf,
@@ -242,21 +243,25 @@ def main():
                         help="Log rover commands but do not send them")
     parser.add_argument("--strategy",    type=str,   default="gemini",
                         choices=["gemini", "omnivla", "clip_omnivla", "qwen_omnivla",
-                                 "hough_crop_row", "chilli_row"],
+                                 "hough_crop_row", "crop_row"],
                         help="Navigation strategy (default: gemini)")
-    parser.add_argument("--yolo-model",  type=str,   default="yolov8n.pt",
+    parser.add_argument("--crop-type",   type=str,   default="plant",
+                        metavar="NAME",
+                        help="Crop type for crop_row strategy, e.g. chilli, tomato, corn "
+                             "(default: plant). Also used as default model filename: <crop>.pt")
+    parser.add_argument("--yolo-model",  type=str,   default="",
                         metavar="PATH",
-                        help="YOLOv8/v11 weights file for chilli_row strategy "
-                             "(default: yolov8n.pt)")
+                        help="YOLOv8/v11 weights file for crop_row strategy. "
+                             "Defaults to <crop-type>.pt if not set.")
     parser.add_argument("--yolo-conf",   type=float, default=0.35,
                         metavar="FLOAT",
                         help="YOLO detection confidence threshold (default: 0.35)")
     parser.add_argument("--fwd-vel",     type=int,   default=80,
                         metavar="MM_S",
-                        help="Forward velocity mm/s for chilli_row (default: 80)")
+                        help="Forward velocity mm/s for crop_row (default: 80)")
     parser.add_argument("--steering-kp", type=float, default=0.003,
                         metavar="FLOAT",
-                        help="Proportional steering gain for chilli_row (default: 0.003)")
+                        help="Proportional steering gain for crop_row (default: 0.003)")
     parser.add_argument("--goal",        type=str,   default="",
                         help="Language goal for omnivla strategies. "
                              "If omitted, wait for goal via web chat UI.")
