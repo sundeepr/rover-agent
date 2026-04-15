@@ -184,15 +184,29 @@ class SessionRecorder:
             self._raw_writer = cv2.VideoWriter(
                 str(self.session_dir / "raw.avi"), fourcc, self._fps, (w, h)
             )
+            if not self._raw_writer.isOpened():
+                log.error(
+                    "raw.avi VideoWriter failed to open in %s — "
+                    "check disk space, permissions, and OpenCV MJPG codec. "
+                    "Exiting — please fix the issue and restart the agent.",
+                    self.session_dir,
+                )
+                import os
+                os._exit(1)
 
         if self._ann_writer is None:
             fourcc = cv2.VideoWriter_fourcc(*"MJPG")
             self._ann_writer = cv2.VideoWriter(
                 str(self.session_dir / "annotated.avi"), fourcc, self._fps, (w, h)
             )
+            if not self._ann_writer.isOpened():
+                log.error("annotated.avi VideoWriter failed to open — annotated video will not be saved")
+                self._ann_writer = None
 
-        self._raw_writer.write(raw)
-        self._ann_writer.write(annotated if annotated is not None else raw)
+        if self._raw_writer:
+            self._raw_writer.write(raw)
+        if self._ann_writer:
+            self._ann_writer.write(annotated if annotated is not None else raw)
         self._frame_idx += 1
 
     # ── Decisions ──────────────────────────────────────────────────────────────
