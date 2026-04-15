@@ -85,7 +85,8 @@ class InferenceEngine:
     not a full model reload.
     """
 
-    def __init__(self):
+    def __init__(self, weights_path: str | None = None):
+        self._weights_path = weights_path
         self._model       = None
         self._device      = None
         self._obs_tf      = None
@@ -115,7 +116,11 @@ class InferenceEngine:
         self._device = device
         log.info("Loading OmniVLA-edge on %s…", device)
 
-        weights_path = hf_hub_download("NHirose/omnivla-edge", "omnivla-edge.pth")
+        if self._weights_path:
+            weights_path = self._weights_path
+            log.info("Using custom weights: %s", weights_path)
+        else:
+            weights_path = hf_hub_download("NHirose/omnivla-edge", "omnivla-edge.pth")
         model = OmniVLA_edge(
             context_size=CONTEXT_SIZE, len_traj_pred=TRAJ_LEN, learn_angle=True,
             obs_encoder="efficientnet-b0", obs_encoding_size=ENC_SIZE,
@@ -329,11 +334,14 @@ def main():
                         help=f"TCP port (default: {DEFAULT_PORT})")
     parser.add_argument("--authkey", default=DEFAULT_AUTHKEY.decode(),
                         help="Shared secret between server and client")
+    parser.add_argument("--weights", default=None, metavar="PATH",
+                        help="Path to custom OmniVLA-edge weights (.pth). "
+                             "Defaults to downloading from HuggingFace if not set.")
     args = parser.parse_args()
 
     authkey = args.authkey.encode()
 
-    engine = InferenceEngine()
+    engine = InferenceEngine(weights_path=args.weights)
 
     OmniVLAManager.register("engine", callable=lambda: engine, exposed=["infer", "detect_path"])
     manager = OmniVLAManager(address=(args.host, args.port), authkey=authkey)
