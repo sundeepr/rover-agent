@@ -90,7 +90,7 @@ def generate_clip_prompts(
             "think":   False,
             "stream":  False,
             "format":  "json",
-            "options": {"temperature": 0.2, "num_predict": 256},
+            "options": {"temperature": 0.2, "num_predict": 256, "num_gpu": 0},
         }
         r = requests.post(f"{ollama_url}/api/chat", json=payload, timeout=60)
         r.raise_for_status()

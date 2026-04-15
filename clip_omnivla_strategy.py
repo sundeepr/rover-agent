@@ -166,12 +166,17 @@ class ClipOmniVLAStrategy(NavigationStrategy):
     def set_goal(self, goal: str) -> None:
         """Update navigation goal at runtime (called from web UI)."""
         self._goal = goal
+        self._path_cache.clear()
+        if not self._loaded.is_set():
+            # Models still loading — just store the goal; _load() will call
+            # generate_clip_prompts() after OmniVLA+CLIP are on GPU.
+            log.info("Goal stored (models loading): '%s'", goal)
+            return
         _prompts = generate_clip_prompts(goal, ollama_url=self._ollama_url)
         self._pos_prompts = _prompts["positive"]
         self._neg_prompts = _prompts["negative"]
-        self._path_cache.clear()
         # Re-encode path detection prompts in local mode if CLIP is loaded
-        if not self._server_addr and self._loaded.is_set() and self._clip_model is not None:
+        if not self._server_addr and self._clip_model is not None:
             self._encode_path_prompts()
         with self._state_lock:
             self._nav_state = _NavState.PATH_LOST
