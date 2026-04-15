@@ -211,10 +211,10 @@ class HoughCropRowStrategy(NavigationStrategy):
         self._server_addr     = server_addr
         self._path_threshold  = path_threshold
 
-        # Generate CLIP prompts from goal (same as clip_omnivla_strategy)
-        _prompts = generate_clip_prompts(goal, ollama_url=ollama_url)
-        self._pos_prompts: list = _prompts["positive"]
-        self._neg_prompts: list = _prompts["negative"]
+        # Prompt generation deferred to _load() so OmniVLA+CLIP claim GPU first
+        self._ollama_url  = ollama_url
+        self._pos_prompts: list = []
+        self._neg_prompts: list = []
 
         self._nav_state  = _NavState.INITIALIZING
         self._state_lock = threading.Lock()
@@ -356,6 +356,13 @@ class HoughCropRowStrategy(NavigationStrategy):
         self._path_neg_feat = (neg / neg.norm(dim=-1, keepdim=True)).mean(dim=0, keepdim=True)
         log.info("HoughCropRow: CLIP prompts encoded (%d pos, %d neg)",
                  len(self._pos_prompts), len(self._neg_prompts))
+
+        # Generate CLIP prompts via Ollama now that OmniVLA+CLIP are on GPU
+        if self._goal:
+            log.info("HoughCropRow: generating CLIP prompts via Ollama (OmniVLA already loaded)…")
+            _prompts = generate_clip_prompts(self._goal, ollama_url=self._ollama_url)
+            self._pos_prompts = _prompts["positive"]
+            self._neg_prompts = _prompts["negative"]
 
         self._loaded.set()
         with self._state_lock:
