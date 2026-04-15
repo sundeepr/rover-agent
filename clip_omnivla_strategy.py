@@ -101,14 +101,11 @@ class ClipOmniVLAStrategy(NavigationStrategy):
         self._weights_path    = weights_path   # None → download from HuggingFace
         self._path_cache: dict = {}  # keyed by (tuple(pos), tuple(neg))
 
-        # Generate CLIP prompts if goal provided; otherwise deferred to set_goal()
-        if goal:
-            _prompts = generate_clip_prompts(goal, ollama_url=ollama_url)
-            self._pos_prompts: list = _prompts["positive"]
-            self._neg_prompts: list = _prompts["negative"]
-        else:
-            self._pos_prompts = []
-            self._neg_prompts = []
+        # Prompt generation is deferred to inside _load() so that OmniVLA and
+        # CLIP claim GPU memory first — Ollama/Qwen3 is called only after the
+        # heavy models are fully loaded.
+        self._pos_prompts: list = []
+        self._neg_prompts: list = []
 
         self._nav_state = _NavState.INITIALIZING
         # query_in_flight serialises query threads so no separate lock needed,
@@ -284,7 +281,15 @@ class ClipOmniVLAStrategy(NavigationStrategy):
             self._modality_id = torch.tensor([MODALITY_LANG], device=device)
             log.info("ClipOmniVLA: language-only goal (modality %d)", MODALITY_LANG)
 
-        # Encode path detection prompts (generated from goal by Qwen3 at startup)
+        # Generate CLIP prompts via Ollama now — OmniVLA + CLIP are already on
+        # GPU so Qwen3 cannot displace them.
+        if self._goal:
+            log.info("ClipOmniVLA: generating CLIP prompts via Ollama (OmniVLA already loaded)…")
+            _prompts = generate_clip_prompts(self._goal, ollama_url=self._ollama_url)
+            self._pos_prompts = _prompts["positive"]
+            self._neg_prompts = _prompts["negative"]
+
+        # Encode path detection prompts
         if self._pos_prompts and self._neg_prompts:
             with torch.no_grad():
                 pos = clip_model.encode_text(
