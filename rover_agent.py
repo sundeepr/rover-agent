@@ -195,7 +195,8 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
         return ClipOmniVLAStrategy(goal=args.goal, goal_image_path=args.goal_image,
                                    server_addr=args.omnivla_server,
                                    path_threshold=args.path_threshold,
-                                   ollama_url=args.ollama_server)
+                                   ollama_url=args.ollama_server,
+                                   weights_path=args.omnivla_weights)
     if name == "qwen_omnivla":
         from qwen_omnivla_strategy import QwenOmniVLAStrategy
         return QwenOmniVLAStrategy(goal=args.goal, goal_image_path=args.goal_image,
@@ -255,6 +256,10 @@ def main():
                         choices=["gemini", "omnivla", "clip_omnivla", "qwen_omnivla",
                                  "hough_crop_row", "crop_row"],
                         help="Navigation strategy (default: gemini)")
+    parser.add_argument("--omnivla-weights", type=str, default=None,
+                        metavar="PATH",
+                        help="Path to custom OmniVLA-edge weights (.pth). "
+                             "Defaults to downloading from HuggingFace if not set.")
     parser.add_argument("--crop-type",   type=str,   default="plant",
                         metavar="NAME",
                         help="Crop type for crop_row strategy, e.g. chilli, tomato, corn "

@@ -91,12 +91,14 @@ class ClipOmniVLAStrategy(NavigationStrategy):
         server_addr: str | None = None,
         path_threshold: float = 0.5,
         ollama_url: str = "http://localhost:11434",
+        weights_path: str | None = None,
     ):
         self._goal            = goal
         self._goal_image_path = goal_image_path
         self._server_addr     = server_addr
         self._path_threshold  = path_threshold
         self._ollama_url      = ollama_url
+        self._weights_path    = weights_path   # None → download from HuggingFace
         self._path_cache: dict = {}  # keyed by (tuple(pos), tuple(neg))
 
         # Generate CLIP prompts if goal provided; otherwise deferred to set_goal()
@@ -218,7 +220,12 @@ class ClipOmniVLAStrategy(NavigationStrategy):
         self._device = device
         log.info("ClipOmniVLA: loading OmniVLA-edge on %s…", device)
 
-        weights_path = hf_hub_download("NHirose/omnivla-edge", "omnivla-edge.pth")
+        if self._weights_path:
+            weights_path = self._weights_path
+            log.info("ClipOmniVLA: using custom weights '%s'", weights_path)
+        else:
+            weights_path = hf_hub_download("NHirose/omnivla-edge", "omnivla-edge.pth")
+            log.info("ClipOmniVLA: using HuggingFace weights")
         model = OmniVLA_edge(
             context_size=CONTEXT_SIZE, len_traj_pred=TRAJ_LEN, learn_angle=True,
             obs_encoder="efficientnet-b0", obs_encoding_size=ENC_SIZE,
