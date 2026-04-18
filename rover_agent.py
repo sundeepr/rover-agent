@@ -174,6 +174,32 @@ def agent_loop(
     log.info("Camera released")
 
 
+# ── Down-camera loop ───────────────────────────────────────────────────────────
+
+def _down_camera_loop(strategy, device: int) -> None:
+    """
+    Capture loop for the downward-facing camera (row_centering_omnivla only).
+
+    Opened and managed here — not inside the strategy — so all camera lifecycle
+    stays in rover_agent.py and device indices are unambiguous.
+    """
+    cap = cv2.VideoCapture(device)
+    if not cap.isOpened():
+        log.error("Could not open down-camera at device %d — row centering disabled", device)
+        return
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, prompts.IMAGE_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, prompts.IMAGE_HEIGHT)
+    log.info("Down-camera opened: device %d  %dx%d", device,
+             int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+             int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+    while True:
+        ret, frame = cap.read()
+        if ret:
+            strategy.update_down_frame(frame)
+        time.sleep(0.033)
+    cap.release()
+
+
 # ── Strategy factory ───────────────────────────────────────────────────────────
 
 def _build_strategy(name: str, args) -> NavigationStrategy:
@@ -218,7 +244,6 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
             path_threshold=args.path_threshold,
             ollama_url=args.ollama_server,
             weights_path=args.omnivla_weights,
-            down_device=args.down_device,
             centering_gain=args.centering_gain,
             centering_alpha=args.centering_alpha,
         )
@@ -400,12 +425,21 @@ def main():
         ControlServer(state, rover_ctrl, port=args.control_port).start()
         log.info("WS control     : ws://0.0.0.0:%d", args.control_port)
 
-    # Agent loop (camera + inference dispatch)
+    # Agent loop (front camera + inference dispatch)
     threading.Thread(
         target=agent_loop,
         args=(state, strategy, args.device, args.interval, rover_ctrl),
         daemon=True,
     ).start()
+
+    # Down-camera loop (row_centering_omnivla only)
+    if hasattr(strategy, "update_down_frame"):
+        log.info("Down-camera    : device %d", args.down_device)
+        threading.Thread(
+            target=_down_camera_loop,
+            args=(strategy, args.down_device),
+            daemon=True,
+        ).start()
 
     # Publisher loop (reads AgentState, POSTs to web server)
     publisher = AgentPublisher(args.web_server)

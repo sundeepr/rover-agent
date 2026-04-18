@@ -275,14 +275,18 @@ class RowCenteringOmniVLAStrategy(NavigationStrategy):
         Ollama API URL used to generate CLIP prompts.
     weights_path : str | None
         Custom OmniVLA-edge weights (.pth), or None to download from HuggingFace.
-    down_device : int
-        OpenCV device index for the downward-facing camera (default 1).
     centering_gain : float
         Proportional gain: rad/s per pixel of lateral error (default 0.001).
         Increase if corrections feel sluggish; decrease to reduce oscillation.
     centering_alpha : float
         Blending weight applied to the centering correction before adding to
         OmniVLA's angular velocity.  0 = no centering, 1 = full override (default 0.4).
+
+    Notes
+    -----
+    The downward camera is NOT opened by this strategy. rover_agent.py opens
+    it separately (--down-device) and feeds frames via update_down_frame().
+    This keeps all camera lifecycle management in one place.
     """
 
     def __init__(
@@ -293,7 +297,6 @@ class RowCenteringOmniVLAStrategy(NavigationStrategy):
         path_threshold: float = 0.5,
         ollama_url: str = "http://localhost:11434",
         weights_path: str | None = None,
-        down_device: int = 1,
         centering_gain: float = 0.001,
         centering_alpha: float = 0.4,
     ):
@@ -318,11 +321,9 @@ class RowCenteringOmniVLAStrategy(NavigationStrategy):
 
         self._loaded = threading.Event()
 
-        # ── Downward camera ───────────────────────────────────────────────────
+        # Down-camera frames are pushed externally via update_down_frame()
         self._down_frame: np.ndarray | None = None
         self._down_lock  = threading.Lock()
-        self._down_cap: cv2.VideoCapture | None = None
-        self._start_down_camera(down_device)
 
         # ── Front-camera model setup (mirrors ClipOmniVLAStrategy) ────────────
         if server_addr:
@@ -356,29 +357,12 @@ class RowCenteringOmniVLAStrategy(NavigationStrategy):
             self._modality_id   = None
             threading.Thread(target=self._load, daemon=True, name="row-center-load").start()
 
-    # ── Down-camera management ────────────────────────────────────────────────
+    # ── Down-camera frame interface ───────────────────────────────────────────
 
-    def _start_down_camera(self, device: int) -> None:
-        cap = cv2.VideoCapture(device)
-        if not cap.isOpened():
-            log.warning(
-                "RowCentering: down-camera device %d not available — centering disabled", device
-            )
-            cap.release()
-            return
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        self._down_cap = cap
-        threading.Thread(target=self._down_cam_loop, daemon=True, name="down-cam").start()
-        log.info("RowCentering: down-camera opened on device %d", device)
-
-    def _down_cam_loop(self) -> None:
-        while True:
-            ret, frame = self._down_cap.read()
-            if ret:
-                with self._down_lock:
-                    self._down_frame = frame
-            time.sleep(0.033)
+    def update_down_frame(self, frame: np.ndarray) -> None:
+        """Called by rover_agent's down-camera loop with each captured frame."""
+        with self._down_lock:
+            self._down_frame = frame.copy()
 
     def _get_down_frame(self) -> np.ndarray | None:
         with self._down_lock:
