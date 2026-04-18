@@ -158,6 +158,10 @@ _HTML = """<!DOCTYPE html>
           <div class="label">&#x1F9E0; Last query — with waypoints</div>
           <img src="/video/llm" alt="LLM frame">
         </div>
+        <div class="video-box" id="down-cam-box">
+          <div class="label">&#x1F4F7; Down camera — row centering</div>
+          <img src="/video/down" alt="down camera">
+        </div>
       </div>
 
       <div class="bottom-bar">
@@ -198,6 +202,9 @@ _HTML = """<!DOCTYPE html>
         <div class="value" id="waypoints">—</div></div>
       <div class="kv"><div class="label">Reasoning</div>
         <div class="value" id="reasoning">—</div></div>
+      <div class="kv" id="centering-kv" style="display:none">
+        <div class="label">Row Centering</div>
+        <div class="value" id="centering">—</div></div>
       <div class="kv"><div class="label">LLM Timer</div>
         <div class="value" id="llm-timer">—</div></div>
 
@@ -376,6 +383,18 @@ _HTML = """<!DOCTYPE html>
           clearInterval(_timerInterval); _timerInterval = null; updateTimer();
         }
 
+        // Row centering (only shown for row_centering_omnivla strategy)
+        const hasCentering = d.row_lateral_error_px != null;
+        document.getElementById('centering-kv').style.display = hasCentering ? '' : 'none';
+        document.getElementById('down-cam-box').style.display  = hasCentering ? '' : 'none';
+        if (hasCentering) {
+          const err = d.row_lateral_error_px;
+          const on  = d.centering_applied;
+          const cEl = document.getElementById('centering');
+          cEl.textContent = `err=${err > 0 ? '+' : ''}${err.toFixed(1)}px  ${on ? 'correcting' : 'no rows'}`;
+          cEl.style.color = on ? '#4caf50' : '#ffeb3b';
+        }
+
         // Merge new agent-pushed chat messages (e.g. "Ready")
         const serverChat = d.chat_history ?? [];
         for (let i = _chatIdx; i < serverChat.length; i++) {
@@ -487,6 +506,7 @@ class _ServerState:
         self._lock        = threading.Lock()
         self.raw_jpeg     = None          # bytes | None
         self.llm_jpeg     = None          # bytes | None
+        self.down_jpeg    = None          # bytes | None  (downward-facing camera)
         self.status       = {}            # latest JSON from agent
         self.paused       = False
         self.last_push    = 0.0           # epoch seconds
@@ -541,6 +561,7 @@ class WebServer:
         app.add_url_rule("/",                       "index",        self._index)
         app.add_url_rule("/video/realtime",         "v_realtime",   self._video_realtime)
         app.add_url_rule("/video/llm",              "v_llm",        self._video_llm)
+        app.add_url_rule("/video/down",             "v_down",       self._video_down)
         app.add_url_rule("/status",                 "status",       self._status)
         app.add_url_rule("/pause",                  "pause",        self._pause,        methods=["POST"])
         app.add_url_rule("/agent/frame",            "agent_frame",  self._agent_frame,  methods=["POST"])
@@ -553,15 +574,17 @@ class WebServer:
     # ── Agent push endpoints ──────────────────────────────────────────────────
 
     def _agent_frame(self):
-        """POST /agent/frame?stream=realtime|llm  body: raw JPEG bytes."""
+        """POST /agent/frame?stream=realtime|llm|down  body: raw JPEG bytes."""
         stream = request.args.get("stream", "realtime")
         jpeg   = request.get_data()
         with self._state.lock:
             self._state.touch()
             if stream == "llm":
-                self._state.llm_jpeg = jpeg
+                self._state.llm_jpeg  = jpeg
+            elif stream == "down":
+                self._state.down_jpeg = jpeg
             else:
-                self._state.raw_jpeg = jpeg
+                self._state.raw_jpeg  = jpeg
             paused = self._state.paused
         return jsonify({"ok": True, "paused": paused})
 
@@ -604,6 +627,12 @@ class WebServer:
     def _video_llm(self):
         return Response(
             self._stream(lambda: self._state.llm_jpeg, "Waiting for first query..."),
+            mimetype="multipart/x-mixed-replace; boundary=frame",
+        )
+
+    def _video_down(self):
+        return Response(
+            self._stream(lambda: self._state.down_jpeg, "No down camera"),
             mimetype="multipart/x-mixed-replace; boundary=frame",
         )
 

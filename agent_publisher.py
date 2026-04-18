@@ -72,6 +72,12 @@ class AgentPublisher:
                 self._push_frame(sess, llm, "llm")
                 last_llm_id = llm_id
 
+            # ── Down camera frame (row_centering_omnivla strategy only) ───
+            if strategy is not None and hasattr(strategy, "_get_down_frame"):
+                down = strategy._get_down_frame()
+                if down is not None:
+                    self._push_frame(sess, down, "down")
+
             # ── Status + sync (every cycle) ──────────────────────────────
             status = self._build_status(state)
             resp   = self._push_status(sess, status)
