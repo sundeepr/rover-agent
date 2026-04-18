@@ -80,6 +80,8 @@ class AgentPublisher:
 
             # ── Status + sync (every cycle) ──────────────────────────────
             status = self._build_status(state)
+            if strategy is not None and hasattr(strategy, "_get_down_frame"):
+                status["has_down_cam"] = True
             resp   = self._push_status(sess, status)
             self._sync_pause(state, rover_ctrl, resp.get("paused", False))
             self._sync_goal(state, strategy, resp.get("goal", ""))

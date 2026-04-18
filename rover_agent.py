@@ -176,26 +176,59 @@ def agent_loop(
 
 # ── Down-camera loop ───────────────────────────────────────────────────────────
 
+def _scan_cameras(max_index: int = 6) -> list[int]:
+    """Return a list of camera device indices that can be opened."""
+    available = []
+    for i in range(max_index):
+        cap = cv2.VideoCapture(i)
+        if cap.isOpened():
+            available.append(i)
+        cap.release()
+    return available
+
+
 def _down_camera_loop(strategy, device: int) -> None:
     """
     Capture loop for the downward-facing camera (row_centering_omnivla only).
 
     Opened and managed here — not inside the strategy — so all camera lifecycle
     stays in rover_agent.py and device indices are unambiguous.
+
+    Retries indefinitely if the device is not yet available at startup.
     """
-    cap = cv2.VideoCapture(device)
-    if not cap.isOpened():
-        log.error("Could not open down-camera at device %d — row centering disabled", device)
-        return
+    cap = None
+    while cap is None or not cap.isOpened():
+        if cap is not None:
+            cap.release()
+        cap = cv2.VideoCapture(device)
+        if not cap.isOpened():
+            available = _scan_cameras()
+            log.error(
+                "Down-camera device %d not available — available devices: %s  "
+                "(use --down-device to select the correct one)",
+                device, available or "none found",
+            )
+            time.sleep(3.0)
+
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, prompts.IMAGE_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, prompts.IMAGE_HEIGHT)
     log.info("Down-camera opened: device %d  %dx%d", device,
              int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
              int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+
+    consecutive_failures = 0
     while True:
         ret, frame = cap.read()
         if ret:
             strategy.update_down_frame(frame)
+            consecutive_failures = 0
+        else:
+            consecutive_failures += 1
+            if consecutive_failures >= 30:
+                log.warning("Down-camera device %d: 30 consecutive read failures — reopening", device)
+                cap.release()
+                cap = cv2.VideoCapture(device)
+                consecutive_failures = 0
         time.sleep(0.033)
     cap.release()
 
@@ -361,7 +394,9 @@ def main():
     log.info("Camera device : %d", args.device)
     log.info("Query interval: %.1fs", args.interval)
     log.info("Strategy      : %s", args.strategy)
-    if args.strategy in ("omnivla", "clip_omnivla", "qwen_omnivla"):
+    _omnivla_strategies = ("omnivla", "clip_omnivla", "qwen_omnivla",
+                           "hough_crop_row", "row_centering_omnivla")
+    if args.strategy in _omnivla_strategies:
         log.info("Goal          : %s", args.goal)
         if args.goal_image:
             log.info("Goal image    : %s", args.goal_image)
@@ -369,13 +404,14 @@ def main():
             log.info("OmniVLA server: %s", args.omnivla_server)
         else:
             log.info("OmniVLA server: (loading locally)")
-        if args.strategy in ("clip_omnivla", "qwen_omnivla"):
+        if args.strategy in ("clip_omnivla", "qwen_omnivla",
+                              "hough_crop_row", "row_centering_omnivla"):
             log.info("Path threshold: %.2f", args.path_threshold)
             log.info("Ollama server : %s", args.ollama_server)
-        if args.strategy == "clip_omnivla":
-            log.info("Prompt model  : qwen3:4b (CLIP prompt generation)")
-        if args.strategy == "qwen_omnivla":
-            log.info("Vision model  : moondream (path detection)")
+        if args.strategy == "row_centering_omnivla":
+            log.info("Down device   : %d", args.down_device)
+            log.info("Center gain   : %.4f  alpha: %.2f",
+                     args.centering_gain, args.centering_alpha)
     else:
         log.info("Model         : %s", gemini_client.MODEL)
     log.info("Web server    : %s", args.web_server)

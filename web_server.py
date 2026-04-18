@@ -384,7 +384,7 @@ _HTML = """<!DOCTYPE html>
         }
 
         // Row centering (only shown for row_centering_omnivla strategy)
-        const hasCentering = d.row_lateral_error_px != null;
+        const hasCentering = d.has_down_cam || d.row_lateral_error_px != null;
         document.getElementById('centering-kv').style.display = hasCentering ? '' : 'none';
         document.getElementById('down-cam-box').style.display  = hasCentering ? '' : 'none';
         if (hasCentering) {
