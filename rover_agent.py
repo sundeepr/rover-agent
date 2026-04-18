@@ -209,6 +209,19 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
                                     server_addr=args.omnivla_server,
                                     path_threshold=args.path_threshold,
                                     ollama_url=args.ollama_server)
+    if name == "row_centering_omnivla":
+        from row_centering_omnivla_strategy import RowCenteringOmniVLAStrategy
+        return RowCenteringOmniVLAStrategy(
+            goal=args.goal,
+            goal_image_path=args.goal_image,
+            server_addr=args.omnivla_server,
+            path_threshold=args.path_threshold,
+            ollama_url=args.ollama_server,
+            weights_path=args.omnivla_weights,
+            down_device=args.down_device,
+            centering_gain=args.centering_gain,
+            centering_alpha=args.centering_alpha,
+        )
     if name == "crop_row":
         from crop_row_strategy import CropRowStrategy
         if args.lab_mode:
@@ -254,7 +267,7 @@ def main():
                         help="Log rover commands but do not send them")
     parser.add_argument("--strategy",    type=str,   default="gemini",
                         choices=["gemini", "omnivla", "clip_omnivla", "qwen_omnivla",
-                                 "hough_crop_row", "crop_row"],
+                                 "hough_crop_row", "crop_row", "row_centering_omnivla"],
                         help="Navigation strategy (default: gemini)")
     parser.add_argument("--omnivla-weights", type=str, default=None,
                         metavar="PATH",
@@ -299,6 +312,18 @@ def main():
                         metavar="URL",
                         help="Ollama API URL for Qwen models "
                              "(default: http://localhost:11434)")
+    parser.add_argument("--down-device",     type=int,   default=1,
+                        metavar="INDEX",
+                        help="Camera device index for downward-facing row-centering camera "
+                             "(row_centering_omnivla strategy, default: 1)")
+    parser.add_argument("--centering-gain",  type=float, default=0.001,
+                        metavar="FLOAT",
+                        help="Proportional gain (rad/s per pixel) for row-centering correction "
+                             "(row_centering_omnivla strategy, default: 0.001)")
+    parser.add_argument("--centering-alpha", type=float, default=0.4,
+                        metavar="FLOAT",
+                        help="Centering correction blend weight: 0=off, 1=full override "
+                             "(row_centering_omnivla strategy, default: 0.4)")
     parser.add_argument("--control-port",  type=int, default=5002,
                         metavar="PORT",
                         help="WebSocket joystick control port for browser/Android "
