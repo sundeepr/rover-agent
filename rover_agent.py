@@ -281,6 +281,9 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
             weights_path=args.omnivla_weights,
             centering_gain=args.centering_gain,
             centering_alpha=args.centering_alpha,
+            yolo_model_path=args.yolo_model or f"{args.crop_type}.pt",
+            yolo_class_ids=None,
+            yolo_conf=args.yolo_conf,
         )
     if name == "crop_row":
         from crop_row_strategy import CropRowStrategy
@@ -414,6 +417,8 @@ def main():
             log.info("Down device   : %d", args.down_device)
             log.info("Center gain   : %.4f  alpha: %.2f",
                      args.centering_gain, args.centering_alpha)
+            log.info("YOLO model    : %s  conf=%.2f",
+                     args.yolo_model or f"{args.crop_type}.pt", args.yolo_conf)
     else:
         log.info("Model         : %s", gemini_client.MODEL)
     log.info("Web server    : %s", args.web_server)
