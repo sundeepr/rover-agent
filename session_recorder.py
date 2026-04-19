@@ -138,10 +138,11 @@ class SessionRecorder:
 
         self._fps = fps
 
-        # VideoWriters are lazy-initialised on the first write_frames() call so
-        # the frame dimensions are known before the writers are created.
-        self._raw_writer: Optional[cv2.VideoWriter] = None
-        self._ann_writer: Optional[cv2.VideoWriter] = None
+        # VideoWriters are lazy-initialised on the first write call so the
+        # frame dimensions are known before the writers are created.
+        self._raw_writer:  Optional[cv2.VideoWriter] = None
+        self._ann_writer:  Optional[cv2.VideoWriter] = None
+        self._down_writer: Optional[cv2.VideoWriter] = None
 
         # Frame counter — incremented on every write_frames() call so that
         # decisions and events can be correlated with a specific video frame.
@@ -209,6 +210,20 @@ class SessionRecorder:
             self._ann_writer.write(annotated if annotated is not None else raw)
         self._frame_idx += 1
 
+    def write_down_frame(self, frame: np.ndarray) -> None:
+        """Write one downward-camera frame to down.avi (lazy-init, thread-safe)."""
+        h, w = frame.shape[:2]
+        if self._down_writer is None:
+            fourcc = cv2.VideoWriter_fourcc(*"MJPG")
+            self._down_writer = cv2.VideoWriter(
+                str(self.session_dir / "down.avi"), fourcc, self._fps, (w, h)
+            )
+            if not self._down_writer.isOpened():
+                log.error("down.avi VideoWriter failed to open — down-camera video will not be saved")
+                self._down_writer = None
+        if self._down_writer:
+            self._down_writer.write(frame)
+
     # ── Decisions ──────────────────────────────────────────────────────────────
     # Called from strategy threads — guarded by a lock.
 
@@ -249,6 +264,9 @@ class SessionRecorder:
         if self._ann_writer:
             self._ann_writer.release()
             self._ann_writer = None
+        if self._down_writer:
+            self._down_writer.release()
+            self._down_writer = None
         with self._decisions_lock:
             self._decisions_fh.close()
         with self._events_lock:

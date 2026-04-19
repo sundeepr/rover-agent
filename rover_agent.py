@@ -187,7 +187,7 @@ def _scan_cameras(max_index: int = 6) -> list[int]:
     return available
 
 
-def _down_camera_loop(strategy, device: int) -> None:
+def _down_camera_loop(strategy, device: int, state=None) -> None:
     """
     Capture loop for the downward-facing camera (row_centering_omnivla only).
 
@@ -221,6 +221,8 @@ def _down_camera_loop(strategy, device: int) -> None:
         ret, frame = cap.read()
         if ret:
             strategy.update_down_frame(frame)
+            if state is not None and state.recorder:
+                state.recorder.write_down_frame(frame)
             consecutive_failures = 0
         else:
             consecutive_failures += 1
@@ -473,7 +475,7 @@ def main():
         log.info("Down-camera    : device %d", args.down_device)
         threading.Thread(
             target=_down_camera_loop,
-            args=(strategy, args.down_device),
+            args=(strategy, args.down_device, state),
             daemon=True,
         ).start()
 
