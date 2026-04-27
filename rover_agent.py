@@ -222,7 +222,11 @@ def _down_camera_loop(strategy, device: int, state=None) -> None:
         if ret:
             strategy.update_down_frame(frame)
             if state is not None and state.recorder:
-                state.recorder.write_down_frame(frame)
+                # Prefer annotated frame (YOLO + gap overlay, updated at inference rate).
+                # Falls back to raw until the first inference completes.
+                ann = (strategy.get_down_annotated_frame()
+                       if hasattr(strategy, "get_down_annotated_frame") else None)
+                state.recorder.write_down_frame(ann if ann is not None else frame)
             consecutive_failures = 0
         else:
             consecutive_failures += 1

@@ -349,6 +349,12 @@ class RowCenteringOmniVLAStrategy(NavigationStrategy):
         self._down_frame: np.ndarray | None = None
         self._down_lock  = threading.Lock()
 
+        # Latest annotated down frame (YOLO boxes + gap overlay), updated at
+        # inference rate. Held between inferences so down.avi stays populated,
+        # mirroring how state.llm_frame works for the front camera.
+        self._down_ann_frame: np.ndarray | None = None
+        self._down_ann_lock  = threading.Lock()
+
         # ── Front-camera model setup (mirrors ClipOmniVLAStrategy) ────────────
         if server_addr:
             host, port_str = server_addr.rsplit(":", 1)
@@ -391,6 +397,11 @@ class RowCenteringOmniVLAStrategy(NavigationStrategy):
     def _get_down_frame(self) -> np.ndarray | None:
         with self._down_lock:
             return self._down_frame.copy() if self._down_frame is not None else None
+
+    def get_down_annotated_frame(self) -> np.ndarray | None:
+        """Return the latest annotated down frame (YOLO + gap overlay), or None."""
+        with self._down_ann_lock:
+            return self._down_ann_frame.copy() if self._down_ann_frame is not None else None
 
     # ── NavigationStrategy interface ──────────────────────────────────────────
 
@@ -676,6 +687,8 @@ class RowCenteringOmniVLAStrategy(NavigationStrategy):
             down_annotated = _annotate_down_frame(
                 down_frame, gap_cx, left_wall, right_wall, down_boxes, lateral_error_px
             )
+            with self._down_ann_lock:
+                self._down_ann_frame = down_annotated
             log.info(
                 "RowCentering: gap_cx=%s  error=%+.1f px  left_wall=%s  right_wall=%s  boxes=%d",
                 gap_cx, lateral_error_px, left_wall, right_wall, len(down_boxes),
