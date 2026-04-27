@@ -59,6 +59,12 @@ log = logging.getLogger("rover.row_centering_omnivla")
 # CLIP path detection floor (same as clip_omnivla)
 _MIN_PATH_POS_SIM = 0.18
 
+# Resolution fed to the OmniVLA/CLIP server. Both cameras capture at their
+# maximum native resolution; frames are downscaled here before JPEG-encoding
+# for the inference server. Local inference paths use torchvision T.Resize()
+# and need no explicit resize.
+_MODEL_W, _MODEL_H = 640, 480
+
 # ── Row-centering constants ────────────────────────────────────────────────────
 _MAX_ERROR_PX     = 160    # lateral error clamped at ±this value (px)
 
@@ -642,10 +648,13 @@ class RowCenteringOmniVLAStrategy(NavigationStrategy):
 
         pil = PIL_Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
-        # Encode front frame as JPEG once (shared by detect_path and infer in server mode)
+        # Encode front frame as JPEG once (shared by detect_path and infer in server mode).
+        # Downscale to model input size first — camera captures at full/max resolution.
         if self._server_addr:
+            pil_enc = (pil.resize((_MODEL_W, _MODEL_H))
+                       if pil.size != (_MODEL_W, _MODEL_H) else pil)
             buf = io.BytesIO()
-            pil.save(buf, format="JPEG", quality=85)
+            pil_enc.save(buf, format="JPEG", quality=85)
             current_jpeg = buf.getvalue()
         else:
             current_jpeg = None
