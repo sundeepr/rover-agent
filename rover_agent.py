@@ -276,7 +276,7 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
                                     ollama_url=args.ollama_server)
     if name == "row_centering_omnivla":
         from row_centering_omnivla_strategy import RowCenteringOmniVLAStrategy
-        _yolo_path = args.yolo_model or f"{args.crop_type}.pt"
+        _yolo_path = args.yolo_model
         # Resolve relative paths against the script directory as a fallback
         _yolo_resolved = Path(_yolo_path)
         if not _yolo_resolved.is_absolute() and not _yolo_resolved.exists():
@@ -358,10 +358,11 @@ def main():
                         metavar="NAME",
                         help="Crop type for crop_row strategy, e.g. chilli, tomato, corn "
                              "(default: plant). Also used as default model filename: <crop>.pt")
-    parser.add_argument("--yolo-model",  type=str,   default="",
+    parser.add_argument("--yolo-model",  type=str,   default="yolov8n-oiv7.pt",
                         metavar="PATH",
-                        help="YOLOv8/v11 weights file for crop_row strategy. "
-                             "Defaults to <crop-type>.pt if not set.")
+                        help="YOLOv8/v11 weights file (default: yolov8n-oiv7.pt). "
+                             "For row_centering_omnivla the plant class is auto-detected "
+                             "from the model's class names.")
     parser.add_argument("--yolo-conf",   type=float, default=0.35,
                         metavar="FLOAT",
                         help="YOLO detection confidence threshold (default: 0.35)")
@@ -435,8 +436,7 @@ def main():
             log.info("Down device   : %d", args.down_device)
             log.info("Center gain   : %.4f  alpha: %.2f",
                      args.centering_gain, args.centering_alpha)
-            log.info("YOLO model    : %s  conf=%.2f",
-                     args.yolo_model or f"{args.crop_type}.pt", args.yolo_conf)
+            log.info("YOLO model    : %s  conf=%.2f", args.yolo_model, args.yolo_conf)
     else:
         log.info("Model         : %s", gemini_client.MODEL)
     log.info("Web server    : %s", args.web_server)

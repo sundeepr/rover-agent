@@ -551,7 +551,17 @@ class RowCenteringOmniVLAStrategy(NavigationStrategy):
         try:
             from ultralytics import YOLO
             model = YOLO(self._yolo_model_path)
-            # Warm-up inference on CPU so ultralytics locks the device before first real call
+            # Auto-detect plant class IDs from the model's own name table if not overridden
+            if self._yolo_class_ids is None:
+                plant_ids = {k for k, v in model.names.items() if "plant" in v.lower()}
+                if plant_ids:
+                    self._yolo_class_ids = plant_ids
+                    log.info("RowCenteringOmniVLA: plant classes → %s",
+                             {k: model.names[k] for k in sorted(plant_ids)})
+                else:
+                    log.warning("RowCenteringOmniVLA: no 'plant' class found in model — "
+                                "using all %d classes", len(model.names))
+            # Warm-up on CPU so ultralytics locks the execution provider before first real call
             model(np.zeros((64, 64, 3), dtype=np.uint8), verbose=False, device="cpu")
             self._yolo_model = model
             log.info("RowCenteringOmniVLA: YOLO ready on CPU — class_ids=%s conf=%.2f",
