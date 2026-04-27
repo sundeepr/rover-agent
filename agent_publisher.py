@@ -76,6 +76,9 @@ class AgentPublisher:
             if strategy is not None and hasattr(strategy, "_get_down_frame"):
                 down = strategy._get_down_frame()
                 if down is not None:
+                    dh, dw = down.shape[:2]
+                    if dw > 640:
+                        down = cv2.resize(down, (640, 480))
                     self._push_frame(sess, down, "down")
 
             # ── Status + sync (every cycle) ──────────────────────────────
