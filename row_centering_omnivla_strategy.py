@@ -106,7 +106,7 @@ def _find_row_gap_yolo(
     h, w = down_bgr.shape[:2]
     frame_cx = w // 2
 
-    results = model(down_bgr, verbose=False)[0]
+    results = model(down_bgr, verbose=False, device="cpu")[0]
     boxes = []
     for box in results.boxes:
         if float(box.conf[0]) < conf_threshold:
@@ -546,14 +546,19 @@ class RowCenteringOmniVLAStrategy(NavigationStrategy):
         log.info("RowCenteringOmniVLAStrategy ready — goal: '%s'", self._goal or "(none)")
 
     def _load_yolo(self) -> None:
-        log.info("RowCenteringOmniVLA: loading YOLO model '%s'…", self._yolo_model_path)
+        # Always run on CPU — OmniVLA server occupies the GPU on the same machine.
+        log.info("RowCenteringOmniVLA: loading YOLO model '%s' on CPU…", self._yolo_model_path)
         try:
             from ultralytics import YOLO
-            self._yolo_model = YOLO(self._yolo_model_path)
-            log.info("RowCenteringOmniVLA: YOLO ready — class_ids=%s conf=%.2f",
+            model = YOLO(self._yolo_model_path)
+            # Warm-up inference on CPU so ultralytics locks the device before first real call
+            model(np.zeros((64, 64, 3), dtype=np.uint8), verbose=False, device="cpu")
+            self._yolo_model = model
+            log.info("RowCenteringOmniVLA: YOLO ready on CPU — class_ids=%s conf=%.2f",
                      self._yolo_class_ids or "all", self._yolo_conf)
         except Exception as e:
-            log.error("RowCenteringOmniVLA: YOLO load failed (%s) — row centering disabled", e)
+            log.error("RowCenteringOmniVLA: YOLO load failed (%s) — row centering disabled", e,
+                      exc_info=True)
 
     def _encode_path_prompts(self) -> None:
         import torch
