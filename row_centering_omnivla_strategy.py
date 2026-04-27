@@ -10,14 +10,15 @@ Cameras:
     Secondary (--down-device): downward-facing; used exclusively for row centering.
 
 Row-centering pipeline (downward frame each cycle):
-    1. Run YOLO plant detection on the downward frame.
-    2. Split detections: box centre_x < frame_cx → left wall, else right wall.
-    3. left_wall  = rightmost x2 of left-side detections
-       right_wall = leftmost  x1 of right-side detections
-    4. gap_centre_x  = (left_wall + right_wall) / 2
+    1. Compute Excess Green (ExG = 2G - R - B) on the downward frame.
+    2. Threshold ExG mask → vegetation blobs → bounding boxes via contours.
+    3. Split boxes: box centre_x < frame_cx → left wall, else right wall.
+    4. left_wall  = rightmost x2 of left-side boxes
+       right_wall = leftmost  x1 of right-side boxes
+    5. gap_centre_x  = (left_wall + right_wall) / 2
        lateral_error = gap_centre_x - frame_width / 2  (px; +ve → gap right of centre)
-    5. ang_correction = -lateral_error * centering_gain            (rad/s)
-    6. final_angular  = omnivla_angular + centering_alpha * ang_correction
+    6. ang_correction = -lateral_error * centering_gain            (rad/s)
+    7. final_angular  = omnivla_angular + centering_alpha * ang_correction
        final_radius   = vel / final_angular  (clamped to [-2000, 2000] mm)
 
 State machine (identical to clip_omnivla):
@@ -28,7 +29,7 @@ Usage:
         --omnivla-server localhost:5100 \\
         --goal "Follow the crop row" \\
         --device 0 --down-device 1 \\
-        --crop-type chilli --yolo-model chilli.pt --yolo-conf 0.35 \\
+        --exg-threshold 20 --exg-min-area 500 \\
         --centering-gain 0.001 --centering-alpha 0.4 \\
         --interval 1.0 --rover atlas --atlas-port /dev/ttyACM0
 """
@@ -81,17 +82,18 @@ class _NavState(Enum):
     PATH_LOST    = auto()
 
 
-# ── YOLO-based row-gap detector ───────────────────────────────────────────────
+# ── ExG-based row-gap detector ────────────────────────────────────────────────
 
-def _find_row_gap_yolo(
+def _find_row_gap_exg(
     down_bgr: np.ndarray,
-    model,
-    class_ids: set | None,
-    conf_threshold: float,
+    exg_threshold: int = 20,
+    min_area: int = 500,
 ) -> tuple:
     """
-    Detect the crop-row gap centre from a downward-facing BGR frame using YOLO.
+    Detect the crop-row gap centre from a downward-facing BGR frame using ExG.
 
+    ExG = 2*G - R - B pixels above exg_threshold are vegetation.
+    Contours above min_area become bounding boxes.
     Plants on the left half define the left wall (rightmost x2 of left boxes).
     Plants on the right half define the right wall (leftmost x1 of right boxes).
     The gap centre is the midpoint between the two walls.
@@ -106,16 +108,22 @@ def _find_row_gap_yolo(
     h, w = down_bgr.shape[:2]
     frame_cx = w // 2
 
-    results = model(down_bgr, verbose=False, device="cpu")[0]
+    bgr   = down_bgr.astype(np.float32)
+    exg   = 2.0 * bgr[:, :, 1] - bgr[:, :, 0] - bgr[:, :, 2]
+    mask  = np.clip(exg, 0, 255).astype(np.uint8)
+    _, mask = cv2.threshold(mask, exg_threshold, 255, cv2.THRESH_BINARY)
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    mask   = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    mask   = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel)
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     boxes = []
-    for box in results.boxes:
-        if float(box.conf[0]) < conf_threshold:
+    for cnt in contours:
+        if cv2.contourArea(cnt) < min_area:
             continue
-        cls = int(box.cls[0])
-        if class_ids is not None and cls not in class_ids:
-            continue
-        x1, y1, x2, y2 = box.xyxy[0].tolist()
-        boxes.append([x1, y1, x2, y2])
+        x, y, bw, bh = cv2.boundingRect(cnt)
+        boxes.append([x, y, x + bw, y + bh])
 
     left_boxes  = [b for b in boxes if (b[0] + b[2]) / 2 < frame_cx]
     right_boxes = [b for b in boxes if (b[0] + b[2]) / 2 >= frame_cx]
@@ -183,12 +191,12 @@ def _annotate_down_frame(
     boxes: list,
     error_px: float,
 ) -> np.ndarray:
-    """Draw YOLO boxes and row-gap overlay on the downward-camera frame for the PiP thumbnail."""
+    """Draw ExG bounding boxes and row-gap overlay on the downward-camera frame for the PiP thumbnail."""
     vis = down_bgr.copy()
     h, w = vis.shape[:2]
     frame_cx = w // 2
 
-    # YOLO boxes — orange = left plant, blue = right plant
+    # ExG blobs — orange = left plant, blue = right plant
     for x1, y1, x2, y2 in boxes:
         cx = (x1 + x2) / 2
         color = (255, 100, 0) if cx < frame_cx else (0, 100, 255)
@@ -316,9 +324,8 @@ class RowCenteringOmniVLAStrategy(NavigationStrategy):
         weights_path: str | None = None,
         centering_gain: float = 0.001,
         centering_alpha: float = 0.4,
-        yolo_model_path: str = "yolov8n.pt",
-        yolo_class_ids: list | None = None,
-        yolo_conf: float = 0.35,
+        exg_threshold: int = 20,
+        exg_min_area: int = 500,
     ):
         self._goal            = goal
         self._goal_image_path = goal_image_path
@@ -328,10 +335,8 @@ class RowCenteringOmniVLAStrategy(NavigationStrategy):
         self._weights_path    = weights_path
         self._centering_gain  = centering_gain
         self._centering_alpha = centering_alpha
-        self._yolo_model_path = yolo_model_path
-        self._yolo_class_ids  = set(yolo_class_ids) if yolo_class_ids else None
-        self._yolo_conf       = yolo_conf
-        self._yolo_model      = None
+        self._exg_threshold   = exg_threshold
+        self._exg_min_area    = exg_min_area
         self._path_cache: dict = {}
 
         self._pos_prompts: list = []
@@ -349,7 +354,7 @@ class RowCenteringOmniVLAStrategy(NavigationStrategy):
         self._down_frame: np.ndarray | None = None
         self._down_lock  = threading.Lock()
 
-        # Latest annotated down frame (YOLO boxes + gap overlay), updated at
+        # Latest annotated down frame (ExG blobs + gap overlay), updated at
         # inference rate. Held between inferences so down.avi stays populated,
         # mirroring how state.llm_frame works for the front camera.
         self._down_ann_frame: np.ndarray | None = None
@@ -372,8 +377,6 @@ class RowCenteringOmniVLAStrategy(NavigationStrategy):
             with self._state_lock:
                 self._nav_state = _NavState.PATH_LOST
             log.info("RowCenteringOmniVLA: connected to OmniVLA server at %s", server_addr)
-            # YOLO for down-camera centering is independent of OmniVLA server mode
-            threading.Thread(target=self._load_yolo, daemon=True, name="row-center-yolo").start()
         else:
             self._clip_model    = None
             self._clip_tf       = None
@@ -401,7 +404,7 @@ class RowCenteringOmniVLAStrategy(NavigationStrategy):
             return self._down_frame.copy() if self._down_frame is not None else None
 
     def get_down_annotated_frame(self) -> np.ndarray | None:
-        """Return the latest annotated down frame (YOLO + gap overlay), or None."""
+        """Return the latest annotated down frame (ExG + gap overlay), or None."""
         with self._down_ann_lock:
             return self._down_ann_frame.copy() if self._down_ann_frame is not None else None
 
@@ -538,37 +541,11 @@ class RowCenteringOmniVLAStrategy(NavigationStrategy):
             self._path_pos_feat = None
             self._path_neg_feat = None
 
-        self._load_yolo()
         self._loaded.set()
         with self._state_lock:
             if self._goal:
                 self._nav_state = _NavState.PATH_LOST
         log.info("RowCenteringOmniVLAStrategy ready — goal: '%s'", self._goal or "(none)")
-
-    def _load_yolo(self) -> None:
-        # Always run on CPU — OmniVLA server occupies the GPU on the same machine.
-        log.info("RowCenteringOmniVLA: loading YOLO model '%s' on CPU…", self._yolo_model_path)
-        try:
-            from ultralytics import YOLO
-            model = YOLO(self._yolo_model_path)
-            # Auto-detect plant class IDs from the model's own name table if not overridden
-            if self._yolo_class_ids is None:
-                plant_ids = {k for k, v in model.names.items() if "plant" in v.lower()}
-                if plant_ids:
-                    self._yolo_class_ids = plant_ids
-                    log.info("RowCenteringOmniVLA: plant classes → %s",
-                             {k: model.names[k] for k in sorted(plant_ids)})
-                else:
-                    log.warning("RowCenteringOmniVLA: no 'plant' class found in model — "
-                                "using all %d classes", len(model.names))
-            # Warm-up on CPU so ultralytics locks the execution provider before first real call
-            model(np.zeros((64, 64, 3), dtype=np.uint8), verbose=False, device="cpu")
-            self._yolo_model = model
-            log.info("RowCenteringOmniVLA: YOLO ready on CPU — class_ids=%s conf=%.2f",
-                     self._yolo_class_ids or "all", self._yolo_conf)
-        except Exception as e:
-            log.error("RowCenteringOmniVLA: YOLO load failed (%s) — row centering disabled", e,
-                      exc_info=True)
 
     def _encode_path_prompts(self) -> None:
         import torch
@@ -696,9 +673,9 @@ class RowCenteringOmniVLAStrategy(NavigationStrategy):
 
         left_wall = right_wall = None
         down_boxes: list = []
-        if down_frame is not None and self._yolo_model is not None:
-            gap_cx, left_wall, right_wall, down_boxes = _find_row_gap_yolo(
-                down_frame, self._yolo_model, self._yolo_class_ids, self._yolo_conf
+        if down_frame is not None:
+            gap_cx, left_wall, right_wall, down_boxes = _find_row_gap_exg(
+                down_frame, self._exg_threshold, self._exg_min_area
             )
             if gap_cx is not None:
                 lateral_error_px = float(gap_cx - down_frame.shape[1] / 2)
@@ -708,13 +685,11 @@ class RowCenteringOmniVLAStrategy(NavigationStrategy):
             with self._down_ann_lock:
                 self._down_ann_frame = down_annotated
             log.info(
-                "RowCentering: gap_cx=%s  error=%+.1f px  left_wall=%s  right_wall=%s  boxes=%d",
+                "RowCentering(ExG): gap_cx=%s  error=%+.1f px  left_wall=%s  right_wall=%s  blobs=%d",
                 gap_cx, lateral_error_px, left_wall, right_wall, len(down_boxes),
             )
-        elif down_frame is None:
-            log.debug("RowCentering: no down-camera frame yet")
         else:
-            log.debug("RowCentering: YOLO model not loaded — skipping centering")
+            log.debug("RowCentering: no down-camera frame yet")
 
         # ── CLIP path detection ───────────────────────────────────────────────
         if self._server_addr:

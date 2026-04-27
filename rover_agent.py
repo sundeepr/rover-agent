@@ -276,20 +276,6 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
                                     ollama_url=args.ollama_server)
     if name == "row_centering_omnivla":
         from row_centering_omnivla_strategy import RowCenteringOmniVLAStrategy
-        _yolo_path = args.yolo_model
-        # Resolve relative paths against the script directory as a fallback
-        _yolo_resolved = Path(_yolo_path)
-        if not _yolo_resolved.is_absolute() and not _yolo_resolved.exists():
-            _alt = Path(__file__).parent / _yolo_path
-            if _alt.exists():
-                _yolo_resolved = _alt
-        if not _yolo_resolved.exists():
-            log.error(
-                "YOLO model not found: '%s'\n"
-                "  Pass the full path with:  --yolo-model /path/to/%s\n"
-                "  Row centering will be DISABLED.",
-                _yolo_resolved, _yolo_path,
-            )
         return RowCenteringOmniVLAStrategy(
             goal=args.goal,
             goal_image_path=args.goal_image,
@@ -299,9 +285,8 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
             weights_path=args.omnivla_weights,
             centering_gain=args.centering_gain,
             centering_alpha=args.centering_alpha,
-            yolo_model_path=str(_yolo_resolved),
-            yolo_class_ids=None,
-            yolo_conf=args.yolo_conf,
+            exg_threshold=args.exg_threshold,
+            exg_min_area=args.exg_min_area,
         )
     if name == "crop_row":
         from crop_row_strategy import CropRowStrategy
@@ -406,6 +391,14 @@ def main():
                         metavar="FLOAT",
                         help="Centering correction blend weight: 0=off, 1=full override "
                              "(row_centering_omnivla strategy, default: 0.4)")
+    parser.add_argument("--exg-threshold",   type=int,   default=20,
+                        metavar="INT",
+                        help="ExG threshold (2G-R-B) for vegetation detection "
+                             "(row_centering_omnivla strategy, default: 20)")
+    parser.add_argument("--exg-min-area",    type=int,   default=500,
+                        metavar="INT",
+                        help="Minimum blob area in pixels to count as a plant "
+                             "(row_centering_omnivla strategy, default: 500)")
     parser.add_argument("--control-port",  type=int, default=5002,
                         metavar="PORT",
                         help="WebSocket joystick control port for browser/Android "
@@ -436,7 +429,8 @@ def main():
             log.info("Down device   : %d", args.down_device)
             log.info("Center gain   : %.4f  alpha: %.2f",
                      args.centering_gain, args.centering_alpha)
-            log.info("YOLO model    : %s  conf=%.2f", args.yolo_model, args.yolo_conf)
+            log.info("ExG threshold : %d  min_area: %d",
+                     args.exg_threshold, args.exg_min_area)
     else:
         log.info("Model         : %s", gemini_client.MODEL)
     log.info("Web server    : %s", args.web_server)
