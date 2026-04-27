@@ -85,6 +85,11 @@ def _discover_cameras(max_devices: int) -> list[dict]:
                 cameras.append({"idx": idx, "dev": dev_path, "opened": False,
                                  "cap": None, "w": 0, "h": 0})
             continue
+        # Ask for the largest resolution the driver will accept
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  9999)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 9999)
+        # Read a frame so the driver commits to the new mode
+        cap.read()
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         cameras.append({"idx": idx, "dev": dev_path or f"idx {idx}",
@@ -142,7 +147,7 @@ def main() -> None:
 
     print(f"\nFound {len(cameras)} device(s):\n")
     for cam in cameras:
-        status = f"{cam['w']}x{cam['h']}" if cam["opened"] else "not readable"
+        status = f"{cam['w']}x{cam['h']} (max)" if cam["opened"] else "not readable"
         print(f"  cv2 idx {cam['idx']:2d}  {cam['dev']:<20}  {status}")
     print()
     print("Press  q / Esc  to quit.\n")
