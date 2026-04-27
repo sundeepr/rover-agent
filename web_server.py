@@ -383,10 +383,10 @@ _HTML = """<!DOCTYPE html>
           clearInterval(_timerInterval); _timerInterval = null; updateTimer();
         }
 
-        // Row centering (only shown for row_centering_omnivla strategy)
+        // Row centering stats (only shown for row_centering_omnivla strategy)
         const hasCentering = d.has_down_cam || d.row_lateral_error_px != null;
         document.getElementById('centering-kv').style.display = hasCentering ? '' : 'none';
-        document.getElementById('down-cam-box').style.display  = hasCentering ? '' : 'none';
+        // down-cam-box is always visible — hiding it drops the MJPEG connection
         if (hasCentering) {
           const err = d.row_lateral_error_px;
           const on  = d.centering_applied;
