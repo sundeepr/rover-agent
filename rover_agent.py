@@ -276,6 +276,20 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
                                     ollama_url=args.ollama_server)
     if name == "row_centering_omnivla":
         from row_centering_omnivla_strategy import RowCenteringOmniVLAStrategy
+        _yolo_path = args.yolo_model or f"{args.crop_type}.pt"
+        # Resolve relative paths against the script directory as a fallback
+        _yolo_resolved = Path(_yolo_path)
+        if not _yolo_resolved.is_absolute() and not _yolo_resolved.exists():
+            _alt = Path(__file__).parent / _yolo_path
+            if _alt.exists():
+                _yolo_resolved = _alt
+        if not _yolo_resolved.exists():
+            log.error(
+                "YOLO model not found: '%s'\n"
+                "  Pass the full path with:  --yolo-model /path/to/%s\n"
+                "  Row centering will be DISABLED.",
+                _yolo_resolved, _yolo_path,
+            )
         return RowCenteringOmniVLAStrategy(
             goal=args.goal,
             goal_image_path=args.goal_image,
@@ -285,7 +299,7 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
             weights_path=args.omnivla_weights,
             centering_gain=args.centering_gain,
             centering_alpha=args.centering_alpha,
-            yolo_model_path=args.yolo_model or f"{args.crop_type}.pt",
+            yolo_model_path=str(_yolo_resolved),
             yolo_class_ids=None,
             yolo_conf=args.yolo_conf,
         )
