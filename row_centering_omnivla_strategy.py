@@ -372,6 +372,8 @@ class RowCenteringOmniVLAStrategy(NavigationStrategy):
             with self._state_lock:
                 self._nav_state = _NavState.PATH_LOST
             log.info("RowCenteringOmniVLA: connected to OmniVLA server at %s", server_addr)
+            # YOLO for down-camera centering is independent of OmniVLA server mode
+            threading.Thread(target=self._load_yolo, daemon=True, name="row-center-yolo").start()
         else:
             self._clip_model    = None
             self._clip_tf       = None
@@ -536,7 +538,14 @@ class RowCenteringOmniVLAStrategy(NavigationStrategy):
             self._path_pos_feat = None
             self._path_neg_feat = None
 
-        # Load YOLO for down-camera row centering
+        self._load_yolo()
+        self._loaded.set()
+        with self._state_lock:
+            if self._goal:
+                self._nav_state = _NavState.PATH_LOST
+        log.info("RowCenteringOmniVLAStrategy ready — goal: '%s'", self._goal or "(none)")
+
+    def _load_yolo(self) -> None:
         log.info("RowCenteringOmniVLA: loading YOLO model '%s'…", self._yolo_model_path)
         try:
             from ultralytics import YOLO
@@ -545,12 +554,6 @@ class RowCenteringOmniVLAStrategy(NavigationStrategy):
                      self._yolo_class_ids or "all", self._yolo_conf)
         except Exception as e:
             log.error("RowCenteringOmniVLA: YOLO load failed (%s) — row centering disabled", e)
-
-        self._loaded.set()
-        with self._state_lock:
-            if self._goal:
-                self._nav_state = _NavState.PATH_LOST
-        log.info("RowCenteringOmniVLAStrategy ready — goal: '%s'", self._goal or "(none)")
 
     def _encode_path_prompts(self) -> None:
         import torch

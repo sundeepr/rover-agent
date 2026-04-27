@@ -116,9 +116,9 @@ def agent_loop(
         log.error("Could not open camera at device %d", device)
         return
 
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 9999)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 9999)
-    log.info("Camera opened: %dx%d (max)",
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, prompts.IMAGE_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, prompts.IMAGE_HEIGHT)
+    log.info("Camera opened: %dx%d",
              int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
              int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
 
