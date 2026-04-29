@@ -288,6 +288,12 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
             exg_threshold=args.exg_threshold,
             exg_min_area=args.exg_min_area,
         )
+    if name == "cloud_omnivla":
+        from cloud_omnivla_strategy import CloudOmniVLAStrategy
+        return CloudOmniVLAStrategy(
+            server_url=args.cloud_server,
+            goal=args.goal,
+        )
     if name == "crop_row":
         from crop_row_strategy import CropRowStrategy
         if args.lab_mode:
@@ -333,8 +339,13 @@ def main():
                         help="Log rover commands but do not send them")
     parser.add_argument("--strategy",    type=str,   default="gemini",
                         choices=["gemini", "omnivla", "clip_omnivla", "qwen_omnivla",
-                                 "hough_crop_row", "crop_row", "row_centering_omnivla"],
+                                 "hough_crop_row", "crop_row", "row_centering_omnivla",
+                                 "cloud_omnivla"],
                         help="Navigation strategy (default: gemini)")
+    parser.add_argument("--cloud-server", type=str,  default="ws://localhost:8765",
+                        metavar="URL",
+                        help="WebSocket URL of omnivla_cloud_server.py "
+                             "(cloud_omnivla strategy, default: ws://localhost:8765)")
     parser.add_argument("--omnivla-weights", type=str, default=None,
                         metavar="PATH",
                         help="Path to custom OmniVLA-edge weights (.pth). "
@@ -431,6 +442,8 @@ def main():
                      args.centering_gain, args.centering_alpha)
             log.info("ExG threshold : %d  min_area: %d",
                      args.exg_threshold, args.exg_min_area)
+    if args.strategy == "cloud_omnivla":
+        log.info("Cloud server  : %s", args.cloud_server)
     else:
         log.info("Model         : %s", gemini_client.MODEL)
     log.info("Web server    : %s", args.web_server)
