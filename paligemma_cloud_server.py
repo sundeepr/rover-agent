@@ -162,15 +162,13 @@ class VertexAIClient:
         project: str,
         endpoint_id: str,
         location: str = "us-central1",
-        request_format: str = "default",
         max_tokens: int = 128,
     ):
-        self._project        = project
-        self._endpoint_id    = endpoint_id
-        self._location       = location
-        self._request_format = request_format
-        self._max_tokens     = max_tokens
-        self._endpoint       = None
+        self._project     = project
+        self._endpoint_id = endpoint_id
+        self._location    = location
+        self._max_tokens  = max_tokens
+        self._endpoint    = None
 
     def connect(self) -> None:
         """Initialise Vertex AI SDK and resolve the endpoint.  Call once at startup."""
@@ -219,26 +217,21 @@ class VertexAIClient:
         """Call the endpoint and return the raw text response."""
         b64 = base64.b64encode(jpeg_bytes).decode()
 
-        if self._request_format == "hf-tgi":
-            instance = {
-                "inputs":     prompt,
-                "parameters": {"max_new_tokens": self._max_tokens},
-                "image":      b64,
-            }
-        else:  # default Model Garden container format
-            instance = {
-                "prompt":     prompt,
-                "image":      b64,
-                "max_tokens": self._max_tokens,
-            }
+        # Model Garden PaliGemma container format (gcloud ai model-garden models deploy)
+        instance = {
+            "prompt":      prompt,
+            "image_bytes": {"b64": b64},
+        }
+        parameters = {"maxOutputTokens": self._max_tokens}
 
-        response = self._endpoint.predict(instances=[instance])
+        response = self._endpoint.predict(
+            instances=[instance], parameters=parameters
+        )
 
         # Vertex AI wraps predictions in a list; extract first item
         pred = response.predictions[0]
         if isinstance(pred, dict):
-            # Some containers return {"generated_text": "..."}
-            return pred.get("generated_text") or pred.get("output") or str(pred)
+            return pred.get("output") or pred.get("generated_text") or str(pred)
         return str(pred)
 
 
@@ -358,11 +351,6 @@ def main() -> None:
                         help="Vertex AI endpoint ID or full resource name")
     parser.add_argument("--location", default="us-central1",
                         help="Vertex AI region (default: us-central1)")
-    parser.add_argument("--request-format", default="default",
-                        choices=["default", "hf-tgi"],
-                        help="Endpoint request format: 'default' for the "
-                             "standard Model Garden container, 'hf-tgi' for "
-                             "HuggingFace TGI serving container (default: default)")
     parser.add_argument("--max-tokens", type=int, default=128,
                         help="Max tokens to generate (default: 128)")
     parser.add_argument("--host",     default="0.0.0.0",
@@ -375,7 +363,6 @@ def main() -> None:
         project=args.project,
         endpoint_id=args.endpoint,
         location=args.location,
-        request_format=args.request_format,
         max_tokens=args.max_tokens,
     )
     client.connect()
