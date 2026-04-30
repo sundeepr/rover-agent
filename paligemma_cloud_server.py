@@ -60,7 +60,6 @@ import base64
 import io
 import json
 import logging
-import re
 import time
 
 import websockets
@@ -73,54 +72,34 @@ WAYPOINT_DIM  = 4   # [dx, dy, cos_heading, sin_heading]
 
 # ── Prompt ────────────────────────────────────────────────────────────────────
 
-_PROMPT_TEMPLATE = """\
-Robot navigation. Goal: {goal}. Output 8 waypoints as JSON array [[dx,dy,cos_h,sin_h]x8] in 0.1m units. Straight example: [[1,0,1,0],[2,0,1,0],[3,0,1,0],[4,0,1,0],[5,0,1,0],[6,0,1,0],[7,0,1,0],[8,0,1,0]]. Waypoints:"""
+# PaliGemma is a VQA model — ask a simple directional question it can answer.
+_PROMPT_TEMPLATE = "To {goal}, should the robot go straight, turn left, or turn right?"
 
 
 def _build_prompt(goal: str) -> str:
     return _PROMPT_TEMPLATE.format(goal=goal)
 
 
-# ── Waypoint parser ────────────────────────────────────────────────────────────
+# ── Direction → waypoints ──────────────────────────────────────────────────────
+
+# Turning radius in 0.1 m units (positive dy = left)
+_TURN_DY = 0.5   # lateral offset per step when turning
 
 def _parse_waypoints(text: str) -> list[list[float]] | None:
-    """Extract a valid 8×4 waypoint array from PaliGemma's text output."""
-    text = text.strip()
+    """Convert PaliGemma's direction answer to 8 waypoints."""
+    t = text.strip().lower()
+    log.info("Direction answer: %r", t)
 
-    # 1. Whole string as JSON
-    try:
-        data = json.loads(text)
-        if _valid(data):
-            return data
-    except json.JSONDecodeError:
-        pass
-
-    # 2. First [...] block
-    m = re.search(r'(\[\s*\[[\s\S]*?\]\s*\])', text)
-    if m:
-        try:
-            data = json.loads(m.group(1))
-            if _valid(data):
-                return data
-        except json.JSONDecodeError:
-            pass
-
-    # 3. Extract all numbers and reshape 8×4
-    nums = re.findall(r'-?\d+(?:\.\d+)?', text)
-    if len(nums) >= NUM_WAYPOINTS * WAYPOINT_DIM:
-        flat = [float(n) for n in nums[:NUM_WAYPOINTS * WAYPOINT_DIM]]
-        data = [flat[i * WAYPOINT_DIM:(i + 1) * WAYPOINT_DIM]
+    if "left" in t:
+        return [[float(i + 1),  _TURN_DY * (i + 1), 0.866, 0.5]
                 for i in range(NUM_WAYPOINTS)]
-        if _valid(data):
-            return data
+    if "right" in t:
+        return [[float(i + 1), -_TURN_DY * (i + 1), 0.866, -0.5]
+                for i in range(NUM_WAYPOINTS)]
+    if "straight" in t or "forward" in t or "ahead" in t:
+        return [[float(i + 1), 0.0, 1.0, 0.0] for i in range(NUM_WAYPOINTS)]
 
-    return None
-
-
-def _valid(data) -> bool:
-    return (isinstance(data, list) and len(data) == NUM_WAYPOINTS
-            and all(isinstance(wp, list) and len(wp) == WAYPOINT_DIM
-                    for wp in data))
+    return None   # unrecognised — caller uses fallback
 
 
 def _fallback_waypoints() -> list[list[float]]:
