@@ -162,12 +162,10 @@ class VertexAIClient:
         project: str,
         endpoint_id: str,
         location: str = "us-central1",
-        max_tokens: int = 128,
     ):
         self._project     = project
         self._endpoint_id = endpoint_id
         self._location    = location
-        self._max_tokens  = max_tokens
         self._endpoint    = None
 
     def connect(self) -> None:
@@ -217,16 +215,12 @@ class VertexAIClient:
         """Call the endpoint and return the raw text response."""
         b64 = base64.b64encode(jpeg_bytes).decode()
 
-        # Model Garden PaliGemma container format (gcloud ai model-garden models deploy)
         instance = {
-            "prompt":      prompt,
-            "image_bytes": {"b64": b64},
+            "prompt": prompt,
+            "image":  b64,
         }
-        parameters = {"maxOutputTokens": self._max_tokens}
 
-        response = self._endpoint.predict(
-            instances=[instance], parameters=parameters
-        )
+        response = self._endpoint.predict(instances=[instance])
 
         # Vertex AI wraps predictions in a list; extract first item
         pred = response.predictions[0]
@@ -351,8 +345,6 @@ def main() -> None:
                         help="Vertex AI endpoint ID or full resource name")
     parser.add_argument("--location", default="us-central1",
                         help="Vertex AI region (default: us-central1)")
-    parser.add_argument("--max-tokens", type=int, default=128,
-                        help="Max tokens to generate (default: 128)")
     parser.add_argument("--host",     default="0.0.0.0",
                         help="Bind address (default: 0.0.0.0)")
     parser.add_argument("--port",     default=8766, type=int,
@@ -363,7 +355,6 @@ def main() -> None:
         project=args.project,
         endpoint_id=args.endpoint,
         location=args.location,
-        max_tokens=args.max_tokens,
     )
     client.connect()
 
