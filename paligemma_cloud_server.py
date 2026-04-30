@@ -213,7 +213,13 @@ class VertexAIClient:
 
     def predict(self, jpeg_bytes: bytes, prompt: str) -> str:
         """Call the endpoint and return the raw text response."""
-        b64 = base64.b64encode(jpeg_bytes).decode()
+        from PIL import Image as PIL_Image
+
+        img = PIL_Image.open(io.BytesIO(jpeg_bytes)).convert("RGB")
+        img = img.resize((224, 224), PIL_Image.BILINEAR)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=90)
+        b64 = base64.b64encode(buf.getvalue()).decode()
 
         instance = {
             "prompt": prompt,
