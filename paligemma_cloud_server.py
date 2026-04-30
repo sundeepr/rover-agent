@@ -72,13 +72,15 @@ WAYPOINT_DIM  = 4   # [dx, dy, cos_heading, sin_heading]
 
 # ── Prompt ────────────────────────────────────────────────────────────────────
 
-_PROMPT_TEMPLATE = "To {goal}, should the robot go straight, turn left, or turn right?"
+# Ask where the gap/path is rather than which way to turn.
+# "center" is the last option so it is not biased toward left or right.
+_PROMPT_TEMPLATE = "Where is the crop row gap relative to the robot: left, right, or center?"
 
 _turn_dy = 0.1   # set by main() from --turn-dy; lateral offset in 0.1 m units
 
 
-def _build_prompt(goal: str) -> str:
-    return _PROMPT_TEMPLATE.format(goal=goal)
+def _build_prompt(goal: str) -> str:  # noqa: ARG001
+    return _PROMPT_TEMPLATE
 
 
 # ── Direction parser → waypoints ───────────────────────────────────────────────
@@ -87,12 +89,12 @@ def _parse_waypoints(text: str) -> list[list[float]] | None:
     t = text.strip().lower()
     log.info("Direction answer: %r", t)
 
-    if "left" in t:
+    if "center" in t or "straight" in t or "forward" in t or "ahead" in t:
+        dy = 0.0
+    elif "left" in t:
         dy = _turn_dy
     elif "right" in t:
         dy = -_turn_dy
-    elif "straight" in t or "forward" in t or "ahead" in t:
-        dy = 0.0
     else:
         return None
 
