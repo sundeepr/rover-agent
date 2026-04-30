@@ -74,23 +74,7 @@ WAYPOINT_DIM  = 4   # [dx, dy, cos_heading, sin_heading]
 # ── Prompt ────────────────────────────────────────────────────────────────────
 
 _PROMPT_TEMPLATE = """\
-You are the navigation controller of a wheeled outdoor robot.
-The image is from the robot's forward-facing camera.
-
-Goal: {goal}
-
-Predict the robot's next 8 navigation waypoints in its local coordinate frame:
-  dx  — forward distance in 0.1 m units (positive = ahead)
-  dy  — lateral distance in 0.1 m units (positive = left, negative = right)
-  cos_h, sin_h — cosine and sine of the robot heading at that waypoint
-
-Output ONLY a JSON array of exactly 8 waypoints with 4 floats each.
-No explanation, no markdown, just the array.
-
-Example (going straight):
-[[1.0,0.0,1.0,0.0],[2.0,0.0,1.0,0.0],[3.0,0.0,1.0,0.0],[4.0,0.0,1.0,0.0],[5.0,0.0,1.0,0.0],[6.0,0.0,1.0,0.0],[7.0,0.0,1.0,0.0],[8.0,0.0,1.0,0.0]]
-
-Waypoints:"""
+Robot navigation. Goal: {goal}. Output 8 waypoints as JSON array [[dx,dy,cos_h,sin_h]x8] in 0.1m units. Straight example: [[1,0,1,0],[2,0,1,0],[3,0,1,0],[4,0,1,0],[5,0,1,0],[6,0,1,0],[7,0,1,0],[8,0,1,0]]. Waypoints:"""
 
 
 def _build_prompt(goal: str) -> str:
@@ -231,7 +215,10 @@ class VertexAIClient:
         # Vertex AI wraps predictions in a list; extract first item
         pred = response.predictions[0]
         if isinstance(pred, dict):
-            return pred.get("output") or pred.get("generated_text") or str(pred)
+            text = (pred.get("response") or pred.get("output")
+                    or pred.get("generated_text") or str(pred))
+            log.debug("Raw prediction dict: %s", pred)
+            return text
         return str(pred)
 
 
