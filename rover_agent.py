@@ -294,6 +294,12 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
             server_url=args.cloud_server,
             goal=args.goal,
         )
+    if name == "paligemma":
+        from paligemma_strategy import PaliGemmaStrategy
+        return PaliGemmaStrategy(
+            server_url=args.cloud_server,
+            goal=args.goal,
+        )
     if name == "crop_row":
         from crop_row_strategy import CropRowStrategy
         if args.lab_mode:
@@ -340,7 +346,7 @@ def main():
     parser.add_argument("--strategy",    type=str,   default="gemini",
                         choices=["gemini", "omnivla", "clip_omnivla", "qwen_omnivla",
                                  "hough_crop_row", "crop_row", "row_centering_omnivla",
-                                 "cloud_omnivla"],
+                                 "cloud_omnivla", "paligemma"],
                         help="Navigation strategy (default: gemini)")
     parser.add_argument("--cloud-server", type=str,  default="ws://localhost:8765",
                         metavar="URL",
