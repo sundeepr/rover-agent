@@ -214,11 +214,10 @@ class VertexAIClient:
 
         # Vertex AI wraps predictions in a list; extract first item
         pred = response.predictions[0]
+        log.info("Vertex AI raw prediction: %s", pred)
         if isinstance(pred, dict):
-            text = (pred.get("response") or pred.get("output")
+            return (pred.get("response") or pred.get("output")
                     or pred.get("generated_text") or str(pred))
-            log.debug("Raw prediction dict: %s", pred)
-            return text
         return str(pred)
 
 
