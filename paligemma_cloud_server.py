@@ -60,6 +60,8 @@ import base64
 import io
 import json
 import logging
+import math
+import re
 import time
 
 import websockets
@@ -72,34 +74,60 @@ WAYPOINT_DIM  = 4   # [dx, dy, cos_heading, sin_heading]
 
 # ── Prompt ────────────────────────────────────────────────────────────────────
 
-# PaliGemma is a VQA model — ask a simple directional question it can answer.
-_PROMPT_TEMPLATE = "To {goal}, should the robot go straight, turn left, or turn right?"
+# PaliGemma detection prompt — returns <loc> bounding boxes for crop/plants.
+# Format: detect <label>  →  <loc0y1><loc0x1><loc0y2><loc0x2> label ; ...
+_PROMPT_TEMPLATE = "detect crop"
+
+_LOC_DIM   = 1024   # PaliGemma normalises coords to 0–1023
+_MAX_DY    = 0.3    # maximum lateral offset per waypoint step (0.1 m units)
 
 
-def _build_prompt(goal: str) -> str:
-    return _PROMPT_TEMPLATE.format(goal=goal)
+def _build_prompt(goal: str) -> str:  # noqa: ARG001 — goal unused, kept for API compat
+    return _PROMPT_TEMPLATE
 
 
-# ── Direction → waypoints ──────────────────────────────────────────────────────
-
-# Turning radius in 0.1 m units (positive dy = left)
-_TURN_DY = 0.5   # lateral offset per step when turning
+# ── Bounding-box parser → waypoints ───────────────────────────────────────────
 
 def _parse_waypoints(text: str) -> list[list[float]] | None:
-    """Convert PaliGemma's direction answer to 8 waypoints."""
-    t = text.strip().lower()
-    log.info("Direction answer: %r", t)
+    """
+    Parse PaliGemma <loc> detection tokens, find the gap between left/right
+    crop rows, and generate 8 waypoints with lateral correction proportional
+    to the gap-centre error.  Positive dy = left, negative = right.
+    """
+    # Extract all loc token numbers in sequence (groups of 4 = one box y1,x1,y2,x2)
+    locs = [int(n) for n in re.findall(r'<loc(\d{4})>', text)]
+    log.info("Detected %d loc tokens → %d boxes", len(locs), len(locs) // 4)
 
-    if "left" in t:
-        return [[float(i + 1),  _TURN_DY * (i + 1), 0.866, 0.5]
-                for i in range(NUM_WAYPOINTS)]
-    if "right" in t:
-        return [[float(i + 1), -_TURN_DY * (i + 1), 0.866, -0.5]
-                for i in range(NUM_WAYPOINTS)]
-    if "straight" in t or "forward" in t or "ahead" in t:
-        return [[float(i + 1), 0.0, 1.0, 0.0] for i in range(NUM_WAYPOINTS)]
+    boxes = []
+    for i in range(0, len(locs) - 3, 4):
+        y1, x1, y2, x2 = locs[i], locs[i+1], locs[i+2], locs[i+3]
+        cx = (x1 + x2) / 2.0 / _LOC_DIM   # normalised 0–1
+        boxes.append(cx)
 
-    return None   # unrecognised — caller uses fallback
+    if not boxes:
+        log.warning("No bounding boxes parsed — fallback")
+        return None
+
+    # Split boxes into left half and right half of image
+    left  = [cx for cx in boxes if cx < 0.5]
+    right = [cx for cx in boxes if cx >= 0.5]
+
+    left_wall  = max(left,  default=0.0)   # rightmost edge of left row
+    right_wall = min(right, default=1.0)   # leftmost edge of right row
+    gap_cx     = (left_wall + right_wall) / 2.0   # normalised gap centre
+
+    # Lateral error: positive = gap is left of centre → steer left (positive dy)
+    error = 0.5 - gap_cx
+    dy    = float(max(-_MAX_DY, min(_MAX_DY, error * 2.0)))
+
+    log.info("Gap centre=%.3f  error=%.3f  dy=%.3f", gap_cx, error, dy)
+
+    # Heading angle from dy (small-angle approx)
+    heading_rad = math.atan2(dy, 1.0)
+    cos_h = math.cos(heading_rad)
+    sin_h = math.sin(heading_rad)
+
+    return [[float(i + 1), dy, cos_h, sin_h] for i in range(NUM_WAYPOINTS)]
 
 
 def _fallback_waypoints() -> list[list[float]]:
