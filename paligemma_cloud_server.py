@@ -60,8 +60,6 @@ import base64
 import io
 import json
 import logging
-import math
-import re
 import time
 
 import websockets
@@ -74,64 +72,34 @@ WAYPOINT_DIM  = 4   # [dx, dy, cos_heading, sin_heading]
 
 # ── Prompt ────────────────────────────────────────────────────────────────────
 
-# PaliGemma detection prompt — returns <loc> bounding boxes for crop/plants.
-# Format: detect <label>  →  <loc0y1><loc0x1><loc0y2><loc0x2> label ; ...
-_PROMPT_TEMPLATE = "detect crop"
+_PROMPT_TEMPLATE = "To {goal}, should the robot go straight, turn left, or turn right?"
 
-_LOC_DIM   = 1024   # PaliGemma normalises coords to 0–1023
-_MAX_DY    = 0.3    # maximum lateral offset per waypoint step (0.1 m units)
+_turn_dy = 0.1   # set by main() from --turn-dy; lateral offset in 0.1 m units
 
 
-def _build_prompt(goal: str) -> str:  # noqa: ARG001 — goal unused, kept for API compat
-    return _PROMPT_TEMPLATE
+def _build_prompt(goal: str) -> str:
+    return _PROMPT_TEMPLATE.format(goal=goal)
 
 
-# ── Bounding-box parser → waypoints ───────────────────────────────────────────
+# ── Direction parser → waypoints ───────────────────────────────────────────────
 
 def _parse_waypoints(text: str) -> list[list[float]] | None:
-    """
-    Parse PaliGemma <loc> detection tokens, find the gap between left/right
-    crop rows, and generate 8 waypoints with lateral correction proportional
-    to the gap-centre error.  Positive dy = left, negative = right.
-    """
-    # Extract all loc token numbers in sequence (groups of 4 = one box y1,x1,y2,x2)
-    locs = [int(n) for n in re.findall(r'<loc(\d{4})>', text)]
-    log.info("Detected %d loc tokens → %d boxes", len(locs), len(locs) // 4)
+    t = text.strip().lower()
+    log.info("Direction answer: %r", t)
 
-    boxes = []
-    for i in range(0, len(locs) - 3, 4):
-        y1, x1, y2, x2 = locs[i], locs[i+1], locs[i+2], locs[i+3]
-        cx = (x1 + x2) / 2.0 / _LOC_DIM   # normalised 0–1
-        boxes.append(cx)
-
-    if not boxes:
-        log.warning("No bounding boxes parsed — fallback")
+    if "left" in t:
+        dy = _turn_dy
+    elif "right" in t:
+        dy = -_turn_dy
+    elif "straight" in t or "forward" in t or "ahead" in t:
+        dy = 0.0
+    else:
         return None
 
-    # Split boxes into left half and right half of image
-    left  = [cx for cx in boxes if cx < 0.5]
-    right = [cx for cx in boxes if cx >= 0.5]
-
-    left_wall  = max(left,  default=0.0)   # rightmost edge of left row
-    right_wall = min(right, default=1.0)   # leftmost edge of right row
-    gap_cx     = (left_wall + right_wall) / 2.0   # normalised gap centre
-
-    # Lateral error: positive = gap is left of centre → steer left (positive dy)
-    error = 0.5 - gap_cx
-    dy    = float(max(-_MAX_DY, min(_MAX_DY, error * 2.0)))
-
-    log.info("Gap centre=%.3f  error=%.3f  dy=%.3f", gap_cx, error, dy)
-
-    # Heading angle from dy (small-angle approx)
-    heading_rad = math.atan2(dy, 1.0)
-    cos_h = math.cos(heading_rad)
-    sin_h = math.sin(heading_rad)
-
-    return [[float(i + 1), dy, cos_h, sin_h] for i in range(NUM_WAYPOINTS)]
+    return [[float(i + 1), dy, 1.0, 0.0] for i in range(NUM_WAYPOINTS)]
 
 
 def _fallback_waypoints() -> list[list[float]]:
-    """Straight-ahead waypoints used when parsing fails."""
     return [[float(i + 1), 0.0, 1.0, 0.0] for i in range(NUM_WAYPOINTS)]
 
 
@@ -344,11 +312,18 @@ def main() -> None:
                         help="Vertex AI endpoint ID or full resource name")
     parser.add_argument("--location", default="us-central1",
                         help="Vertex AI region (default: us-central1)")
-    parser.add_argument("--host",     default="0.0.0.0",
+    parser.add_argument("--host",    default="0.0.0.0",
                         help="Bind address (default: 0.0.0.0)")
-    parser.add_argument("--port",     default=8766, type=int,
+    parser.add_argument("--port",    default=8766, type=int,
                         help="WebSocket port (default: 8766)")
+    parser.add_argument("--turn-dy", default=0.1, type=float,
+                        help="Lateral offset per waypoint step when turning "
+                             "left or right, in 0.1 m units (default: 0.1 = 1 cm)")
     args = parser.parse_args()
+
+    global _turn_dy
+    _turn_dy = args.turn_dy
+    log.info("Turn dy: %.3f (%.1f cm per step)", args.turn_dy, args.turn_dy * 10)
 
     client = VertexAIClient(
         project=args.project,
