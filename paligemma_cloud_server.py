@@ -177,9 +177,43 @@ class VertexAIClient:
         from google.cloud import aiplatform
 
         aiplatform.init(project=self._project, location=self._location)
-        self._endpoint = aiplatform.Endpoint(self._endpoint_id)
-        log.info("Vertex AI endpoint ready: %s (project=%s, location=%s)",
-                 self._endpoint_id, self._project, self._location)
+
+        if self._endpoint_id.isdigit():
+            # Numeric ID — use directly
+            self._endpoint = aiplatform.Endpoint(self._endpoint_id)
+            log.info("Vertex AI endpoint ready: %s", self._endpoint_id)
+        else:
+            # Display name or partial name — list all endpoints and match
+            log.info("Looking up endpoint by name: '%s' …", self._endpoint_id)
+            endpoints = aiplatform.Endpoint.list(
+                filter=f'display_name="{self._endpoint_id}"',
+                project=self._project,
+                location=self._location,
+            )
+            if not endpoints:
+                # Fallback: list all and do substring match
+                all_endpoints = aiplatform.Endpoint.list(
+                    project=self._project, location=self._location
+                )
+                endpoints = [e for e in all_endpoints
+                             if self._endpoint_id.lower() in e.display_name.lower()]
+            if not endpoints:
+                all_endpoints = aiplatform.Endpoint.list(
+                    project=self._project, location=self._location
+                )
+                names = [e.display_name for e in all_endpoints]
+                raise ValueError(
+                    f"No endpoint matching '{self._endpoint_id}' found.\n"
+                    f"Available endpoints: {names}\n"
+                    f"Pass the numeric ID with --endpoint <number>."
+                )
+            if len(endpoints) > 1:
+                log.warning("Multiple endpoints match '%s' — using first: %s",
+                            self._endpoint_id, endpoints[0].display_name)
+            self._endpoint = endpoints[0]
+            log.info("Vertex AI endpoint resolved: %s  (id=%s)",
+                     self._endpoint.display_name,
+                     self._endpoint.name.split("/")[-1])
 
     def predict(self, jpeg_bytes: bytes, prompt: str) -> str:
         """Call the endpoint and return the raw text response."""
