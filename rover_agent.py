@@ -411,10 +411,10 @@ def main():
                         default=5,
                         metavar="N",
                         help="Frame history size for ollama strategy (default: 5)")
-    parser.add_argument("--down-device",     type=int,   default=1,
+    parser.add_argument("--down-device",     type=int,   default=None,
                         metavar="INDEX",
-                        help="Camera device index for downward-facing row-centering camera "
-                             "(row_centering_omnivla strategy, default: 1)")
+                        help="Camera device index for downward-facing camera. "
+                             "Omit to disable the down camera entirely.")
     parser.add_argument("--centering-gain",  type=float, default=0.001,
                         metavar="FLOAT",
                         help="Proportional gain (rad/s per pixel) for row-centering correction "
@@ -521,8 +521,8 @@ def main():
         daemon=True,
     ).start()
 
-    # Down-camera loop (row_centering_omnivla only)
-    if hasattr(strategy, "update_down_frame"):
+    # Down-camera loop — only when strategy supports it AND device was specified
+    if hasattr(strategy, "update_down_frame") and args.down_device is not None:
         log.info("Down-camera    : device %d", args.down_device)
         threading.Thread(
             target=_down_camera_loop,
