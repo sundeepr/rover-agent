@@ -1,19 +1,21 @@
 """
 OllamaStrategy — rover navigation using a local Ollama vision model.
 
-Sends a rolling buffer of recent frames plus their previous predictions
-to Ollama, which infers the rover's motion direction and returns the next
-navigation point and path centerline.
+Sends a rolling buffer of recent forward-camera frames plus their previous
+predictions to Ollama. If a downward-facing camera is available it is also
+sent as an extra context image showing the wheels and surrounding plants,
+so the model can detect when the rover is drifting over crops.
 
 The next_point [x, y] (normalized 0-1) is converted to a drive command:
   - x < 0.45  → steer left
   - x > 0.55  → steer right
   - else       → straight
 
-Usage:
+Usage (with down camera):
     python rover_agent.py --strategy ollama \\
         --ollama-server http://<host>:11434 \\
         --ollama-model qwen2.5vl \\
+        --down-device 1 \\
         --rover atlas --atlas-port /dev/ttyACM0
 """
 
@@ -21,6 +23,7 @@ import base64
 import json
 import logging
 import re
+import threading
 import time
 import urllib.request
 from collections import deque
@@ -45,7 +48,7 @@ _DEAD_BAND     = 0.05   # ± around x=0.5 treated as straight
 
 # ── Prompt ────────────────────────────────────────────────────────────────────
 
-def _build_prompt(history: deque) -> str:
+def _build_prompt(history: deque, has_down_cam: bool) -> str:
     n = len(history)
     past_lines = []
     for i, (_, result) in enumerate(list(history)[:-1]):
@@ -60,17 +63,34 @@ def _build_prompt(history: deque) -> str:
 
     history_text = "\n".join(past_lines) if past_lines else "  (no prior frames)"
 
+    down_section = ""
+    if has_down_cam:
+        down_section = f"""
+The LAST image (image {n + 1}) is from the DOWNWARD-facing camera mounted \
+below the rover, showing the wheels and immediately surrounding ground.
+Use it to detect if any plants are currently under or very close to the wheels.
+If plants are visible under the wheels, set wheel_on_crop=true and steer \
+away from them (opposite direction to the plant contact side).
+"""
+
+    down_field = (
+        '\n  "wheel_on_crop": true/false,\n'
+        '  "crop_contact_side": "left|right|none",'
+        if has_down_cam else ""
+    )
+
     return f"""\
 You are a vision system for a farm rover driving between crop rows.
 
-You are given {n} image(s) in chronological order (oldest first, newest last).
+You are given {n} forward-camera image(s) in chronological order \
+(oldest first, newest last).{down_section}
 Previous predicted navigation points:
 {history_text}
 
-Using this motion history, analyse the LAST image (frame {n}) and predict \
-where the rover should navigate next.
+Using this motion history, analyse the CURRENT forward-camera frame \
+(image {n}) and predict where the rover should navigate next.
 
-Return ONLY valid JSON:
+Return ONLY valid JSON:{down_field}
 {{
   "motion_direction": "left|right|straight",
   "next_point": [x, y],
@@ -84,17 +104,16 @@ Coordinate rules (ALL values normalized 0.0-1.0):
   x=0.0=left edge, x=1.0=right edge, x=0.5=center.
   y=0.0=top edge,  y=1.0=bottom edge.
 
-next_point: single best point to steer toward in the CURRENT (last) image.
-  Must be on open soil between crop rows, not on any plant.
+next_point: steer toward this point in the CURRENT forward image.
+  Must be on open soil, not on any plant.
+  If wheel_on_crop=true, steer away from crop_contact_side.
 
-path_points: 4-6 points tracing the gap center in the CURRENT image, \
-bottom (y≈0.9) to top (y≈0.2).
-  x MUST change across points to follow the actual gap curvature.
-  A constant x column is WRONG.
+path_points: 4-6 points tracing the gap center bottom→top.
+  x MUST vary across points to follow the actual gap curvature.
 
 motion_direction: inferred from how next_point x shifted across past frames.
 
-path_visible: false if no clear open soil gap is visible.
+path_visible: false if no clear soil gap is visible.
 """
 
 
@@ -142,14 +161,20 @@ def _annotate(frame: np.ndarray, result: dict) -> np.ndarray:
         cv2.putText(out, "NEXT", (nx + 16, ny + 5),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
-    direction = result.get("motion_direction", "")
-    conf      = result.get("confidence", 0.0)
-    visible   = result.get("path_visible", False)
+    direction     = result.get("motion_direction", "")
+    conf          = result.get("confidence", 0.0)
+    visible       = result.get("path_visible", False)
+    wheel_on_crop = result.get("wheel_on_crop", False)
+    contact_side  = result.get("crop_contact_side", "none")
+
     vis_color = (0, 255, 100) if visible else (0, 0, 255)
     cv2.putText(out, f"{'PATH OK' if visible else 'NO PATH'}  conf:{conf:.2f}",
                 (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, vis_color, 2)
     cv2.putText(out, f"direction: {direction}", (10, 52),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+    if wheel_on_crop:
+        cv2.putText(out, f"!! WHEEL ON CROP ({contact_side}) !!", (10, 76),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
     cv2.putText(out, result.get("reason", "")[:90], (10, h - 10),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 220, 100), 1)
     return out
@@ -188,9 +213,11 @@ class OllamaStrategy(NavigationStrategy):
         model: str = "qwen2.5vl",
         history_size: int = _HISTORY_SIZE,
     ):
-        self._url     = ollama_url.rstrip("/")
-        self._model   = model
+        self._url        = ollama_url.rstrip("/")
+        self._model      = model
         self._history: deque = deque(maxlen=history_size)
+        self._down_frame: np.ndarray | None = None
+        self._down_lock  = threading.Lock()
         log.info("OllamaStrategy: model=%s  server=%s  history=%d",
                  model, ollama_url, history_size)
 
@@ -201,6 +228,11 @@ class OllamaStrategy(NavigationStrategy):
     def on_reset(self) -> None:
         self._history.clear()
         log.info("OllamaStrategy reset — history cleared")
+
+    def update_down_frame(self, frame: np.ndarray) -> None:
+        """Called by rover_agent's down-camera loop with each new frame."""
+        with self._down_lock:
+            self._down_frame = frame
 
     # ── run_query ─────────────────────────────────────────────────────────────
 
@@ -232,16 +264,27 @@ class OllamaStrategy(NavigationStrategy):
         send = (cv2.resize(frame, (_SEND_W, _SEND_H))
                 if (w != _SEND_W or h != _SEND_H) else frame)
 
+        # Snapshot down frame (may be None if no down camera)
+        with self._down_lock:
+            down = self._down_frame.copy() if self._down_frame is not None else None
+
         # Add current frame to history (result filled in after inference)
         self._history.append((send, None))
 
-        # Build images list + prompt
+        # Build images: forward history frames, then down frame last (if available)
         images = []
         for f, _ in self._history:
             _, buf = cv2.imencode(".jpg", f, [cv2.IMWRITE_JPEG_QUALITY, _JPEG_QUALITY])
             images.append(base64.b64encode(buf.tobytes()).decode())
 
-        prompt  = _build_prompt(self._history)
+        if down is not None:
+            down_small = cv2.resize(down, (_SEND_W, _SEND_H))
+            _, buf = cv2.imencode(".jpg", down_small,
+                                  [cv2.IMWRITE_JPEG_QUALITY, _JPEG_QUALITY])
+            images.append(base64.b64encode(buf.tobytes()).decode())
+            log.debug("Down camera frame included in Ollama request")
+
+        prompt  = _build_prompt(self._history, has_down_cam=down is not None)
         payload = json.dumps({
             "model":  self._model,
             "prompt": prompt,
@@ -280,8 +323,11 @@ class OllamaStrategy(NavigationStrategy):
         direction    = result.get("motion_direction", "?")
         elapsed      = time.time() - t0
 
-        log.info("Step %d | visible=%s  direction=%s  next=%s  elapsed=%.2fs",
-                 step, path_visible, direction, next_point, elapsed)
+        wheel_on_crop    = result.get("wheel_on_crop", False)
+        crop_contact_side = result.get("crop_contact_side", "none")
+        log.info("Step %d | visible=%s  direction=%s  next=%s  wheel_on_crop=%s(%s)  elapsed=%.2fs",
+                 step, path_visible, direction, next_point,
+                 wheel_on_crop, crop_contact_side, elapsed)
 
         if not path_visible or not next_point:
             self._write_result(state, step, phase, result, 0, 0x8000,
