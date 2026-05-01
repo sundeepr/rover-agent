@@ -40,6 +40,19 @@ _HISTORY_SIZE  = 5
 _JPEG_QUALITY  = 85
 _SEND_W, _SEND_H = 640, 480
 
+
+def _letterbox(frame: np.ndarray, w: int, h: int) -> np.ndarray:
+    """Resize preserving aspect ratio, pad with black to exact w×h."""
+    fh, fw = frame.shape[:2]
+    scale  = min(w / fw, h / fh)
+    nw, nh = int(fw * scale), int(fh * scale)
+    resized = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA)
+    out = np.zeros((h, w, 3), dtype=np.uint8)
+    y0  = (h - nh) // 2
+    x0  = (w - nw) // 2
+    out[y0:y0 + nh, x0:x0 + nw] = resized
+    return out
+
 # Drive parameters
 _FWD_VEL       = 60     # mm/s forward speed
 _TURN_RADIUS   = 400    # mm turning radius magnitude
@@ -268,10 +281,8 @@ class OllamaStrategy(NavigationStrategy):
             phase = state.phase
             state.llm_query_start = t0
 
-        # Resize for network efficiency
-        h, w = frame.shape[:2]
-        send = (cv2.resize(frame, (_SEND_W, _SEND_H))
-                if (w != _SEND_W or h != _SEND_H) else frame)
+        # Letterbox to preserve aspect ratio
+        send = _letterbox(frame, _SEND_W, _SEND_H)
 
         # Snapshot down frame (may be None if no down camera)
         with self._down_lock:
@@ -287,7 +298,7 @@ class OllamaStrategy(NavigationStrategy):
             images.append(base64.b64encode(buf.tobytes()).decode())
 
         if down is not None:
-            down_small = cv2.resize(down, (_SEND_W, _SEND_H))
+            down_small = _letterbox(down, _SEND_W, _SEND_H)
             _, buf = cv2.imencode(".jpg", down_small,
                                   [cv2.IMWRITE_JPEG_QUALITY, _JPEG_QUALITY])
             images.append(base64.b64encode(buf.tobytes()).decode())
