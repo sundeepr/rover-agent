@@ -48,16 +48,20 @@ def _build_prompt(history: deque) -> str:
     history_text = "\n".join(past_lines) if past_lines else "  (no prior frames)"
 
     return f"""\
-You are a vision system for a farm rover driving between crop rows.
+You are the navigation system of a farm rover driving between crop rows.
+
+SCENE UNDERSTANDING:
+- Crop rows: uniform, evenly-spaced plants in straight or gently curved lines. \
+The rover must drive BETWEEN these rows and NEVER onto them.
+- Weeds: scattered randomly with irregular shapes, NOT in rows. \
+The rover may drive over weeds — they are NOT obstacles.
+- Stay in the open soil corridor between the two nearest crop rows.
 
 You are given {n} image(s) in chronological order (oldest first, newest last).
 Previous predicted navigation points:
 {history_text}
 
-Using this motion history, analyse the LAST image (frame {n}) and predict \
-where the rover should navigate next.
-
-Return ONLY valid JSON:
+Analyse the LAST image (frame {n}) and return ONLY valid JSON:
 {{
   "motion_direction": "left|right|straight",
   "next_point": [x, y],
@@ -69,22 +73,21 @@ Return ONLY valid JSON:
 
 Coordinate rules (ALL values normalized 0.0-1.0):
   x=0.0=left edge, x=1.0=right edge, x=0.5=center.
-  y=0.0=top edge,  y=1.0=bottom edge.
+  y=0.0=top,  y=1.0=bottom.
 
-next_point: single best point to steer toward in the CURRENT (last) image.
-  Must be on open soil between crop rows, not on any plant.
+next_point:
+  - Where the rover should steer in the CURRENT (last) image.
+  - Must be in the open soil gap between the two nearest crop rows.
+  - Weeds are NOT obstacles — only avoid crop row plants.
 
-path_points: 4-6 points tracing the gap center in the CURRENT image, \
-bottom (y≈0.9) to top (y≈0.2).
-  x MUST change across points to follow the actual gap curvature.
-  A constant x column is WRONG.
+path_points:
+  - 4-6 points tracing the soil corridor centre, bottom (y≈0.9) to top (y≈0.2).
+  - x MUST vary across points to follow corridor curvature. Constant x is WRONG.
 
 motion_direction: inferred from how next_point x shifted across past frames.
-  left  = x decreasing (gap moving left)
-  right = x increasing (gap moving right)
-  straight = x stable
+  left=x decreasing, right=x increasing, straight=x stable.
 
-path_visible: false if no clear open soil gap is visible.
+path_visible: false only if no clear soil corridor between crop rows is visible.
 """
 
 

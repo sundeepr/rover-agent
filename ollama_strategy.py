@@ -80,18 +80,24 @@ away from them (opposite direction to the plant contact side).
     )
 
     return f"""\
-You are a vision system for a farm rover driving between crop rows.
+You are the navigation system of a farm rover driving between crop rows.
+
+SCENE UNDERSTANDING:
+- Crop rows: uniform, evenly-spaced plants arranged in straight or gently \
+curved lines. These are the TARGET rows the rover must drive BETWEEN.
+- Weeds: scattered randomly, irregular shapes, NOT in rows. \
+The rover may drive over weeds — they are NOT obstacles.
+- The rover must stay in the open soil corridor between the two nearest crop rows.
+- NEVER steer the rover onto a crop row plant.
 
 You are given {n} forward-camera image(s) in chronological order \
 (oldest first, newest last).{down_section}
+
 Previous predicted navigation points:
 {history_text}
 
-Using this motion history, analyse the CURRENT forward-camera frame \
-(image {n}) and predict where the rover should navigate next.
-
-Return ONLY valid JSON:{down_field}
-{{
+Analyse the CURRENT forward-camera frame (image {n}) and return ONLY valid JSON:
+{{{down_field}
   "motion_direction": "left|right|straight",
   "next_point": [x, y],
   "path_points": [[x, y], ...],
@@ -102,18 +108,21 @@ Return ONLY valid JSON:{down_field}
 
 Coordinate rules (ALL values normalized 0.0-1.0):
   x=0.0=left edge, x=1.0=right edge, x=0.5=center.
-  y=0.0=top edge,  y=1.0=bottom edge.
+  y=0.0=top,  y=1.0=bottom.
 
-next_point: steer toward this point in the CURRENT forward image.
-  Must be on open soil, not on any plant.
-  If wheel_on_crop=true, steer away from crop_contact_side.
+next_point:
+  - The single point the rover should steer toward in the CURRENT frame.
+  - Must be in the open soil gap between the two crop rows.
+  - Ignore weeds — steer around crop row plants only.
+  - If wheel_on_crop=true, steer immediately away from crop_contact_side.
 
-path_points: 4-6 points tracing the gap center bottom→top.
-  x MUST vary across points to follow the actual gap curvature.
+path_points:
+  - 4-6 points tracing the centre of the soil corridor, bottom (y≈0.9) to top (y≈0.2).
+  - x MUST vary to follow the corridor curvature. A constant x is WRONG.
 
 motion_direction: inferred from how next_point x shifted across past frames.
 
-path_visible: false if no clear soil gap is visible.
+path_visible: false only if no clear soil corridor between crop rows is visible.
 """
 
 
