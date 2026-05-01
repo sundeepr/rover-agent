@@ -300,6 +300,13 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
             server_url=args.cloud_server,
             goal=args.goal,
         )
+    if name == "ollama":
+        from ollama_strategy import OllamaStrategy
+        return OllamaStrategy(
+            ollama_url=args.ollama_server,
+            model=args.ollama_model,
+            history_size=args.ollama_history,
+        )
     if name == "crop_row":
         from crop_row_strategy import CropRowStrategy
         if args.lab_mode:
@@ -346,7 +353,7 @@ def main():
     parser.add_argument("--strategy",    type=str,   default="gemini",
                         choices=["gemini", "omnivla", "clip_omnivla", "qwen_omnivla",
                                  "hough_crop_row", "crop_row", "row_centering_omnivla",
-                                 "cloud_omnivla", "paligemma"],
+                                 "cloud_omnivla", "paligemma", "ollama"],
                         help="Navigation strategy (default: gemini)")
     parser.add_argument("--cloud-server", type=str,  default="ws://localhost:8765",
                         metavar="URL",
@@ -394,8 +401,16 @@ def main():
     parser.add_argument("--ollama-server",  type=str,
                         default="http://localhost:11434",
                         metavar="URL",
-                        help="Ollama API URL for Qwen models "
-                             "(default: http://localhost:11434)")
+                        help="Ollama API URL (default: http://localhost:11434)")
+    parser.add_argument("--ollama-model",   type=str,
+                        default="qwen2.5vl",
+                        metavar="NAME",
+                        help="Ollama model name for ollama strategy "
+                             "(default: qwen2.5vl)")
+    parser.add_argument("--ollama-history", type=int,
+                        default=5,
+                        metavar="N",
+                        help="Frame history size for ollama strategy (default: 5)")
     parser.add_argument("--down-device",     type=int,   default=1,
                         metavar="INDEX",
                         help="Camera device index for downward-facing row-centering camera "
