@@ -335,6 +335,7 @@ class OllamaStrategy(NavigationStrategy):
 
         prompt  = _build_prompt(self._history, has_down_cam=down is not None,
                                rover_type=self._rover_type)
+        log.info("Step %d | Prompt:\n%s", step, prompt)
         payload = json.dumps({
             "model":  self._model,
             "prompt": prompt,
