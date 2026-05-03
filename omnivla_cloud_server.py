@@ -191,7 +191,6 @@ class InferenceEngine:
         import numpy as np
         from PIL import Image as PIL_Image
         from prismatic.models.backbones.llm.prompting import PurePromptBuilder
-        from prismatic.training.train_utils import get_current_action_mask
 
         t0 = time.time()
 
@@ -231,19 +230,14 @@ class InferenceEngine:
             )
 
         # ── Extract action hidden states → regression head → waypoints ─────────
-        # last_hidden: [B, seq_len, D]; text portion is after vision patches
-        last_hidden  = output.hidden_states[-1]
-        # last_hidden includes vision patches; text portion starts at num_patches
-        text_hidden  = last_hidden[:, self._num_patches:]   # [B, text_len, D]
-        action_mask  = get_current_action_mask(labels)      # [B, text_len]
-
-        # Trim to the shorter of the two to handle any off-by-one from model internals
-        min_len = min(text_hidden.shape[1], action_mask.shape[1])
-        text_hidden = text_hidden[:, :min_len]
-        action_mask = action_mask[:, :min_len]
-        # Gather positions where action tokens appear; reshape to [B, 8*4, D]
-        n_action_tok = NUM_ACTIONS_CHUNK * ACTION_DIM
-        actions_hidden = text_hidden[action_mask].view(1, n_action_tok, -1)
+        # Use the same fixed-position slicing as modeling_prismatic.py:
+        #   NUM_PROMPT_TOKENS = input_ids.shape[-1] - 1  (text tokens minus stop token)
+        #   actions at: NUM_PATCHES + NUM_PROMPT_TOKENS : ... + ACTION_DIM * NUM_ACTIONS_CHUNK
+        last_hidden     = output.hidden_states[-1]
+        num_prompt_tok  = input_ids.shape[-1] - 1
+        act_start       = self._num_patches + num_prompt_tok
+        act_end         = act_start + ACTION_DIM * NUM_ACTIONS_CHUNK
+        actions_hidden  = last_hidden[:, act_start:act_end, :]  # [B, 8*4, D]
 
         with torch.no_grad():
             predicted = self._action_head.predict_action(actions_hidden, modality_id)
