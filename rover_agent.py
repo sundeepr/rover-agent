@@ -312,6 +312,7 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
             ollama_url=args.ollama_server,
             model=args.ollama_model,
             history_size=args.ollama_history,
+            rover_type=args.rover,
         )
     if name == "crop_row":
         from crop_row_strategy import CropRowStrategy

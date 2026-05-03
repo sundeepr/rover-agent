@@ -61,7 +61,7 @@ _DEAD_BAND     = 0.05   # ± around x=0.5 treated as straight
 
 # ── Prompt ────────────────────────────────────────────────────────────────────
 
-def _build_prompt(history: deque, has_down_cam: bool) -> str:
+def _build_prompt(history: deque, has_down_cam: bool, rover_type: str = "atlas") -> str:
     n = len(history)
     past_lines = []
     for i, (_, result) in enumerate(list(history)[:-1]):
@@ -92,16 +92,36 @@ away from them (opposite direction to the plant contact side).
         if has_down_cam else ""
     )
 
-    return f"""\
-You are the navigation system of a farm rover driving between crop rows.
-
+    if rover_type == "roomba":
+        scene_understanding = """\
+SCENE UNDERSTANDING:
+- The rover is navigating indoors and must follow a BROWN CARPET on the floor.
+- The brown carpet is the TARGET path — stay on it at all times.
+- Steer to keep the rover centred on the brown carpet.
+- If the carpet curves, follow the curve.
+- If the carpet edge is visible, steer back toward the centre of the carpet.
+- Avoid hard floor, rugs of other colours, or obstacles off the carpet."""
+    else:
+        scene_understanding = """\
 SCENE UNDERSTANDING:
 - Crop rows: uniform, evenly-spaced plants arranged in straight or gently \
 curved lines. These are the TARGET rows the rover must drive BETWEEN.
 - Weeds: scattered randomly, irregular shapes, NOT in rows. \
 The rover may drive over weeds — they are NOT obstacles.
 - The rover must stay in the open soil corridor between the two nearest crop rows.
-- NEVER steer the rover onto a crop row plant.
+- NEVER steer the rover onto a crop row plant."""
+
+    path_label = "carpet centre" if rover_type == "roomba" else "soil corridor centre"
+    path_visible_desc = (
+        "false only if no brown carpet is visible in the forward camera"
+        if rover_type == "roomba"
+        else "false only if no clear soil corridor between crop rows is visible"
+    )
+
+    return f"""\
+You are the navigation system of a rover.
+
+{scene_understanding}
 
 You are given {n} forward-camera image(s) in chronological order \
 (oldest first, newest last).{down_section}
@@ -125,17 +145,16 @@ Coordinate rules (ALL values normalized 0.0-1.0):
 
 next_point:
   - The single point the rover should steer toward in the CURRENT frame.
-  - Must be in the open soil gap between the two crop rows.
-  - Ignore weeds — steer around crop row plants only.
+  - Must be on the {path_label}.
   - If wheel_on_crop=true, steer immediately away from crop_contact_side.
 
 path_points:
-  - 4-6 points tracing the centre of the soil corridor, bottom (y≈0.9) to top (y≈0.2).
-  - x MUST vary to follow the corridor curvature. A constant x is WRONG.
+  - 4-6 points tracing the {path_label}, bottom (y≈0.9) to top (y≈0.2).
+  - x MUST vary to follow the path curvature. A constant x is WRONG.
 
 motion_direction: inferred from how next_point x shifted across past frames.
 
-path_visible: false only if no clear soil corridor between crop rows is visible.
+path_visible: {path_visible_desc}.
 """
 
 
@@ -234,14 +253,16 @@ class OllamaStrategy(NavigationStrategy):
         ollama_url: str = "http://localhost:11434",
         model: str = "qwen2.5vl",
         history_size: int = _HISTORY_SIZE,
+        rover_type: str = "atlas",
     ):
         self._url        = ollama_url.rstrip("/")
         self._model      = model
+        self._rover_type = rover_type
         self._history: deque = deque(maxlen=history_size)
         self._down_frame: np.ndarray | None = None
         self._down_lock  = threading.Lock()
-        log.info("OllamaStrategy: model=%s  server=%s  history=%d",
-                 model, ollama_url, history_size)
+        log.info("OllamaStrategy: model=%s  server=%s  history=%d  rover=%s",
+                 model, ollama_url, history_size, rover_type)
 
     @property
     def name(self) -> str:
@@ -304,7 +325,8 @@ class OllamaStrategy(NavigationStrategy):
             images.append(base64.b64encode(buf.tobytes()).decode())
             log.debug("Down camera frame included in Ollama request")
 
-        prompt  = _build_prompt(self._history, has_down_cam=down is not None)
+        prompt  = _build_prompt(self._history, has_down_cam=down is not None,
+                               rover_type=self._rover_type)
         payload = json.dumps({
             "model":  self._model,
             "prompt": prompt,
