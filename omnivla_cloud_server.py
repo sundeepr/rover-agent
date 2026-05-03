@@ -161,18 +161,15 @@ class InferenceEngine:
         self._action_head.eval()
         log.info("Action head loaded from %s", ckpt_head.name)
 
-        # Wrap action head so model's internal call (single arg) works —
-        # model calls predict_action(hidden) but L1RegressionActionHead_idcat
-        # requires (hidden, taskid). Supply MODALITY_LANG as default.
-        _taskid = torch.as_tensor([MODALITY_LANG], dtype=torch.bfloat16).to(device)
-        _inner  = self._action_head
-        class _WrappedHead:
-            def predict_action(self_, h, taskid=_taskid):
-                return _inner.predict_action(h, taskid.to(h.device))
-        self._action_head = _WrappedHead()
-
-        # ── Action tokenizer (needed to build dummy action tokens) ────────────
+        # ── Action tokenizer ──────────────────────────────────────────────────
         self._action_tok = ActionTokenizer(self._processor.tokenizer)
+
+        # ── num_patches: patches × images + 1 (goal pose token) ──────────────
+        self._num_patches = (
+            self._vla.vision_backbone.get_num_patches()
+            * self._vla.vision_backbone.get_num_images_in_input()
+            + 1
+        )
 
         # ── Cache black dummy goal image ──────────────────────────────────────
         black_pil = PIL_Image.new("RGB", GOAL_IMAGE_SIZE, (0, 0, 0))
@@ -181,7 +178,7 @@ class InferenceEngine:
             .unsqueeze(0)
         )
 
-        log.info("InferenceEngine ready")
+        log.info("InferenceEngine ready — num_patches=%d", self._num_patches)
 
     def infer(self, frame_jpeg: bytes, goal: str) -> dict:
         """
@@ -197,62 +194,93 @@ class InferenceEngine:
         from PIL import Image as PIL_Image
         from prismatic.models.backbones.llm.prompting import PurePromptBuilder
 
+        import numpy as np
+        from prismatic.training.train_utils import get_current_action_mask, get_next_actions_mask
+
         t0 = time.time()
 
-        # ── Pixel values: current frame + black goal image ────────────────────
+        # ── Build batch (mirrors run_omnivla.data_transformer_omnivla) ────────
         cur_pil    = PIL_Image.open(io.BytesIO(frame_jpeg)).convert("RGB")
-        cur_tensor = (
-            self._processor.image_processor.apply_transform(cur_pil)
-            .unsqueeze(0)
-        )
+        cur_tensor = self._processor.image_processor.apply_transform(cur_pil).unsqueeze(0)
         pixel_values = torch.cat(
             [cur_tensor, self._black_goal_tensor], dim=1
         ).to(torch.bfloat16).to(self._device)
 
-        # ── Tokenize prompt ───────────────────────────────────────────────────
         if goal not in self._goal_cache:
             self._goal_cache[goal] = self._build_input_ids(goal)
-        input_ids = self._goal_cache[goal].to(self._device)
+        input_ids, labels = self._goal_cache[goal]
+        input_ids  = input_ids.to(self._device)
+        labels     = labels.to(self._device)
         attention_mask = input_ids.ne(self._processor.tokenizer.pad_token_id)
 
-        # ── Goal pose = zeros (language-only) ─────────────────────────────────
-        goal_pose = torch.zeros(1, POSE_DIM, dtype=torch.bfloat16, device=self._device)
+        goal_pose   = torch.zeros(1, POSE_DIM, dtype=torch.bfloat16, device=self._device)
+        modality_id = torch.as_tensor([MODALITY_LANG], dtype=torch.float32).to(torch.bfloat16).to(self._device)
 
-        # ── Use model's own predict_action — handles all slicing internally ───
+        # ── Forward pass (matches run_forward_pass exactly) ───────────────────
         with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
-            waypoints, _ = self._vla.predict_action(
+            output = self._vla(
                 input_ids=input_ids,
-                pixel_values=pixel_values,
                 attention_mask=attention_mask,
+                pixel_values=pixel_values,
+                modality_id=modality_id,
+                labels=labels,
+                output_hidden_states=True,
                 proprio=goal_pose,
                 proprio_projector=self._pose_proj,
-                action_head=self._action_head,
-                unnorm_key=self._unnorm_key,
             )
 
-        # waypoints: numpy [NUM_ACTIONS_CHUNK, ACTION_DIM]
-        waypoints = waypoints.reshape(NUM_ACTIONS_CHUNK, ACTION_DIM)
+        # ── Extract action hidden states (mirrors run_forward_pass) ───────────
+        ground_truth_token_ids = labels[:, 1:].to(self._device)
+        current_action_mask = get_current_action_mask(ground_truth_token_ids)
+        next_actions_mask   = get_next_actions_mask(ground_truth_token_ids)
+
+        last_hidden_states   = output.hidden_states[-1]
+        text_hidden_states   = last_hidden_states[:, self._num_patches:-1]
+        actions_hidden_states = (
+            text_hidden_states[current_action_mask | next_actions_mask]
+            .reshape(1, NUM_ACTIONS_CHUNK * ACTION_DIM, -1)
+            .to(torch.bfloat16)
+        )
+
+        with torch.no_grad():
+            predicted = self._action_head.predict_action(actions_hidden_states, modality_id)
+
+        waypoints = predicted.float().cpu().numpy().reshape(NUM_ACTIONS_CHUNK, ACTION_DIM)
         return {"waypoints": waypoints.tolist(), "elapsed": round(time.time() - t0, 3)}
 
     def _build_input_ids(self, goal: str):
-        """Build tokenized input_ids for the human prompt + dummy action tokens."""
+        """Build (input_ids, labels) matching transform_datatype in run_omnivla.py."""
         import torch
         import numpy as np
         from prismatic.models.backbones.llm.prompting import PurePromptBuilder
 
-        pb = PurePromptBuilder("openvla")
-        pb.add_turn("human", f"What action should the robot take to {goal}?")
+        IGNORE_INDEX = -100
 
-        # Dummy zero actions so the sequence has the right action token positions
+        # Build action string from dummy actions
         dummy_actions = np.zeros((NUM_ACTIONS_CHUNK, ACTION_DIM), dtype=np.float32)
-        action_tokens = self._action_tok(dummy_actions)
-        action_str = "".join(action_tokens) if isinstance(action_tokens, list) else action_tokens
-        pb.add_turn("gpt", action_str)
+        current_action_string  = self._action_tok(dummy_actions[0])
+        future_actions_strings = "".join(self._action_tok(dummy_actions[1:]))
+        action_chunk_string    = current_action_string + future_actions_strings
+        action_chunk_len       = len(action_chunk_string)
 
-        tokens = self._processor.tokenizer(
-            pb.get_prompt(), add_special_tokens=True, return_tensors="pt"
-        )
-        return tokens["input_ids"]   # [1, seq_len]
+        conversation = [
+            {"from": "human", "value": f"What action should the robot take to {goal}?"},
+            {"from": "gpt",   "value": action_chunk_string},
+        ]
+        pb = PurePromptBuilder("openvla")
+        for turn in conversation:
+            pb.add_turn(turn["from"], turn["value"])
+
+        input_ids = torch.tensor(
+            self._processor.tokenizer(
+                pb.get_prompt(), add_special_tokens=True
+            ).input_ids
+        ).unsqueeze(0)  # [1, seq_len]
+
+        labels = input_ids.clone()
+        labels[:, :-(action_chunk_len + 1)] = IGNORE_INDEX
+
+        return input_ids, labels
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
