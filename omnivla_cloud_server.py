@@ -233,9 +233,12 @@ class InferenceEngine:
         # ── Extract action hidden states → regression head → waypoints ─────────
         # last_hidden: [B, seq_len, D]; text portion is after vision patches
         last_hidden  = output.hidden_states[-1]
+        # last_hidden includes vision patches; text portion starts at num_patches
+        # Model shifts by 1 for next-token prediction so text_hidden is 1 shorter than labels
         text_hidden  = last_hidden[:, self._num_patches:]   # [B, text_len, D]
+        text_labels  = labels[:, 1:]                        # shift labels to align with hidden states
 
-        action_mask  = get_current_action_mask(labels)
+        action_mask  = get_current_action_mask(text_labels)
         # Gather positions where action tokens appear; reshape to [B, 8*4, D]
         n_action_tok = NUM_ACTIONS_CHUNK * ACTION_DIM
         actions_hidden = text_hidden[action_mask].view(1, n_action_tok, -1)
