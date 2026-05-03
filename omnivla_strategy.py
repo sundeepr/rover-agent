@@ -75,14 +75,16 @@ def _waypoint_to_drive(waypoints: np.ndarray) -> tuple[int, int]:
     dy = float(wp[1]) * METRIC_SPACING   # lateral (m)
 
     EPS = 1e-8
+    DY_DEAD_BAND = 0.15  # ignore lateral offsets smaller than this (model units × 0.1m)
     if abs(dx) < EPS and abs(dy) < EPS:
         return 0, 0x8000
     elif abs(dx) < EPS:
         lin_m_s   = 0.0
         ang_rad_s = math.copysign(math.pi / (2 * DT), dy)
     else:
+        effective_dy = 0.0 if abs(dy) < DY_DEAD_BAND else dy
         lin_m_s   = dx / DT
-        ang_rad_s = math.atan(dy / dx) / DT
+        ang_rad_s = math.atan(effective_dy / dx) / DT
 
     # Velocity limits (matching run_omnivla.py maxv=0.3, maxw=0.3)
     maxv = MAX_LIN_MM_S / 1000.0
