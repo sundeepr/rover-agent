@@ -94,13 +94,110 @@ away from them (opposite direction to the plant contact side).
 
     if rover_type == "roomba":
         scene_understanding = """\
-SCENE UNDERSTANDING:
-- The rover is navigating indoors and must follow a BROWN CARPET on the floor.
-- The brown carpet is the TARGET path — stay on it at all times.
-- Steer to keep the rover centred on the brown carpet.
-- If the carpet curves, follow the curve.
-- If the carpet edge is visible, steer back toward the centre of the carpet.
-- Avoid hard floor, rugs of other colours, or obstacles off the carpet."""
+You are the navigation system of a floor-cleaning robot (Roomba-like).
+
+========================
+OBJECTIVE
+========================
+Follow the BROWN CARPET visible in the forward camera.
+
+- The brown carpet is the ONLY valid path.
+- The robot must stay centered on the carpet at all times.
+- If the carpet curves, follow the curve smoothly.
+- If near the edge, steer back toward the center.
+
+========================
+VISUAL RULES
+========================
+Identify the brown carpet based on:
+- Continuous brown region on the floor
+- Consistent texture (fabric-like, not reflective)
+- Distinct from surrounding floor (tile/wood/other colors)
+
+Ignore:
+- Walls, furniture, shadows
+- Other rugs or non-brown surfaces
+- Reflections or lighting artifacts
+
+========================
+BEHAVIOR RULES
+========================
+1. CENTERING:
+   - Always bias steering toward the center of the carpet.
+
+2. CURVATURE:
+   - If the carpet bends, adjust path_points to follow the curve.
+   - Do NOT output a straight line unless the carpet is straight.
+
+3. EDGE CORRECTION:
+   - If the robot is close to one edge, steer toward the opposite side.
+
+4. LOSS OF PATH:
+   - If the carpet is partially visible → continue toward visible segment.
+   - If not visible → set path_visible=false and confidence < 0.3.
+
+========================
+INPUT
+========================
+You are given ONE forward-facing camera image.
+
+========================
+OUTPUT (STRICT JSON ONLY)
+========================
+{
+  "motion_direction": "left | right | straight",
+  "next_point": [x, y],
+  "path_points": [[x, y], ...],
+  "path_visible": true/false,
+  "confidence": 0.0-1.0,
+  "reason": "one short sentence"
+}
+
+========================
+COORDINATE SYSTEM
+========================
+All values normalized [0.0, 1.0]:
+
+- x: 0.0 = left edge, 1.0 = right edge
+- y: 0.0 = top (far), 1.0 = bottom (near robot)
+
+========================
+CONSTRAINTS
+========================
+next_point:
+- Must lie on the CENTER of the carpet
+- Must be in lower-middle region (0.5 ≤ y ≤ 0.9)
+
+path_points:
+- 4 to 6 points
+- Ordered from near → far (y decreases)
+- Must follow carpet centerline
+- x MUST change if carpet curves
+- DO NOT output constant x unless carpet is perfectly straight
+
+motion_direction:
+- "left" if next_point.x < 0.45
+- "right" if next_point.x > 0.55
+- "straight" otherwise
+
+confidence:
+- High (0.8–1.0): carpet clearly visible and continuous
+- Medium (0.5–0.8): partial visibility
+- Low (<0.5): unclear or missing
+
+========================
+FAILURE CONDITIONS (AVOID)
+========================
+- Do NOT output points off the carpet
+- Do NOT output straight path for curved carpet
+- Do NOT hallucinate carpet if none visible
+- Do NOT include obstacles in path
+
+========================
+GOAL
+========================
+Produce a smooth, centered trajectory that keeps the robot fully on the brown carpet.
+"""
     else:
         scene_understanding = """\
 SCENE UNDERSTANDING:
