@@ -215,7 +215,7 @@ class InferenceEngine:
 
         # ── Goal pose = zeros (language-only, modality 7 ignores pose) ────────
         goal_pose   = torch.zeros(1, POSE_DIM, dtype=torch.bfloat16, device=self._device)
-        modality_id = torch.as_tensor([MODALITY_LANG], dtype=torch.long, device=self._device)
+        modality_id = torch.as_tensor([MODALITY_LANG], dtype=torch.bfloat16, device=self._device)
 
         # ── Forward pass ──────────────────────────────────────────────────────
         with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
@@ -241,7 +241,7 @@ class InferenceEngine:
         actions_hidden = text_hidden[action_mask].view(1, n_action_tok, -1)
 
         with torch.no_grad():
-            predicted = self._action_head.predict_action(actions_hidden, modality_id.item())
+            predicted = self._action_head.predict_action(actions_hidden, modality_id)
 
         waypoints = predicted.float().cpu().numpy()   # [1, 8, 4]
         return {"waypoints": waypoints[0].tolist(), "elapsed": round(time.time() - t0, 3)}
