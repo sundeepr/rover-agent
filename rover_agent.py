@@ -294,6 +294,12 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
             server_url=args.cloud_server,
             goal=args.goal,
         )
+    if name == "omnivla_full":
+        from omnivla_full_strategy import OmniVLAFullStrategy
+        return OmniVLAFullStrategy(
+            server_url=args.cloud_server,
+            goal=args.goal,
+        )
     if name == "paligemma":
         from paligemma_strategy import PaliGemmaStrategy
         return PaliGemmaStrategy(
@@ -353,7 +359,7 @@ def main():
     parser.add_argument("--strategy",    type=str,   default="gemini",
                         choices=["gemini", "omnivla", "clip_omnivla", "qwen_omnivla",
                                  "hough_crop_row", "crop_row", "row_centering_omnivla",
-                                 "cloud_omnivla", "paligemma", "ollama"],
+                                 "cloud_omnivla", "omnivla_full", "paligemma", "ollama"],
                         help="Navigation strategy (default: gemini)")
     parser.add_argument("--cloud-server", type=str,  default="ws://localhost:8765",
                         metavar="URL",
@@ -463,7 +469,7 @@ def main():
                      args.centering_gain, args.centering_alpha)
             log.info("ExG threshold : %d  min_area: %d",
                      args.exg_threshold, args.exg_min_area)
-    if args.strategy == "cloud_omnivla":
+    if args.strategy in ("cloud_omnivla", "omnivla_full"):
         log.info("Cloud server  : %s", args.cloud_server)
     else:
         log.info("Model         : %s", gemini_client.MODEL)

@@ -142,7 +142,7 @@ class InferenceEngine:
         )
 
         # ── Pose projector ────────────────────────────────────────────────────
-        ckpt_pose = self._model_path / _find_checkpoint(self._model_path, "pose_projector")
+        ckpt_pose = self._model_path / _find_checkpoint(self._model_path, "proprio_projector")
         self._pose_proj = ProprioProjector(
             llm_dim=self._vla.llm_dim, proprio_dim=POSE_DIM
         ).to(device)
