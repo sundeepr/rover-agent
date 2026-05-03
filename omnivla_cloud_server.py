@@ -234,11 +234,13 @@ class InferenceEngine:
         # last_hidden: [B, seq_len, D]; text portion is after vision patches
         last_hidden  = output.hidden_states[-1]
         # last_hidden includes vision patches; text portion starts at num_patches
-        # Model shifts by 1 for next-token prediction so text_hidden is 1 shorter than labels
         text_hidden  = last_hidden[:, self._num_patches:]   # [B, text_len, D]
-        text_labels  = labels[:, 1:]                        # shift labels to align with hidden states
+        action_mask  = get_current_action_mask(labels)      # [B, text_len]
 
-        action_mask  = get_current_action_mask(text_labels)
+        # Trim to the shorter of the two to handle any off-by-one from model internals
+        min_len = min(text_hidden.shape[1], action_mask.shape[1])
+        text_hidden = text_hidden[:, :min_len]
+        action_mask = action_mask[:, :min_len]
         # Gather positions where action tokens appear; reshape to [B, 8*4, D]
         n_action_tok = NUM_ACTIONS_CHUNK * ACTION_DIM
         actions_hidden = text_hidden[action_mask].view(1, n_action_tok, -1)
