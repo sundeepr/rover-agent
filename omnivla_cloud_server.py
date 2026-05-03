@@ -237,7 +237,10 @@ class InferenceEngine:
         num_prompt_tok  = input_ids.shape[-1] - 1
         act_start       = self._num_patches + num_prompt_tok
         act_end         = act_start + ACTION_DIM * NUM_ACTIONS_CHUNK
+        log.info("DEBUG shapes: last_hidden=%s num_patches=%d num_prompt_tok=%d act_start=%d act_end=%d",
+                 last_hidden.shape, self._num_patches, num_prompt_tok, act_start, act_end)
         actions_hidden  = last_hidden[:, act_start:act_end, :]  # [B, 8*4, D]
+        log.info("DEBUG actions_hidden=%s", actions_hidden.shape)
 
         with torch.no_grad():
             predicted = self._action_head.predict_action(actions_hidden, modality_id)
