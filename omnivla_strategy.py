@@ -50,8 +50,8 @@ METRIC_SPACING = 0.1        # 1 model unit = 0.1 m
 DT             = 1.0 / 3.0  # control period matching run_omnivla.py (tick_rate=3)
 WAYPOINT_IDX   = 4          # which of the 8 predicted waypoints to execute
 ENC_SIZE       = 1024
-MAX_LIN_MM_S   = 300        # max forward velocity mm/s (0.3 m/s per run_omnivla.py)
-MAX_ANG_RAD_S  = 0.3        # max angular velocity rad/s (per run_omnivla.py)
+MAX_LIN_MM_S   = 10         # max forward velocity mm/s (0.01 m/s)
+MAX_ANG_RAD_S  = 0.3        # max angular velocity rad/s
 
 # Modality IDs (defined by the OmniVLA-edge model architecture):
 #   7 = language only          — language token in transformer
