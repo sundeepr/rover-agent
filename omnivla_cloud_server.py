@@ -142,7 +142,7 @@ class InferenceEngine:
         )
 
         # ── Pose projector ────────────────────────────────────────────────────
-        ckpt_pose = self._model_path / _find_checkpoint(self._model_path, "proprio_projector")
+        ckpt_pose = _find_checkpoint(self._model_path, "proprio_projector")
         self._pose_proj = ProprioProjector(
             llm_dim=self._vla.llm_dim, proprio_dim=POSE_DIM
         ).to(device)
@@ -152,7 +152,7 @@ class InferenceEngine:
         log.info("Pose projector loaded from %s", ckpt_pose.name)
 
         # ── Action head ───────────────────────────────────────────────────────
-        ckpt_head = self._model_path / _find_checkpoint(self._model_path, "action_head")
+        ckpt_head = _find_checkpoint(self._model_path, "action_head")
         self._action_head = L1RegressionActionHead_idcat(
             input_dim=self._vla.llm_dim,
             hidden_dim=self._vla.llm_dim,
