@@ -146,8 +146,9 @@ class InferenceEngine:
         self._pose_proj = ProprioProjector(
             llm_dim=self._vla.llm_dim, proprio_dim=POSE_DIM
         ).to(device)
-        self._pose_proj.load_state_dict(
-            torch.load(ckpt_pose, map_location=device))
+        pose_ckpt = torch.load(ckpt_pose, map_location=device)
+        pose_ckpt = {k[7:] if k.startswith("module.") else k: v for k, v in pose_ckpt.items()}
+        self._pose_proj.load_state_dict(pose_ckpt)
         self._pose_proj.eval()
         log.info("Pose projector loaded from %s", ckpt_pose.name)
 
@@ -158,8 +159,9 @@ class InferenceEngine:
             hidden_dim=self._vla.llm_dim,
             action_dim=ACTION_DIM,
         ).to(torch.bfloat16).to(device)
-        self._action_head.load_state_dict(
-            torch.load(ckpt_head, map_location=device))
+        head_ckpt = torch.load(ckpt_head, map_location=device)
+        head_ckpt = {k[7:] if k.startswith("module.") else k: v for k, v in head_ckpt.items()}
+        self._action_head.load_state_dict(head_ckpt)
         self._action_head.eval()
         log.info("Action head loaded from %s", ckpt_head.name)
 
