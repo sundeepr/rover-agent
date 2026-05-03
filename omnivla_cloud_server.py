@@ -136,11 +136,6 @@ class InferenceEngine:
         self._vla.eval()
         log.info("VLA backbone loaded")
 
-        # num_patches: vision patches × num_images + 1 (goal pose token)
-        self._num_patches = (
-            self._vla.vision_backbone.get_num_patches() * NUM_IMAGES_IN_INPUT + 1
-        )
-
         # ── Pose projector ────────────────────────────────────────────────────
         ckpt_pose = _find_checkpoint(self._model_path, "proprio_projector")
         self._pose_proj = ProprioProjector(
@@ -200,53 +195,33 @@ class InferenceEngine:
             self._processor.image_processor.apply_transform(cur_pil)
             .unsqueeze(0)
         )
-        # shape: [1, C, H, W] each; stack along channel dim → [1, 2C, H, W]
         pixel_values = torch.cat(
             [cur_tensor, self._black_goal_tensor], dim=1
         ).to(torch.bfloat16).to(self._device)
 
-        # ── Tokenize prompt (human turn + dummy action tokens) ────────────────
+        # ── Tokenize prompt ───────────────────────────────────────────────────
         if goal not in self._goal_cache:
             self._goal_cache[goal] = self._build_input_ids(goal)
         input_ids = self._goal_cache[goal].to(self._device)
         attention_mask = input_ids.ne(self._processor.tokenizer.pad_token_id)
-        labels = input_ids.clone()
 
-        # ── Goal pose = zeros (language-only, modality 7 ignores pose) ────────
-        goal_pose   = torch.zeros(1, POSE_DIM, dtype=torch.bfloat16, device=self._device)
-        modality_id = torch.as_tensor([MODALITY_LANG], dtype=torch.bfloat16, device=self._device)
+        # ── Goal pose = zeros (language-only) ─────────────────────────────────
+        goal_pose = torch.zeros(1, POSE_DIM, dtype=torch.bfloat16, device=self._device)
 
-        # ── Forward pass ──────────────────────────────────────────────────────
+        # ── Use model's own predict_action — handles all slicing internally ───
         with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
-            output = self._vla(
+            waypoints, _ = self._vla.predict_action(
                 input_ids=input_ids,
-                attention_mask=attention_mask,
                 pixel_values=pixel_values,
-                modality_id=modality_id,
-                labels=labels,
-                output_hidden_states=True,
+                attention_mask=attention_mask,
                 proprio=goal_pose,
                 proprio_projector=self._pose_proj,
+                action_head=self._action_head,
             )
 
-        # ── Extract action hidden states → regression head → waypoints ─────────
-        # Use the same fixed-position slicing as modeling_prismatic.py:
-        #   NUM_PROMPT_TOKENS = input_ids.shape[-1] - 1  (text tokens minus stop token)
-        #   actions at: NUM_PATCHES + NUM_PROMPT_TOKENS : ... + ACTION_DIM * NUM_ACTIONS_CHUNK
-        last_hidden     = output.hidden_states[-1]
-        num_prompt_tok  = input_ids.shape[-1] - 1
-        act_start       = self._num_patches + num_prompt_tok
-        act_end         = act_start + ACTION_DIM * NUM_ACTIONS_CHUNK
-        log.info("DEBUG shapes: last_hidden=%s num_patches=%d num_prompt_tok=%d act_start=%d act_end=%d",
-                 last_hidden.shape, self._num_patches, num_prompt_tok, act_start, act_end)
-        actions_hidden  = last_hidden[:, act_start:act_end, :]  # [B, 8*4, D]
-        log.info("DEBUG actions_hidden=%s", actions_hidden.shape)
-
-        with torch.no_grad():
-            predicted = self._action_head.predict_action(actions_hidden, modality_id)
-
-        waypoints = predicted.float().cpu().numpy()   # [1, 8, 4]
-        return {"waypoints": waypoints[0].tolist(), "elapsed": round(time.time() - t0, 3)}
+        # waypoints: numpy [NUM_ACTIONS_CHUNK, ACTION_DIM]
+        waypoints = waypoints.reshape(NUM_ACTIONS_CHUNK, ACTION_DIM)
+        return {"waypoints": waypoints.tolist(), "elapsed": round(time.time() - t0, 3)}
 
     def _build_input_ids(self, goal: str):
         """Build tokenized input_ids for the human prompt + dummy action tokens."""
