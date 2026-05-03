@@ -264,8 +264,9 @@ class CloudOmniVLAStrategy(NavigationStrategy):
                                "send_error", time.time() - t0)
             return
 
-        # ── Wait for waypoints (use remaining budget within the query interval) ─
-        budget = max(1.0, state.query_interval - (time.time() - t0))
+        # ── Wait for waypoints — allow up to 30s for full OmniVLA inference ────
+        budget = max(30.0, state.query_interval - (time.time() - t0))
+        log.info("Step %d | waiting for cloud response (budget=%.1fs)…", step, budget)
         if not self._response_event.wait(timeout=budget):
             log.warning("Step %d | cloud server timed out after %.1fs", step, budget)
             self._write_result(state, step, phase, None, 0, 0x8000,
@@ -273,6 +274,8 @@ class CloudOmniVLAStrategy(NavigationStrategy):
             return
 
         resp = self._pending_response
+        log.info("Step %d | raw response: %s", step,
+                 str(resp)[:200] if resp else "None")
         if resp is None or resp.get("type") != "waypoints":
             msg = resp.get("message", "unknown") if resp else "disconnected"
             log.warning("Step %d | no waypoints: %s", step, msg)
