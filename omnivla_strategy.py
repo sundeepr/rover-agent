@@ -51,8 +51,6 @@ DT             = 1.0 / 3.0  # control period matching run_omnivla.py (tick_rate=
 WAYPOINT_IDX   = 4          # which of the 8 predicted waypoints to execute
 ENC_SIZE       = 1024
 MAX_LIN_MM_S   = 50         # max forward velocity mm/s
-MAX_ANG_RAD_S  = 0.3        # max angular velocity rad/s
-MIN_RADIUS_MM  = 500        # minimum turn radius — below this drive straight
 
 # Modality IDs (defined by the OmniVLA-edge model architecture):
 #   7 = language only          — language token in transformer
@@ -68,53 +66,25 @@ MODALITY_GOAL_IMG = 6
 def _waypoint_to_drive(waypoints: np.ndarray) -> tuple[int, int]:
     """Convert predicted waypoints to a Roomba (velocity_mm_s, radius_mm) pair.
 
-    Matches the PD controller in run_omnivla.py exactly.
+    Radius is proportional to dx/dy — large lateral offset → tight turn,
+    small lateral offset → gentle turn. Velocity is fixed at MAX_LIN_MM_S.
     """
     wp = waypoints[WAYPOINT_IDX].copy()
-    dx = float(wp[0]) * METRIC_SPACING   # forward (m)
-    dy = float(wp[1]) * METRIC_SPACING   # lateral (m)
+    dx = float(wp[0])   # forward (model units, already proportional)
+    dy = float(wp[1])   # lateral
 
-    EPS = 1e-8
+    EPS = 1e-6
     if abs(dx) < EPS and abs(dy) < EPS:
         return 0, 0x8000
-    elif abs(dx) < EPS:
-        lin_m_s   = 0.0
-        ang_rad_s = math.copysign(math.pi / (2 * DT), dy)
-    else:
-        lin_m_s   = dx / DT
-        ang_rad_s = math.atan(dy / dx) / DT
 
-    # Velocity limits (matching run_omnivla.py maxv=0.3, maxw=0.3)
-    maxv = MAX_LIN_MM_S / 1000.0
-    maxw = MAX_ANG_RAD_S
-    lin_m_s   = max(0.0, min(maxv, lin_m_s))   # no reversing
-    if abs(lin_m_s) <= maxv:
-        if abs(ang_rad_s) <= maxw:
-            lin_lim, ang_lim = lin_m_s, ang_rad_s
-        else:
-            rd = lin_m_s / ang_rad_s if abs(ang_rad_s) > EPS else 0
-            lin_lim = maxw * math.copysign(1, lin_m_s) * abs(rd)
-            ang_lim = maxw * math.copysign(1, ang_rad_s)
-    else:
-        if abs(ang_rad_s) <= 0.001:
-            lin_lim = maxv * math.copysign(1, lin_m_s)
-            ang_lim = 0.0
-        else:
-            rd = lin_m_s / ang_rad_s
-            if abs(rd) >= maxv / maxw:
-                lin_lim = maxv * math.copysign(1, lin_m_s)
-                ang_lim = maxv * math.copysign(1, ang_rad_s) / abs(rd)
-            else:
-                lin_lim = maxw * math.copysign(1, lin_m_s) * abs(rd)
-                ang_lim = maxw * math.copysign(1, ang_rad_s)
+    lin_mm_s = MAX_LIN_MM_S
 
-    lin_mm_s = int(lin_lim * 1000)
-    if abs(ang_lim) < 0.01:
+    if abs(dy) < EPS:
         return lin_mm_s, 0x8000
-    radius_mm = int(np.clip(lin_mm_s / ang_lim, -2000, 2000))
-    # Clamp to minimum radius — very tight turns at low speed stall the Roomba
-    if 0 < abs(radius_mm) < MIN_RADIUS_MM:
-        radius_mm = int(math.copysign(MIN_RADIUS_MM, radius_mm))
+
+    # Radius = (dx / dy) * scale — proportional turning, no fixed clamp
+    # scale converts model units to mm: 1 model unit = 100mm (0.1m)
+    radius_mm = int(np.clip((dx / dy) * 100, -2000, 2000))
     return lin_mm_s, radius_mm
 
 
