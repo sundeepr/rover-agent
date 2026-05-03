@@ -253,13 +253,13 @@ class InferenceEngine:
         from prismatic.models.backbones.llm.prompting import PurePromptBuilder
 
         pb = PurePromptBuilder("openvla")
-        pb.add_turn(role="human",
-                    message=f"What action should the robot take to {goal}?")
+        pb.add_turn("human", f"What action should the robot take to {goal}?")
 
         # Dummy zero actions so the sequence has the right action token positions
         dummy_actions = np.zeros((NUM_ACTIONS_CHUNK, ACTION_DIM), dtype=np.float32)
-        action_str = self._action_tok(dummy_actions)
-        pb.add_turn(role="gpt", message=action_str)
+        action_tokens = self._action_tok(dummy_actions)
+        action_str = "".join(action_tokens) if isinstance(action_tokens, list) else action_tokens
+        pb.add_turn("gpt", action_str)
 
         tokens = self._processor.tokenizer(
             pb.get_prompt(), add_special_tokens=True, return_tensors="pt"
