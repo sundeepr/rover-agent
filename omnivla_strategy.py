@@ -50,8 +50,9 @@ METRIC_SPACING = 0.1        # 1 model unit = 0.1 m
 DT             = 1.0 / 3.0  # control period matching run_omnivla.py (tick_rate=3)
 WAYPOINT_IDX   = 4          # which of the 8 predicted waypoints to execute
 ENC_SIZE       = 1024
-MAX_LIN_MM_S   = 10         # max forward velocity mm/s (0.01 m/s)
+MAX_LIN_MM_S   = 50         # max forward velocity mm/s
 MAX_ANG_RAD_S  = 0.3        # max angular velocity rad/s
+MIN_RADIUS_MM  = 200        # minimum turn radius — below this drive straight
 
 # Modality IDs (defined by the OmniVLA-edge model architecture):
 #   7 = language only          — language token in transformer
@@ -111,6 +112,9 @@ def _waypoint_to_drive(waypoints: np.ndarray) -> tuple[int, int]:
     if abs(ang_lim) < 0.01:
         return lin_mm_s, 0x8000
     radius_mm = int(np.clip(lin_mm_s / ang_lim, -2000, 2000))
+    # Clamp to minimum radius — very tight turns at low speed stall the Roomba
+    if 0 < abs(radius_mm) < MIN_RADIUS_MM:
+        radius_mm = int(math.copysign(MIN_RADIUS_MM, radius_mm))
     return lin_mm_s, radius_mm
 
 
