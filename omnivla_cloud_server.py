@@ -86,8 +86,9 @@ class InferenceEngine:
         python omnivla_cloud_server.py --omnivla-repo /path/to/OmniVLA ...
     """
 
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, unnorm_key: str = "bridge_orig"):
         self._model_path  = Path(model_path)
+        self._unnorm_key  = unnorm_key
         self._vla         = None
         self._processor   = None
         self._pose_proj   = None
@@ -226,6 +227,7 @@ class InferenceEngine:
                 proprio=goal_pose,
                 proprio_projector=self._pose_proj,
                 action_head=self._action_head,
+                unnorm_key=self._unnorm_key,
             )
 
         # waypoints: numpy [NUM_ACTIONS_CHUNK, ACTION_DIM]
@@ -371,13 +373,17 @@ def main() -> None:
                         help="Path to cloned OmniVLA repo root — prepended to "
                              "sys.path so 'prismatic' is importable. "
                              "Not needed if you ran 'pip install -e .' in the repo.")
+    parser.add_argument("--unnorm-key", default="bridge_orig",
+                        help="Dataset key for action un-normalization stats. "
+                             "Run without this flag to see available keys. "
+                             "(default: bridge_orig)")
     args = parser.parse_args()
 
     if args.omnivla_repo:
         sys.path.insert(0, args.omnivla_repo)
         log.info("Added to sys.path: %s", args.omnivla_repo)
 
-    engine = InferenceEngine(model_path=args.model_path)
+    engine = InferenceEngine(model_path=args.model_path, unnorm_key=args.unnorm_key)
     engine.load()
 
     asyncio.run(_serve(engine, args.host, args.port))
