@@ -306,6 +306,10 @@ class OllamaStrategy(NavigationStrategy):
             phase = state.phase
             state.llm_query_start = t0
 
+        # Stop rover while inference is running
+        if rover_ctrl and not state.paused.is_set():
+            rover_ctrl.stop()
+
         # Letterbox to preserve aspect ratio
         send = _letterbox(frame, _SEND_W, _SEND_H)
 
@@ -398,17 +402,15 @@ class OllamaStrategy(NavigationStrategy):
         self._write_result(state, step, phase, result, vel, radius,
                            "navigating", elapsed)
 
-        # Execute drive command for 1 second (10 × 100 ms ticks)
-        operator_active = (state.operator_control is not None
-                           and state.operator_until > time.time())
-        for _ in range(10):
-            if state.paused.is_set():
-                break
+        # Drive for 1 second then stop before next inference
+        if rover_ctrl and not state.paused.is_set():
             operator_active = (state.operator_control is not None
                                and state.operator_until > time.time())
-            if rover_ctrl and not operator_active:
+            if not operator_active:
                 rover_ctrl.drive_raw(vel, radius)
-            time.sleep(0.1)
+                time.sleep(1.0)
+                rover_ctrl.stop()
+                log.info("Step %d | drive complete — stopping rover", step)
 
     # ── Result writer ─────────────────────────────────────────────────────────
 
