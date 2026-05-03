@@ -160,6 +160,16 @@ class InferenceEngine:
         self._action_head.eval()
         log.info("Action head loaded from %s", ckpt_head.name)
 
+        # Wrap action head so model's internal call (single arg) works —
+        # model calls predict_action(hidden) but L1RegressionActionHead_idcat
+        # requires (hidden, taskid). Supply MODALITY_LANG as default.
+        _taskid = torch.as_tensor([MODALITY_LANG], dtype=torch.bfloat16).to(device)
+        _inner  = self._action_head
+        class _WrappedHead:
+            def predict_action(self_, h, taskid=_taskid):
+                return _inner.predict_action(h, taskid.to(h.device))
+        self._action_head = _WrappedHead()
+
         # ── Action tokenizer (needed to build dummy action tokens) ────────────
         self._action_tok = ActionTokenizer(self._processor.tokenizer)
 
@@ -170,8 +180,7 @@ class InferenceEngine:
             .unsqueeze(0)
         )
 
-        log.info("InferenceEngine ready — %d patches, llm_dim=%d",
-                 self._num_patches, self._vla.llm_dim)
+        log.info("InferenceEngine ready")
 
     def infer(self, frame_jpeg: bytes, goal: str) -> dict:
         """
