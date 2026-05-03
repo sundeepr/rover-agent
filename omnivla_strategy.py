@@ -47,11 +47,11 @@ IMG_OBS        = (96, 96)   # observation image size (for trajectory encoder)
 IMG_CLIP       = (224, 224) # image size for FiLM language-conditioning
 IMG_MAP        = (352, 352) # satellite map size (unused; dummy zeros)
 METRIC_SPACING = 0.1        # 1 model unit = 0.1 m
-DT             = 1.0        # intended control period (seconds)
+DT             = 1.0 / 3.0  # control period matching run_omnivla.py (tick_rate=3)
 WAYPOINT_IDX   = 4          # which of the 8 predicted waypoints to execute
 ENC_SIZE       = 1024
-MAX_LIN_MM_S   = 50         # max forward velocity sent to Roomba
-MAX_ANG_RAD_S  = 0.5        # max angular velocity
+MAX_LIN_MM_S   = 300        # max forward velocity mm/s (0.3 m/s per run_omnivla.py)
+MAX_ANG_RAD_S  = 0.3        # max angular velocity rad/s (per run_omnivla.py)
 
 # Modality IDs (defined by the OmniVLA-edge model architecture):
 #   7 = language only          — language token in transformer
@@ -65,22 +65,52 @@ MODALITY_GOAL_IMG = 6
 # ── Pure functions (no torch imports needed) ───────────────────────────────────
 
 def _waypoint_to_drive(waypoints: np.ndarray) -> tuple[int, int]:
-    """Convert predicted waypoints to a Roomba (velocity_mm_s, radius_mm) pair."""
+    """Convert predicted waypoints to a Roomba (velocity_mm_s, radius_mm) pair.
+
+    Matches the PD controller in run_omnivla.py exactly.
+    """
     wp = waypoints[WAYPOINT_IDX].copy()
     dx = float(wp[0]) * METRIC_SPACING   # forward (m)
     dy = float(wp[1]) * METRIC_SPACING   # lateral (m)
-    # wp[2]=cosθ, wp[3]=sinθ — OmniVLA's explicit predicted heading at the waypoint.
-    # Use this directly instead of atan2(dy, dx) which only approximates heading
-    # from position geometry and loses information when dx is small.
-    heading   = math.atan2(float(wp[3]), float(wp[2]))   # radians, 0=forward
-    if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+
+    EPS = 1e-8
+    if abs(dx) < EPS and abs(dy) < EPS:
         return 0, 0x8000
-    lin_m_s   = np.clip(dx / DT, 0.0, MAX_LIN_MM_S / 1000.0)
-    ang_rad_s = np.clip(heading / DT, -MAX_ANG_RAD_S, MAX_ANG_RAD_S)
-    lin_mm_s  = int(lin_m_s * 1000)
-    if abs(ang_rad_s) < 0.01:
+    elif abs(dx) < EPS:
+        lin_m_s   = 0.0
+        ang_rad_s = math.copysign(math.pi / (2 * DT), dy)
+    else:
+        lin_m_s   = dx / DT
+        ang_rad_s = math.atan(dy / dx) / DT
+
+    # Velocity limits (matching run_omnivla.py maxv=0.3, maxw=0.3)
+    maxv = MAX_LIN_MM_S / 1000.0
+    maxw = MAX_ANG_RAD_S
+    lin_m_s   = max(0.0, min(maxv, lin_m_s))   # no reversing
+    if abs(lin_m_s) <= maxv:
+        if abs(ang_rad_s) <= maxw:
+            lin_lim, ang_lim = lin_m_s, ang_rad_s
+        else:
+            rd = lin_m_s / ang_rad_s if abs(ang_rad_s) > EPS else 0
+            lin_lim = maxw * math.copysign(1, lin_m_s) * abs(rd)
+            ang_lim = maxw * math.copysign(1, ang_rad_s)
+    else:
+        if abs(ang_rad_s) <= 0.001:
+            lin_lim = maxv * math.copysign(1, lin_m_s)
+            ang_lim = 0.0
+        else:
+            rd = lin_m_s / ang_rad_s
+            if abs(rd) >= maxv / maxw:
+                lin_lim = maxv * math.copysign(1, lin_m_s)
+                ang_lim = maxv * math.copysign(1, ang_rad_s) / abs(rd)
+            else:
+                lin_lim = maxw * math.copysign(1, lin_m_s) * abs(rd)
+                ang_lim = maxw * math.copysign(1, ang_rad_s)
+
+    lin_mm_s = int(lin_lim * 1000)
+    if abs(ang_lim) < 0.01:
         return lin_mm_s, 0x8000
-    radius_mm = int(np.clip(lin_mm_s / ang_rad_s, -2000, 2000))
+    radius_mm = int(np.clip(lin_mm_s / ang_lim, -2000, 2000))
     return lin_mm_s, radius_mm
 
 
