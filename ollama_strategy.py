@@ -261,6 +261,10 @@ class OllamaStrategy(NavigationStrategy):
         self._history: deque = deque(maxlen=history_size)
         self._down_frame: np.ndarray | None = None
         self._down_lock  = threading.Lock()
+        self._response_times: deque = deque(maxlen=5)   # last 5 elapsed seconds
+        self._last_vel    = 0
+        self._last_radius = 0x8000
+        self._drive_lock  = threading.Lock()
         log.info("OllamaStrategy: model=%s  server=%s  history=%d  rover=%s",
                  model, ollama_url, history_size, rover_type)
 
@@ -367,6 +371,9 @@ class OllamaStrategy(NavigationStrategy):
 
         wheel_on_crop    = result.get("wheel_on_crop", False)
         crop_contact_side = result.get("crop_contact_side", "none")
+
+        # Track response time
+        self._response_times.append(round(elapsed, 2))
         log.info("Step %d | visible=%s  direction=%s  next=%s  wheel_on_crop=%s(%s)  elapsed=%.2fs",
                  step, path_visible, direction, next_point,
                  wheel_on_crop, crop_contact_side, elapsed)
@@ -378,14 +385,11 @@ class OllamaStrategy(NavigationStrategy):
 
         vel, radius = _next_point_to_drive(next_point)
         r_str = "straight" if radius == 0x8000 else f"r={radius}mm"
-        log.info("Step %d | vel=%d  %s", step, vel, r_str)
+        log.info("Step %d | vel=%d  %s  → executing for 1s", step, vel, r_str)
 
-        operator_active = (state.operator_control is not None
-                           and state.operator_until > time.time())
-        if rover_ctrl and not state.paused.is_set() and not operator_active:
-            rover_ctrl.drive_raw(vel, radius)
-        elif operator_active:
-            log.info("Step %d | operator override — skipping drive", step)
+        with self._drive_lock:
+            self._last_vel    = vel
+            self._last_radius = radius
 
         display = _annotate(frame, result)
         with state.llm_lock:
@@ -393,6 +397,18 @@ class OllamaStrategy(NavigationStrategy):
 
         self._write_result(state, step, phase, result, vel, radius,
                            "navigating", elapsed)
+
+        # Execute drive command for 1 second (10 × 100 ms ticks)
+        operator_active = (state.operator_control is not None
+                           and state.operator_until > time.time())
+        for _ in range(10):
+            if state.paused.is_set():
+                break
+            operator_active = (state.operator_control is not None
+                               and state.operator_until > time.time())
+            if rover_ctrl and not operator_active:
+                rover_ctrl.drive_raw(vel, radius)
+            time.sleep(0.1)
 
     # ── Result writer ─────────────────────────────────────────────────────────
 
@@ -428,6 +444,7 @@ class OllamaStrategy(NavigationStrategy):
             ),
             "waypoints":       ui_waypoints,
             "confidence":      result.get("confidence", 0.0) if result else 0.0,
+            "response_times":  list(self._response_times),
         }
 
         with state.result_lock:

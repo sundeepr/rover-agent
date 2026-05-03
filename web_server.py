@@ -207,6 +207,8 @@ _HTML = """<!DOCTYPE html>
         <div class="value" id="centering">—</div></div>
       <div class="kv"><div class="label">LLM Timer</div>
         <div class="value" id="llm-timer">—</div></div>
+      <div class="kv"><div class="label">Response Times</div>
+        <div class="value" id="response-times">—</div></div>
 
       <h2 style="margin-top:4px">History</h2>
       <div class="history" id="history"></div>
@@ -374,6 +376,12 @@ _HTML = """<!DOCTYPE html>
         document.getElementById('history').innerHTML =
           (d.history ?? []).slice().reverse()
             .map(h => `<div class="history-item"><span>${h}</span></div>`).join('');
+
+        const rtEl = document.getElementById('response-times');
+        const rts = d.response_times ?? [];
+        rtEl.innerHTML = rts.length
+          ? rts.map((t, i) => `<span style="color:${i===rts.length-1?'#4caf50':'#aaa'}">${t}s</span>`).join(' · ')
+          : '—';
 
         _queryStart = d.llm_query_start ?? 0;
         _lastResponseS = d.llm_response_s ?? 0;
