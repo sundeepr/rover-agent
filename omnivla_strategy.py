@@ -48,7 +48,7 @@ IMG_CLIP       = (224, 224) # image size for FiLM language-conditioning
 IMG_MAP        = (352, 352) # satellite map size (unused; dummy zeros)
 METRIC_SPACING = 0.1        # 1 model unit = 0.1 m
 DT             = 1.0 / 3.0  # control period matching run_omnivla.py (tick_rate=3)
-WAYPOINT_IDX   = 4          # which of the 8 predicted waypoints to execute
+WAYPOINT_IDX   = 1          # which of the 8 predicted waypoints to execute
 ENC_SIZE       = 1024
 MAX_LIN_MM_S   = 50         # max forward velocity mm/s
 MAX_ANG_RAD_S  = 0.3        # max angular velocity rad/s
