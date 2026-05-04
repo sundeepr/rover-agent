@@ -57,6 +57,18 @@ log = logging.getLogger("rover.cloud_omnivla")
 # The full OmniVLA model accepts any resolution — PrismaticProcessor handles it.
 _SEND_W, _SEND_H   = 640, 480
 _JPEG_QUALITY      = 85
+
+
+def _letterbox(frame: np.ndarray, w: int, h: int) -> np.ndarray:
+    """Resize preserving aspect ratio, pad with black to exact w×h."""
+    fh, fw = frame.shape[:2]
+    scale  = min(w / fw, h / fh)
+    nw, nh = int(fw * scale), int(fh * scale)
+    resized = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA)
+    out = np.zeros((h, w, 3), dtype=np.uint8)
+    out[(h - nh) // 2:(h - nh) // 2 + nh,
+        (w - nw) // 2:(w - nw) // 2 + nw] = resized
+    return out
 _RECONNECT_BASE    = 3.0    # initial reconnect delay (seconds)
 _RECONNECT_MAX     = 30.0   # max reconnect delay
 
@@ -243,10 +255,8 @@ class CloudOmniVLAStrategy(NavigationStrategy):
                                "waiting_goal", time.time() - t0)
             return
 
-        # ── Encode frame ──────────────────────────────────────────────────────
-        h, w = frame.shape[:2]
-        send_frame = (cv2.resize(frame, (_SEND_W, _SEND_H))
-                      if (w != _SEND_W or h != _SEND_H) else frame)
+        # ── Encode frame (letterbox to preserve aspect ratio) ─────────────────
+        send_frame = _letterbox(frame, _SEND_W, _SEND_H)
         _, buf = cv2.imencode(".jpg", send_frame,
                               [cv2.IMWRITE_JPEG_QUALITY, _JPEG_QUALITY])
         frame_b64 = base64.b64encode(buf.tobytes()).decode()
