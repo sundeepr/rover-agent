@@ -48,7 +48,7 @@ IMG_CLIP       = (224, 224) # image size for FiLM language-conditioning
 IMG_MAP        = (352, 352) # satellite map size (unused; dummy zeros)
 METRIC_SPACING = 0.1        # 1 model unit = 0.1 m
 DT             = 1.0 / 3.0  # control period matching run_omnivla.py (tick_rate=3)
-WAYPOINT_IDX   = 1          # which of the 8 predicted waypoints to execute
+WAYPOINT_IDX   = 4          # which of the 8 predicted waypoints to execute
 ENC_SIZE       = 1024
 MAX_LIN_MM_S   = 50         # max forward velocity mm/s
 MAX_ANG_RAD_S  = 0.3        # max angular velocity rad/s
@@ -92,7 +92,7 @@ def _waypoint_to_drive(waypoints: np.ndarray) -> tuple[int, int]:
     if abs(ang_rad_s) < 0.001:
         return int(lin_m_s * 1000), 0x8000
 
-    radius_mm = int(np.clip((lin_m_s / ang_rad_s) * 1000, -2000, 2000))
+    radius_mm = int((lin_m_s / ang_rad_s) * 1000)
     if 0 < abs(radius_mm) < MIN_RADIUS_MM:
         radius_mm = int(math.copysign(MIN_RADIUS_MM, radius_mm))
     return int(lin_m_s * 1000), radius_mm
