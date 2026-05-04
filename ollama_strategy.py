@@ -378,6 +378,11 @@ class OllamaStrategy(NavigationStrategy):
         with self._down_lock:
             self._down_frame = frame
 
+    def _get_down_frame(self) -> np.ndarray | None:
+        """Called by agent_publisher to push down frame to web UI."""
+        with self._down_lock:
+            return self._down_frame.copy() if self._down_frame is not None else None
+
     # ── run_query ─────────────────────────────────────────────────────────────
 
     def run_query(
