@@ -256,6 +256,7 @@ class AtlasController:
         max_v = max(abs(v_r), abs(v_l), _MAX_VELOCITY_REF_MM_S)
         L     = _clamp(int(v_l / max_v * 100), -100, 100)
         R     = _clamp(int(v_r / max_v * 100), -100, 100)
+        log.info("drive_raw: vel=%d r=%d → L=%d%% R=%d%%", velocity_mm_s, radius_mm, L, R)
         return L, R
 
     # ── Serial I/O ────────────────────────────────────────────────────────────
