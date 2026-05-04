@@ -51,6 +51,8 @@ DT             = 1.0 / 3.0  # control period matching run_omnivla.py (tick_rate=
 WAYPOINT_IDX   = 4          # which of the 8 predicted waypoints to execute
 ENC_SIZE       = 1024
 MAX_LIN_MM_S   = 50         # max forward velocity mm/s
+MAX_ANG_RAD_S  = 0.3        # max angular velocity rad/s
+MIN_RADIUS_MM  = 200        # minimum turn radius to avoid stalling
 
 # Modality IDs (defined by the OmniVLA-edge model architecture):
 #   7 = language only          — language token in transformer
@@ -64,28 +66,36 @@ MODALITY_GOAL_IMG = 6
 # ── Pure functions (no torch imports needed) ───────────────────────────────────
 
 def _waypoint_to_drive(waypoints: np.ndarray) -> tuple[int, int]:
-    """Convert predicted waypoints to a Roomba (velocity_mm_s, radius_mm) pair.
+    """Convert predicted waypoints to (velocity_mm_s, radius_mm) via PD controller.
 
-    Radius is proportional to dx/dy — large lateral offset → tight turn,
-    small lateral offset → gentle turn. Velocity is fixed at MAX_LIN_MM_S.
+    Matches the controller in run_omnivla.py: atan(dy/dx)/DT for angular rate,
+    then radius = vel / ang_rate with velocity limiting.
     """
     wp = waypoints[WAYPOINT_IDX].copy()
-    dx = float(wp[0])   # forward (model units, already proportional)
-    dy = float(wp[1])   # lateral
+    dx = float(wp[0]) * METRIC_SPACING   # forward (m)
+    dy = float(wp[1]) * METRIC_SPACING   # lateral (m)
 
-    EPS = 1e-6
+    EPS = 1e-8
     if abs(dx) < EPS and abs(dy) < EPS:
         return 0, 0x8000
+    elif abs(dx) < EPS:
+        lin_m_s   = 0.0
+        ang_rad_s = math.copysign(math.pi / (2 * DT), dy)
+    else:
+        lin_m_s   = dx / DT
+        ang_rad_s = math.atan(dy / dx) / DT
 
-    lin_mm_s = MAX_LIN_MM_S
+    maxv = MAX_LIN_MM_S / 1000.0
+    maxw = MAX_ANG_RAD_S
+    lin_m_s = max(0.0, min(maxv, lin_m_s))
 
-    if abs(dy) < EPS:
-        return lin_mm_s, 0x8000
+    if abs(ang_rad_s) < 0.001:
+        return int(lin_m_s * 1000), 0x8000
 
-    # Radius = (dx / dy) * scale — proportional turning, no fixed clamp
-    # scale converts model units to mm: 1 model unit = 100mm (0.1m)
-    radius_mm = int(np.clip((dx / dy) * 100, -2000, 2000))
-    return lin_mm_s, radius_mm
+    radius_mm = int(np.clip((lin_m_s / ang_rad_s) * 1000, -2000, 2000))
+    if 0 < abs(radius_mm) < MIN_RADIUS_MM:
+        radius_mm = int(math.copysign(MIN_RADIUS_MM, radius_mm))
+    return int(lin_m_s * 1000), radius_mm
 
 
 def _annotate(frame: np.ndarray, waypoints: np.ndarray,
