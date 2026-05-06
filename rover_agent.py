@@ -293,12 +293,14 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
         return CloudOmniVLAStrategy(
             server_url=args.cloud_server,
             goal=args.goal,
+            max_lin_mm_s=args.omnivla_velocity,
         )
     if name == "omnivla_full":
         from omnivla_full_strategy import OmniVLAFullStrategy
         return OmniVLAFullStrategy(
             server_url=args.cloud_server,
             goal=args.goal,
+            max_lin_mm_s=args.omnivla_velocity,
         )
     if name == "paligemma":
         from paligemma_strategy import PaliGemmaStrategy
@@ -401,6 +403,11 @@ def main():
                         metavar="HOST:PORT",
                         help="Address of a running omnivla_server.py "
                              "(e.g. localhost:5100)")
+    parser.add_argument("--omnivla-velocity", type=int, default=25,
+                        metavar="MM_S",
+                        help="Forward velocity for OmniVLA strategies in mm/s "
+                             "(default: 25). MIN_RADIUS_MM is auto-computed as "
+                             "vel / MAX_ANG_RAD_S.")
     parser.add_argument("--path-threshold", type=float, default=0.5,
                         metavar="FLOAT",
                         help="Path detection confidence threshold for "

@@ -65,11 +65,13 @@ MODALITY_GOAL_IMG = 6
 
 # ── Pure functions (no torch imports needed) ───────────────────────────────────
 
-def _waypoint_to_drive(waypoints: np.ndarray) -> tuple[int, int]:
+def _waypoint_to_drive(waypoints: np.ndarray,
+                       max_lin_mm_s: int = MAX_LIN_MM_S) -> tuple[int, int]:
     """Convert predicted waypoints to (velocity_mm_s, radius_mm) via PD controller.
 
-    Matches the controller in run_omnivla.py: atan(dy/dx)/DT for angular rate,
+    Matches the controller in run_omnivla.py: atan2(dy, dx)/DT for angular rate,
     then radius = vel / ang_rate with velocity limiting.
+    MIN_RADIUS_MM is auto-computed from max_lin_mm_s / MAX_ANG_RAD_S.
     """
     wp = waypoints[WAYPOINT_IDX].copy()
     dx = float(wp[0]) * METRIC_SPACING   # forward (m)
@@ -83,19 +85,20 @@ def _waypoint_to_drive(waypoints: np.ndarray) -> tuple[int, int]:
         ang_rad_s = math.copysign(math.pi / (2 * DT), dy)
     else:
         lin_m_s   = dx / DT
-        ang_rad_s = math.atan2(dy, dx) / DT   # atan2 handles all quadrants correctly
+        ang_rad_s = math.atan2(dy, dx) / DT
 
-    maxv = MAX_LIN_MM_S / 1000.0
+    maxv = max_lin_mm_s / 1000.0
     maxw = MAX_ANG_RAD_S
     lin_m_s   = max(0.0, min(maxv, lin_m_s))
-    ang_rad_s = max(-maxw, min(maxw, ang_rad_s))   # clamp angular rate
+    ang_rad_s = max(-maxw, min(maxw, ang_rad_s))
 
     if abs(ang_rad_s) < 0.001:
         return int(lin_m_s * 1000), 0x8000
 
     radius_mm = int((lin_m_s / ang_rad_s) * 1000)
-    if 0 < abs(radius_mm) < MIN_RADIUS_MM:
-        radius_mm = int(math.copysign(MIN_RADIUS_MM, radius_mm))
+    min_radius = int((maxv / maxw) * 1000)   # auto-computed from velocity
+    if 0 < abs(radius_mm) < min_radius:
+        radius_mm = int(math.copysign(min_radius, radius_mm))
     return int(lin_m_s * 1000), radius_mm
 
 

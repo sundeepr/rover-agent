@@ -91,9 +91,10 @@ class CloudOmniVLAStrategy(NavigationStrategy):
         Initial navigation goal.  Can be updated live via set_goal().
     """
 
-    def __init__(self, server_url: str, goal: str = ""):
-        self._server_url = server_url
-        self._goal       = goal
+    def __init__(self, server_url: str, goal: str = "", max_lin_mm_s: int = 25):
+        self._server_url    = server_url
+        self._goal          = goal
+        self._max_lin_mm_s  = max_lin_mm_s
 
         self._nav_state  = _NavState.CONNECTING
         self._state_lock = threading.Lock()
@@ -295,7 +296,7 @@ class CloudOmniVLAStrategy(NavigationStrategy):
 
         # ── Waypoint → drive command (all local, no ML) ───────────────────────
         waypoints = np.array(resp["waypoints"])   # [8, 4]
-        vel, radius = _waypoint_to_drive(waypoints)
+        vel, radius = _waypoint_to_drive(waypoints, self._max_lin_mm_s)
         elapsed = time.time() - t0
 
         cloud_s = resp.get("elapsed", 0.0)
