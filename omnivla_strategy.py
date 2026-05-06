@@ -83,11 +83,12 @@ def _waypoint_to_drive(waypoints: np.ndarray) -> tuple[int, int]:
         ang_rad_s = math.copysign(math.pi / (2 * DT), dy)
     else:
         lin_m_s   = dx / DT
-        ang_rad_s = math.atan(dy / dx) / DT
+        ang_rad_s = math.atan2(dy, dx) / DT   # atan2 handles all quadrants correctly
 
     maxv = MAX_LIN_MM_S / 1000.0
     maxw = MAX_ANG_RAD_S
-    lin_m_s = max(0.0, min(maxv, lin_m_s))
+    lin_m_s   = max(0.0, min(maxv, lin_m_s))
+    ang_rad_s = max(-maxw, min(maxw, ang_rad_s))   # clamp angular rate
 
     if abs(ang_rad_s) < 0.001:
         return int(lin_m_s * 1000), 0x8000
@@ -106,19 +107,15 @@ def _annotate(frame: np.ndarray, waypoints: np.ndarray,
     cx, cy = w // 2, h
     scale = min(h, w) * 0.3
 
+    dot_r = max(6, w // 200)   # scale dot size to frame resolution
     for i, wp in enumerate(waypoints):
         dx = float(wp[0]) * METRIC_SPACING
         dy = float(wp[1]) * METRIC_SPACING
         px = int(cx - dy * scale)
         py = int(cy - dx * scale)
         color = (0, 255, 100) if i == WAYPOINT_IDX else (0, 180, 60)
-        dot_r = 6 if i == WAYPOINT_IDX else 3
-        cv2.circle(out, (px, py), dot_r, color, -1)
-        if i > 0:
-            prev  = waypoints[i - 1]
-            ppx   = int(cx - float(prev[1]) * METRIC_SPACING * scale)
-            ppy   = int(cy - float(prev[0]) * METRIC_SPACING * scale)
-            cv2.line(out, (ppx, ppy), (px, py), (0, 200, 80), 1)
+        r = dot_r * 2 if i == WAYPOINT_IDX else dot_r
+        cv2.circle(out, (px, py), r, color, -1)
 
     r_str = "straight" if radius == 0x8000 else f"r={radius}mm"
     cv2.putText(out, f"vel {vel} mm/s  {r_str}", (10, 24),
