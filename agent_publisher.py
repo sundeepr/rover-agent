@@ -113,6 +113,11 @@ class AgentPublisher:
 
     def _push_frame(self, sess, frame_bgr: np.ndarray, stream: str) -> None:
         """Encode frame as JPEG and POST to /agent/frame."""
+        h, w = frame_bgr.shape[:2]
+        if w > 640:
+            scale = 640 / w
+            frame_bgr = cv2.resize(frame_bgr, (640, int(h * scale)),
+                                   interpolation=cv2.INTER_AREA)
         _, buf = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
         try:
             sess.post(
