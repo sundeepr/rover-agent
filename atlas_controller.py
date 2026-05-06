@@ -41,10 +41,10 @@ log = logging.getLogger("rover.atlas")
 # ── Physical constants ────────────────────────────────────────────────────────
 
 # Camera horizontal field of view — same as roomba_controller.py
-CAMERA_HFOV_DEGREES = 62.2
+CAMERA_HFOV_DEGREES = 138
 
 # Atlas-1 wheel base (mm). Measure centre-to-centre of left and right wheels.
-WHEEL_BASE_MM = 300
+WHEEL_BASE_MM = 650
 
 # Forward cruising speed as % of full motor power (0–100).
 # Keep this conservative until the rover's speed is characterised.
