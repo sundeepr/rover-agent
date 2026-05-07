@@ -63,7 +63,7 @@ class LineFollowStrategy(NavigationStrategy):
 
     def __init__(
         self,
-        vel_mm_s: int      = 80,
+        vel_mm_s: int      = 40,
         kp: float          = 2000.0,
         color: str         = "black",
         threshold: int     = 80,    # unused, kept for CLI compat
