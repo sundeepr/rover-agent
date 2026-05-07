@@ -35,17 +35,17 @@ DRIVE_DURATION_S = 0.3    # seconds to drive per step
 STRIP_ROWS       = 120    # rows from bottom of frame to scan
 _CENTER_CROP     = 0.7    # keep central 70% of width (narrows FOV)
 _PROC_WIDTH      = 640    # downscale to this width
-_MIN_AREA        = 300    # minimum blob area to count as the pipe
+_MIN_AREA        = 100    # minimum blob area to count as the pipe
 _BLOCK_SIZE      = 61     # adaptive threshold neighbourhood (must be odd)
-_DARK_C          = 10     # pipe must be this much darker than local mean
+_DARK_C          = 5      # pipe must be this much darker than local mean
 
 # Optional HSV pre-filter per colour — limits adaptive search to pixels
 # that are already roughly the right hue, reducing false positives.
 # "black" uses no pre-filter (dark = dark regardless of hue).
 _COLOUR_BOUNDS = {
     "black":  None,
-    "blue":   (np.array([95,  60,  20],  dtype=np.uint8),
-               np.array([130, 255, 180], dtype=np.uint8)),
+    "blue":   (np.array([90,  40,  10],  dtype=np.uint8),
+               np.array([135, 255, 200], dtype=np.uint8)),
     "orange": (np.array([5,   120, 80],  dtype=np.uint8),
                np.array([25,  255, 255], dtype=np.uint8)),
     "red":    (np.array([0,   120, 80],  dtype=np.uint8),
