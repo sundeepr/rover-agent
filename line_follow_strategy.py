@@ -89,9 +89,13 @@ class LineFollowStrategy(NavigationStrategy):
             roi     = frame[roi_top:, :]
 
             # ── Column projection: find the darkest column ────────────────
-            gray     = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-            blurred  = cv2.GaussianBlur(gray, (7, 7), 0)
-            profile  = blurred.mean(axis=0).astype(np.float32)   # (w,)
+            gray    = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            blurred = cv2.GaussianBlur(gray, (7, 7), 0)
+            roi_h   = blurred.shape[0]
+            # Weight rows so bottom (closest, most relevant for centering)
+            # contributes more than top (further ahead).
+            weights = np.linspace(1.0, 0.1, roi_h, dtype=np.float32)[:, np.newaxis]
+            profile = (blurred.astype(np.float32) * weights).sum(axis=0) / weights.sum()
 
             # 1-D moving average to suppress narrow noise spikes
             kernel   = np.ones(_SMOOTH_WIN, dtype=np.float32) / _SMOOTH_WIN
