@@ -41,7 +41,7 @@ def main():
                         help="Start at this frame index")
     args = parser.parse_args()
 
-    hsv_lo, hsv_hi = _COLOUR_BOUNDS[args.color]
+    hsv_bounds = _COLOUR_BOUNDS[args.color]
 
     cap = cv2.VideoCapture(args.video)
     if not cap.isOpened():
@@ -78,7 +78,7 @@ def main():
             frame_idx += 1
 
         line_col, error_norm, area, proc, mask, best_stats, strip_y, cx = \
-            _detect(raw, hsv_lo, hsv_hi)
+            _detect(raw, hsv_bounds)
 
         vel    = 80 if line_col is not None else 0
         radius = 0x8000
@@ -87,13 +87,6 @@ def main():
         out = _annotate(proc, mask, best_stats, line_col, cx, strip_y,
                         vel, radius, error_norm, result, area, args.color)
 
-        # Extra: overlay mask across the FULL frame so the pipe is visible
-        # at all depths, not just in the bottom strip
-        full_hsv  = cv2.cvtColor(proc, cv2.COLOR_BGR2HSV)
-        full_mask = cv2.inRange(full_hsv, hsv_lo, hsv_hi)
-        highlight = np.zeros_like(out)
-        highlight[full_mask > 0] = (0, 255, 180)
-        out = cv2.addWeighted(out, 1.0, highlight, 0.4, 0)
 
         # Lazy writer init once we know the output frame size
         if writer and vwriter is None:
