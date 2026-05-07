@@ -340,9 +340,7 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
         return LineFollowStrategy(
             vel_mm_s=args.line_vel,
             kp=args.line_kp,
-            threshold=args.line_threshold,
-            roi_frac=args.line_roi_frac,
-            edge_margin=args.line_edge_margin,
+            color=args.line_color,
         )
     raise ValueError(f"Unknown strategy: {name!r}")
 
@@ -422,12 +420,15 @@ def main():
                         help="Forward speed for line_follow strategy (default: 80)")
     parser.add_argument("--line-kp", type=float, default=2000.0, metavar="GAIN",
                         help="Proportional steering gain for line_follow (default: 2000)")
+    parser.add_argument("--line-color", type=str, default="black",
+                        choices=["black", "blue", "orange", "red"],
+                        help="Target line colour for line_follow (default: black)")
     parser.add_argument("--line-threshold", type=int, default=80, metavar="0-255",
-                        help="Brightness threshold for black line detection (default: 80)")
+                        help="(unused) kept for compatibility")
     parser.add_argument("--line-roi-frac", type=float, default=0.4, metavar="FRAC",
-                        help="Fraction of frame height used as ROI from bottom (default: 0.4)")
+                        help="(unused) kept for compatibility")
     parser.add_argument("--line-edge-margin", type=float, default=0.15, metavar="FRAC",
-                        help="Fraction of frame width to ignore on each side (default: 0.15)")
+                        help="(unused) kept for compatibility")
     parser.add_argument("--path-threshold", type=float, default=0.5,
                         metavar="FLOAT",
                         help="Path detection confidence threshold for "
