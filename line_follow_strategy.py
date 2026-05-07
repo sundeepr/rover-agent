@@ -147,9 +147,10 @@ class LineFollowStrategy(NavigationStrategy):
                 state.latest_result   = {
                     "strategy":  self.name,
                     "result":    result,
-                    "vel_mm_s":  vel,
-                    "radius_mm": radius if radius != 0x8000 else None,
+                    "L_pct":     L_pct,
+                    "R_pct":     R_pct,
                     "error":     round(error_norm, 4),
+                    "avoidance": round(avoidance, 4),
                     "blob_area": area,
                     "elapsed_s": round(elapsed, 3),
                 }
