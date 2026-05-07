@@ -29,10 +29,6 @@ import numpy as np
 
 from navigation_strategy import AgentState, NavigationStrategy
 
-
-def _clamp(x, lo, hi):
-    return lo if x < lo else hi if x > hi else x
-
 log = logging.getLogger("rover.line_follow")
 
 DRIVE_DURATION_S = 0.3    # seconds to drive per step
@@ -67,8 +63,8 @@ class LineFollowStrategy(NavigationStrategy):
 
     def __init__(
         self,
-        vel_mm_s: int      = 50,    # base motor % (0-100)
-        kp: float          = 40.0,  # turn power added/subtracted per unit error
+        vel_mm_s: int      = 80,
+        kp: float          = 2000.0,
         color: str         = "black",
         threshold: int     = 80,    # unused, kept for CLI compat
         roi_frac: float    = 0.4,   # unused, kept for CLI compat
@@ -106,36 +102,34 @@ class LineFollowStrategy(NavigationStrategy):
 
             if line_col is not None:
                 combined = float(np.clip(error_norm + avoidance, -1.0, 1.0))
-                # Direct L/R motor control — far more responsive than radius
-                # combined > 0: line/green to right → turn right → L faster
-                # combined < 0: line/green to left  → turn left  → R faster
-                turn = int(combined * self._kp)
-                L_pct = _clamp(self._vel + turn, 0, 100)
-                R_pct = _clamp(self._vel - turn, 0, 100)
+                if abs(combined) < 0.02:
+                    radius = 0x8000
+                else:
+                    radius = int(-self._kp / combined)
+                    radius = max(-5000, min(5000, radius))
+                vel    = self._vel
                 result = "following" if green_px < _MIN_GREEN_PX else "avoiding"
-                log.info("%s col=%d  err=%.2f  avoid=%.2f  L=%d%%  R=%d%%",
-                         self._color, line_col, error_norm, avoidance, L_pct, R_pct)
+                r_str  = "straight" if radius == 0x8000 else f"{radius}mm"
+                log.info("%s pipe col=%d  err=%.2f  avoid=%.2f  green=%d  vel=%d  r=%s",
+                         self._color, line_col, error_norm, avoidance, green_px, vel, r_str)
             else:
-                combined = 0.0
-                L_pct    = 0
-                R_pct    = 0
-                result   = "line_lost"
+                combined   = 0.0
+                radius     = 0x8000
+                vel        = 0
+                result     = "line_lost"
                 log.warning("%s pipe lost (area=%d < %d) — stopping",
                             self._color, area, _MIN_AREA)
 
             # ── Drive ─────────────────────────────────────────────────────
             if rover_ctrl and not state.paused.is_set():
                 if line_col is not None:
-                    if hasattr(rover_ctrl, "drive_lr"):
-                        rover_ctrl.drive_lr(L_pct, R_pct)
-                    else:
-                        rover_ctrl.drive_raw(self._vel, 0x8000)
+                    rover_ctrl.drive_raw(vel, radius)
                 else:
                     rover_ctrl.stop()
 
             # ── Annotate ──────────────────────────────────────────────────
             display = _annotate(proc, mask, green_mask, best_stats, line_col,
-                                cx, strip_y, L_pct, R_pct, error_norm, avoidance,
+                                cx, strip_y, vel, radius, error_norm, avoidance,
                                 result, area, green_px, self._color)
             with state.llm_lock:
                 state.llm_frame = display
@@ -147,10 +141,9 @@ class LineFollowStrategy(NavigationStrategy):
                 state.latest_result   = {
                     "strategy":  self.name,
                     "result":    result,
-                    "L_pct":     L_pct,
-                    "R_pct":     R_pct,
+                    "vel_mm_s":  vel,
+                    "radius_mm": radius if radius != 0x8000 else None,
                     "error":     round(error_norm, 4),
-                    "avoidance": round(avoidance, 4),
                     "blob_area": area,
                     "elapsed_s": round(elapsed, 3),
                 }
@@ -275,8 +268,8 @@ def _annotate(
     line_col: Optional[int],
     cx: int,
     strip_y: int,
-    L_pct: int,
-    R_pct: int,
+    vel: int,
+    radius: int,
     error_norm: float,
     avoidance: float,
     result: str,
@@ -318,10 +311,11 @@ def _annotate(
         cv2.circle(out, (line_col, mid_y), 14, (0, 255, 80), -1)
         cv2.line(out, (cx, mid_y), (line_col, mid_y), (0, 255, 80), 2)
 
+    r_str  = "straight" if radius == 0x8000 else f"r={radius}mm"
     status = "LOST" if line_col is None else f"pipe={error_norm:+.2f} avoid={avoidance:+.2f}"
     hud = [
         f"line_follow [{color}]  {result}",
-        f"L={L_pct}%  R={R_pct}%",
+        f"vel={vel}mm/s  {r_str}",
         f"{status}",
         f"pipe_area={blob_area}  green_px={green_px}",
     ]

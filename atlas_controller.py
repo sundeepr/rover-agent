@@ -179,13 +179,6 @@ class AtlasController:
         self._send_cmd(0, 0)
         log.info("Atlas stopped")
 
-    def drive_lr(self, L_pct: int, R_pct: int) -> None:
-        """Direct left/right motor percentage control (-100 to 100 each)."""
-        L_pct = _clamp(int(L_pct), -100, 100)
-        R_pct = _clamp(int(R_pct), -100, 100)
-        log.info("drive_lr: L=%d%% R=%d%%", L_pct, R_pct)
-        self._send_cmd(L_pct, R_pct)
-
     # ── Pixel → bearing ───────────────────────────────────────────────────────
 
     def _pixel_to_bearing(self, pixel_x: int) -> float:
