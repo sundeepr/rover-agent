@@ -177,6 +177,14 @@ def _detect(frame: np.ndarray, hsv_bounds: Optional[tuple]):
     if hsv_bounds is not None:
         hsv_lo, hsv_hi = hsv_bounds
         hsv  = cv2.cvtColor(strip, cv2.COLOR_BGR2HSV)
+        # Diagnostic: log actual HSV range in the strip every 10 frames
+        if not hasattr(_detect, '_diag_count'):
+            _detect._diag_count = 0
+        _detect._diag_count += 1
+        if _detect._diag_count % 10 == 1:
+            log.info("Strip HSV min=%s max=%s mean=%s",
+                     hsv.min(axis=(0,1)), hsv.max(axis=(0,1)),
+                     hsv.mean(axis=(0,1)).astype(int))
         mask = cv2.inRange(hsv, hsv_lo, hsv_hi)
     else:
         gray    = cv2.cvtColor(strip, cv2.COLOR_BGR2GRAY)
