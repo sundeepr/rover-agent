@@ -56,14 +56,16 @@ class LineFollowStrategy(NavigationStrategy):
 
     def __init__(
         self,
-        vel_mm_s: int   = 80,
-        kp: float       = 2000.0,
-        threshold: int  = 80,   # kept for CLI compat but unused in projection mode
-        roi_frac: float = 0.4,
+        vel_mm_s: int    = 80,
+        kp: float        = 2000.0,
+        threshold: int   = 80,   # kept for CLI compat but unused in projection mode
+        roi_frac: float  = 0.4,
+        edge_margin: float = 0.15,  # fraction of width to ignore on each side
     ):
-        self._vel      = vel_mm_s
-        self._kp       = kp
-        self._roi_frac = roi_frac
+        self._vel         = vel_mm_s
+        self._kp          = kp
+        self._roi_frac    = roi_frac
+        self._edge_margin = edge_margin
 
     @property
     def name(self) -> str:
@@ -101,8 +103,13 @@ class LineFollowStrategy(NavigationStrategy):
             kernel   = np.ones(_SMOOTH_WIN, dtype=np.float32) / _SMOOTH_WIN
             smoothed = np.convolve(profile, kernel, mode='same')
 
-            line_col  = int(np.argmin(smoothed))
-            contrast  = (smoothed.mean() - smoothed.min()) / max(smoothed.mean(), 1.0)
+            # Ignore edge margins — wide-angle cameras are dark at the edges
+            # due to vignetting, which would always win the argmin otherwise.
+            margin   = int(w * self._edge_margin)
+            search   = smoothed[margin: w - margin]
+            line_col = int(np.argmin(search)) + margin
+
+            contrast  = (search.mean() - search.min()) / max(search.mean(), 1.0)
             line_detected = contrast > _MIN_CONTRAST
 
             if line_detected:

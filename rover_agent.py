@@ -342,6 +342,7 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
             kp=args.line_kp,
             threshold=args.line_threshold,
             roi_frac=args.line_roi_frac,
+            edge_margin=args.line_edge_margin,
         )
     raise ValueError(f"Unknown strategy: {name!r}")
 
@@ -425,6 +426,8 @@ def main():
                         help="Brightness threshold for black line detection (default: 80)")
     parser.add_argument("--line-roi-frac", type=float, default=0.4, metavar="FRAC",
                         help="Fraction of frame height used as ROI from bottom (default: 0.4)")
+    parser.add_argument("--line-edge-margin", type=float, default=0.15, metavar="FRAC",
+                        help="Fraction of frame width to ignore on each side (default: 0.15)")
     parser.add_argument("--path-threshold", type=float, default=0.5,
                         metavar="FLOAT",
                         help="Path detection confidence threshold for "
