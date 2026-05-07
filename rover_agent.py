@@ -513,14 +513,15 @@ def main():
 
     # If a goal was given on the CLI, apply it immediately so the agent
     # starts navigating without waiting for web chat input.
-    if args.goal and args.strategy not in ("gemini",):
+    _NO_GOAL_STRATEGIES = ("gemini", "line_follow", "hough_crop_row")
+    if args.goal and args.strategy not in _NO_GOAL_STRATEGIES:
         strategy.set_goal(args.goal)
         with state.result_lock:
             state.goal = args.goal
         state.goal_ready.set()
         log.info("CLI goal applied: '%s'", args.goal)
-    elif args.strategy == "gemini":
-        # Gemini strategy manages its own goal; always ready to start.
+    elif args.strategy in _NO_GOAL_STRATEGIES:
+        # These strategies don't need a language goal to start.
         state.goal_ready.set()
 
     # Open rover connection on the main thread so stop() is guaranteed to
