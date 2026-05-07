@@ -49,9 +49,9 @@ DRIVE_DURATION_S   = 0.3    # seconds to drive per step
 _SMOOTH_WIN        = 21     # 1-D moving-average window for column counts
 _MIN_ORANGE_PX     = 50     # minimum orange pixels to confirm line detected
 
-# Orange HSV bounds (OpenCV: H 0-179, S 0-255, V 0-255)
-_HSV_LO = np.array([5,  120, 80],  dtype=np.uint8)
-_HSV_HI = np.array([25, 255, 255], dtype=np.uint8)
+# Light blue HSV bounds (OpenCV: H 0-179, S 0-255, V 0-255)
+_HSV_LO = np.array([85,  80, 100], dtype=np.uint8)
+_HSV_HI = np.array([110, 255, 255], dtype=np.uint8)
 
 
 class LineFollowStrategy(NavigationStrategy):
@@ -127,7 +127,7 @@ class LineFollowStrategy(NavigationStrategy):
                 vel    = self._vel
                 result = "following"
                 r_str  = "straight" if radius == 0x8000 else f"{radius}mm"
-                log.info("Orange line col=%d  error=%.3f  px=%d  vel=%d  r=%s",
+                log.info("Blue line col=%d  error=%.3f  px=%d  vel=%d  r=%s",
                          line_col, error_norm, total_px, vel, r_str)
             else:
                 centroid_x = None
@@ -135,7 +135,7 @@ class LineFollowStrategy(NavigationStrategy):
                 vel        = 0
                 radius     = 0x8000
                 result     = "line_lost"
-                log.warning("Orange line lost (px=%d < %d) — stopping",
+                log.warning("Blue line lost (px=%d < %d) — stopping",
                             total_px, _MIN_ORANGE_PX)
 
             # ── Drive ─────────────────────────────────────────────────────
