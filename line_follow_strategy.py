@@ -111,9 +111,10 @@ class LineFollowStrategy(NavigationStrategy):
 
             # ── Drive ─────────────────────────────────────────────────────
             if rover_ctrl and not state.paused.is_set():
-                rover_ctrl.drive_raw(vel, radius)
-                time.sleep(DRIVE_DURATION_S)
-                rover_ctrl.stop()
+                if line_col is not None:
+                    rover_ctrl.drive_raw(vel, radius)
+                else:
+                    rover_ctrl.stop()
 
             # ── Annotate ──────────────────────────────────────────────────
             display = _annotate(proc, mask, best_stats, line_col, cx, strip_y,
