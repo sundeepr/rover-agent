@@ -28,6 +28,7 @@ DRIVE_DURATION_S = 0.3   # seconds to drive per step
 STRIP_ROWS       = 80    # number of rows from the bottom of the frame to scan
 _SMOOTH_WIN      = 21    # 1-D moving-average window
 _MIN_BLUE_PX     = 30    # minimum blue pixels to confirm line present
+_EDGE_MARGIN     = 0.15  # fraction of width to ignore on each side (vignette/sky)
 
 # Light blue HSV bounds (OpenCV: H 0-179, S 0-255, V 0-255)
 _HSV_LO = np.array([85,  80, 100], dtype=np.uint8)
@@ -70,10 +71,15 @@ class LineFollowStrategy(NavigationStrategy):
             strip = frame[max(0, h - STRIP_ROWS):, :]
 
             # ── Light blue HSV mask ───────────────────────────────────────
-            hsv      = cv2.cvtColor(strip, cv2.COLOR_BGR2HSV)
-            mask     = cv2.inRange(hsv, _HSV_LO, _HSV_HI)
-            total_px = int(mask.sum() // 255)
+            hsv  = cv2.cvtColor(strip, cv2.COLOR_BGR2HSV)
+            mask = cv2.inRange(hsv, _HSV_LO, _HSV_HI)
 
+            # Ignore outer edges — wide-angle lens shows sky/env at edges
+            margin = int(w * _EDGE_MARGIN)
+            mask[:, :margin]    = 0
+            mask[:, w - margin:] = 0
+
+            total_px      = int(mask.sum() // 255)
             line_detected = total_px >= _MIN_BLUE_PX
 
             if line_detected:
