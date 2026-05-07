@@ -116,8 +116,8 @@ def agent_loop(
         log.error("Could not open camera at device %d", device)
         return
 
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 9999)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 9999)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1)
     log.info("Camera opened: %dx%d (max)",
              int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
              int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
@@ -210,8 +210,8 @@ def _down_camera_loop(strategy, device: int, state=None) -> None:
             )
             time.sleep(3.0)
 
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 9999)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 9999)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1)
     log.info("Down-camera opened: device %d  %dx%d (max)", device,
              int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
              int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
