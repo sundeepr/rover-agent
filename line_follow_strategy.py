@@ -32,10 +32,10 @@ from navigation_strategy import AgentState, NavigationStrategy
 log = logging.getLogger("rover.line_follow")
 
 DRIVE_DURATION_S = 0.3    # seconds to drive per step
-STRIP_ROWS       = 120    # rows from bottom of frame to scan
+STRIP_ROWS       = 240    # rows from bottom of frame to scan (half of 480)
 _CENTER_CROP     = 0.7    # keep central 70% of width (narrows FOV)
 _PROC_WIDTH      = 640    # downscale to this width
-_MIN_AREA        = 100    # minimum blob area to count as the pipe
+_MIN_AREA        = 15     # minimum blob area to count as the pipe
 _BLOCK_SIZE      = 61     # adaptive threshold neighbourhood (must be odd)
 _DARK_C          = 5      # pipe must be this much darker than local mean
 
@@ -182,9 +182,11 @@ def _detect(frame: np.ndarray, hsv_bounds: Optional[tuple]):
             _detect._diag_count = 0
         _detect._diag_count += 1
         if _detect._diag_count % 10 == 1:
-            log.info("Strip HSV min=%s max=%s mean=%s",
+            test_mask = cv2.inRange(hsv, hsv_lo, hsv_hi)
+            match_px  = int(test_mask.sum() // 255)
+            log.info("Strip HSV min=%s max=%s mean=%s  blue_px=%d",
                      hsv.min(axis=(0,1)), hsv.max(axis=(0,1)),
-                     hsv.mean(axis=(0,1)).astype(int))
+                     hsv.mean(axis=(0,1)).astype(int), match_px)
         mask = cv2.inRange(hsv, hsv_lo, hsv_hi)
     else:
         gray    = cv2.cvtColor(strip, cv2.COLOR_BGR2GRAY)
@@ -207,18 +209,28 @@ def _detect(frame: np.ndarray, hsv_bounds: Optional[tuple]):
     n, labels, stats, centroids = cv2.connectedComponentsWithStats(
         mask, connectivity=8)
 
+    # Pick the blob closest to the horizontal centre (pipe runs down the middle)
+    # among blobs that meet the minimum area threshold.
     best_label = -1
     best_area  = 0
     best_stats = None
+    best_dist  = float('inf')
     for lbl in range(1, n):
         area = int(stats[lbl, cv2.CC_STAT_AREA])
-        if area > best_area:
-            best_area  = area
+        if area < _MIN_AREA:
+            continue
+        dist = abs(centroids[lbl][0] - cx)
+        if dist < best_dist:
+            best_dist  = dist
             best_label = lbl
+            best_area  = area
             best_stats = stats[lbl]
 
-    if best_area < _MIN_AREA:
-        return None, 0.0, best_area, frame, mask, None, strip_y, cx
+    if best_label == -1:
+        # Report the largest area seen even if below threshold (for diagnostics)
+        max_area = max((int(stats[l, cv2.CC_STAT_AREA]) for l in range(1, n)),
+                       default=0)
+        return None, 0.0, max_area, frame, mask, None, strip_y, cx
 
     line_col   = int(centroids[best_label][0])
     error_norm = (line_col - cx) / (w / 2.0)
