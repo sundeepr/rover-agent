@@ -44,6 +44,8 @@ _DARK_C          = 5      # pipe must be this much darker than local mean
 # "black" uses no pre-filter (dark = dark regardless of hue).
 _COLOUR_BOUNDS = {
     "black":  None,
+    "grey":   (np.array([0,   0,   150], dtype=np.uint8),   # any hue, low sat, bright
+               np.array([179, 60,  255], dtype=np.uint8)),
     "blue":   (np.array([90,  40,  10],  dtype=np.uint8),
                np.array([135, 255, 200], dtype=np.uint8)),
     "orange": (np.array([5,   120, 80],  dtype=np.uint8),

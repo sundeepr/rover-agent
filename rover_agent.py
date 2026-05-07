@@ -421,7 +421,7 @@ def main():
     parser.add_argument("--line-kp", type=float, default=2000.0, metavar="GAIN",
                         help="Proportional steering gain for line_follow (default: 2000)")
     parser.add_argument("--line-color", type=str, default="black",
-                        choices=["black", "blue", "orange", "red"],
+                        choices=["black", "grey", "blue", "orange", "red"],
                         help="Target line colour for line_follow (default: black)")
     parser.add_argument("--line-threshold", type=int, default=80, metavar="0-255",
                         help="(unused) kept for compatibility")
