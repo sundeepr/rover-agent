@@ -90,11 +90,24 @@ class LineFollowStrategy(NavigationStrategy):
             gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
             _, mask = cv2.threshold(gray, self._thresh, 255, cv2.THRESH_BINARY_INV)
 
-            M = cv2.moments(mask)
-            line_detected = M["m00"] > 0
+            # Find all contours, pick the one whose centroid is closest to cx
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
+                                           cv2.CHAIN_APPROX_SIMPLE)
+            best_contour = None
+            centroid_x   = None
+            if contours:
+                best_contour = min(
+                    contours,
+                    key=lambda c: abs(int(cv2.moments(c)["m10"] /
+                                         max(cv2.moments(c)["m00"], 1)) - cx)
+                )
+                M = cv2.moments(best_contour)
+                if M["m00"] > 0:
+                    centroid_x = int(M["m10"] / M["m00"])
+
+            line_detected = centroid_x is not None
 
             if line_detected:
-                centroid_x = int(M["m10"] / M["m00"])
                 error_norm = (centroid_x - cx) / (w / 2.0)   # [-1, 1]
 
                 if abs(error_norm) < 0.02:
@@ -123,7 +136,7 @@ class LineFollowStrategy(NavigationStrategy):
                 rover_ctrl.stop()
 
             # ── Annotate display frame ────────────────────────────────────
-            display = _annotate(frame, roi_top, mask, centroid_x,
+            display = _annotate(frame, roi_top, best_contour, centroid_x,
                                 cx, vel, radius, error_norm, result)
             with state.llm_lock:
                 state.llm_frame = display
@@ -152,7 +165,7 @@ class LineFollowStrategy(NavigationStrategy):
 def _annotate(
     frame: np.ndarray,
     roi_top: int,
-    mask: np.ndarray,
+    contour,
     centroid_x: Optional[int],
     frame_cx: int,
     vel: int,
@@ -168,10 +181,12 @@ def _annotate(
     roi_region = (roi_region * 0.65).clip(0, 255).astype(np.uint8)
     out[roi_top:] = roi_region
 
-    # Overlay detected line mask in blue
-    blue_layer = np.zeros_like(out[roi_top:])
-    blue_layer[:, :, 0] = mask   # blue channel
-    out[roi_top:] = cv2.addWeighted(out[roi_top:], 1.0, blue_layer, 0.6, 0)
+    # Overlay only the selected contour in blue
+    if contour is not None:
+        roi_h = h - roi_top
+        blue_layer = np.zeros_like(out[roi_top:])
+        cv2.drawContours(blue_layer, [contour], -1, (255, 0, 0), cv2.FILLED)
+        out[roi_top:] = cv2.addWeighted(out[roi_top:], 1.0, blue_layer, 0.6, 0)
 
     # ROI boundary
     cv2.line(out, (0, roi_top), (w, roi_top), (0, 200, 255), 2)
