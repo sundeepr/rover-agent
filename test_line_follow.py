@@ -22,7 +22,7 @@ import sys
 import cv2
 import numpy as np
 
-from line_follow_strategy import _detect, _annotate, _COLOUR_BOUNDS
+from line_follow_strategy import _detect, _detect_green, _annotate, _COLOUR_BOUNDS
 
 
 def main():
@@ -80,12 +80,16 @@ def main():
         line_col, error_norm, area, proc, mask, best_stats, strip_y, cx = \
             _detect(raw, hsv_bounds)
 
+        strip      = proc[strip_y:, :]
+        green_mask, avoidance, green_px = _detect_green(strip, cx, proc.shape[1])
+
         vel    = 80 if line_col is not None else 0
         radius = 0x8000
         result = "following" if line_col is not None else "line_lost"
 
-        out = _annotate(proc, mask, best_stats, line_col, cx, strip_y,
-                        vel, radius, error_norm, result, area, args.color)
+        out = _annotate(proc, mask, green_mask, best_stats, line_col, cx, strip_y,
+                        vel, radius, error_norm, avoidance, result, area,
+                        green_px, args.color)
 
 
         # Lazy writer init once we know the output frame size
