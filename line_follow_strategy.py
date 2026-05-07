@@ -33,8 +33,6 @@ log = logging.getLogger("rover.line_follow")
 
 DRIVE_DURATION_S = 0.3    # seconds to drive per step
 STRIP_ROWS       = 240    # rows from bottom of frame to scan (half of 480)
-_CENTER_CROP     = 0.7    # keep central 70% of width (narrows FOV)
-_PROC_WIDTH      = 640    # downscale to this width
 _MIN_AREA        = 15     # minimum blob area to count as the pipe
 _BLOCK_SIZE      = 61     # adaptive threshold neighbourhood (must be odd)
 _DARK_C          = 5      # pipe must be this much darker than local mean
@@ -157,16 +155,7 @@ def _detect(frame: np.ndarray, hsv_bounds: Optional[tuple]):
     line_col is None if no blob large enough was found.
     """
     h, w = frame.shape[:2]
-
-    # Centre-crop + downscale
-    crop_w = int(w * _CENTER_CROP)
-    x0     = (w - crop_w) // 2
-    frame  = frame[:, x0: x0 + crop_w]
-    scale  = _PROC_WIDTH / crop_w
-    proc_h = int(h * scale)
-    frame  = cv2.resize(frame, (_PROC_WIDTH, proc_h), interpolation=cv2.INTER_AREA)
-    h, w   = frame.shape[:2]
-    cx     = w // 2
+    cx   = w // 2
 
     # Bottom strip
     strip_y = max(0, h - STRIP_ROWS)
