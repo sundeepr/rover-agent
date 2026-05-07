@@ -39,9 +39,8 @@ def main():
     if not cap.isOpened():
         sys.exit(f"Cannot open camera {args.device}")
 
-    # Use minimum resolution
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     print(f"Camera: {w}x{h}")
