@@ -170,23 +170,24 @@ def _detect(frame: np.ndarray, hsv_bounds: Optional[tuple]):
     strip_y = max(0, h - STRIP_ROWS)
     strip   = frame[strip_y:, :]
 
-    # ── Adaptive threshold: find pixels darker than local neighbourhood ────
-    gray    = cv2.cvtColor(strip, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (7, 7), 0)
-    mask    = cv2.adaptiveThreshold(
-        blurred, 255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY_INV,
-        blockSize=_BLOCK_SIZE,
-        C=_DARK_C,
-    )
-
-    # ── Optional HSV pre-filter for coloured pipes ─────────────────────────
+    # ── Colour detection ───────────────────────────────────────────────────
+    # For coloured pipes (blue/orange/red): HSV mask only — the pipe may be
+    # lighter than the surrounding soil so adaptive darkness would exclude it.
+    # For black: adaptive threshold only (dark relative to surroundings).
     if hsv_bounds is not None:
         hsv_lo, hsv_hi = hsv_bounds
-        hsv      = cv2.cvtColor(strip, cv2.COLOR_BGR2HSV)
-        colour_mask = cv2.inRange(hsv, hsv_lo, hsv_hi)
-        mask     = cv2.bitwise_and(mask, colour_mask)
+        hsv  = cv2.cvtColor(strip, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, hsv_lo, hsv_hi)
+    else:
+        gray    = cv2.cvtColor(strip, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (7, 7), 0)
+        mask    = cv2.adaptiveThreshold(
+            blurred, 255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV,
+            blockSize=_BLOCK_SIZE,
+            C=_DARK_C,
+        )
 
     # Morphological cleanup
     k_close = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
