@@ -1,24 +1,24 @@
 """
-LineFollowStrategy — pure-CV black-line follower for the Atlas rover.
+LineFollowStrategy — orange-line follower for the Atlas rover.
 
-Detection: column projection
-────────────────────────────
-Rather than thresholding (which picks up shadows and random dark patches),
-the algorithm averages each column of pixels across the ROI height.  A black
-line running straight ahead creates a consistently dark column; isolated
-shadows and other marks average out.
+Detection: HSV colour mask + column projection
+──────────────────────────────────────────────
+Converts the bottom strip of the frame to HSV and masks for orange pixels.
+Colour-based detection is immune to shadows and brightness variation that
+fooled the earlier grayscale approach.
 
 Pipeline (each step)
 ────────────────────
   1. Crop the bottom `roi_frac` of the frame (nearest ground).
-  2. Gaussian blur to suppress noise.
-  3. Convert to grayscale; compute mean brightness per column → profile[w].
-  4. Smooth the profile with a 1-D moving average.
-  5. Line column = argmin of the smoothed profile.
-  6. Confirm line: contrast = (mean - min) / mean must exceed `min_contrast`.
-  7. Lateral error = (line_col - frame_cx) / half_width  ∈ [-1, 1].
-  8. radius_mm = -kp / error  (right error → negative radius → turn right).
-  9. drive_raw(vel_mm_s, radius_mm) for DRIVE_DURATION_S, then stop.
+  2. Take the bottom 25% of that ROI (immediately in front of rover).
+  3. Convert to HSV; apply orange mask (hue 5-25, saturated, bright).
+  4. Count masked pixels per column inside the valid (non-vignette) band.
+  5. Smooth the column counts with a 1-D moving average.
+  6. Line column = argmax of the smoothed count profile.
+  7. Confirm: total orange pixel count must exceed MIN_ORANGE_PIXELS.
+  8. Lateral error = (line_col - frame_cx) / half_width  ∈ [-1, 1].
+  9. radius_mm = -kp / error  (right error → negative radius → turn right).
+ 10. drive_raw(vel_mm_s, radius_mm) for DRIVE_DURATION_S, then stop.
 
 Usage
 ─────
@@ -29,10 +29,8 @@ Usage
 Tuning tips
 ───────────
   --line-roi-frac    Fraction of frame height to look at from the bottom.
-                     Larger = sees further ahead but more background clutter.
   --line-kp          Proportional gain. Reduce if rover oscillates.
   --line-vel         Forward speed in mm/s.
-  --interval         How often run_query fires. 0.3–0.5 s works well.
 """
 
 import logging
@@ -47,20 +45,24 @@ from navigation_strategy import AgentState, NavigationStrategy
 
 log = logging.getLogger("rover.line_follow")
 
-DRIVE_DURATION_S  = 0.3    # seconds to drive per step before re-evaluating
-_SMOOTH_WIN       = 21     # 1-D moving-average window for the column profile
-_MIN_CONTRAST     = 0.08   # (mean - min) / mean must exceed this to confirm a line
+DRIVE_DURATION_S   = 0.3    # seconds to drive per step
+_SMOOTH_WIN        = 21     # 1-D moving-average window for column counts
+_MIN_ORANGE_PX     = 50     # minimum orange pixels to confirm line detected
+
+# Orange HSV bounds (OpenCV: H 0-179, S 0-255, V 0-255)
+_HSV_LO = np.array([5,  120, 80],  dtype=np.uint8)
+_HSV_HI = np.array([25, 255, 255], dtype=np.uint8)
 
 
 class LineFollowStrategy(NavigationStrategy):
 
     def __init__(
         self,
-        vel_mm_s: int    = 80,
-        kp: float        = 2000.0,
-        threshold: int   = 80,   # kept for CLI compat but unused in projection mode
-        roi_frac: float  = 0.4,
-        edge_margin: float = 0.15,  # fraction of width to ignore on each side
+        vel_mm_s: int      = 80,
+        kp: float          = 2000.0,
+        threshold: int     = 80,        # unused, kept for CLI compat
+        roi_frac: float    = 0.4,
+        edge_margin: float = 0.15,
     ):
         self._vel         = vel_mm_s
         self._kp          = kp
@@ -72,7 +74,7 @@ class LineFollowStrategy(NavigationStrategy):
         return "line_follow"
 
     def on_reset(self) -> None:
-        pass   # stateless
+        pass
 
     def run_query(
         self,
@@ -89,35 +91,35 @@ class LineFollowStrategy(NavigationStrategy):
             # ── ROI: bottom roi_frac of frame ─────────────────────────────
             roi_top = int(h * (1.0 - self._roi_frac))
             roi     = frame[roi_top:, :]
+            roi_h   = roi.shape[0]
 
-            # ── Column projection: find the darkest column ────────────────
-            gray    = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-            blurred = cv2.GaussianBlur(gray, (7, 7), 0)
-            roi_h   = blurred.shape[0]
-            # Weight rows so bottom (closest, most relevant for centering)
-            # contributes more than top (further ahead).
-            weights = np.linspace(1.0, 0.1, roi_h, dtype=np.float32)[:, np.newaxis]
-            profile = (blurred.astype(np.float32) * weights).sum(axis=0) / weights.sum()
+            # ── Detection strip: bottom 25% of ROI (closest ground) ───────
+            strip_top = roi_h * 3 // 4
+            strip     = roi[strip_top:, :]
 
-            # 1-D moving average to suppress narrow noise spikes
-            kernel   = np.ones(_SMOOTH_WIN, dtype=np.float32) / _SMOOTH_WIN
-            smoothed = np.convolve(profile, kernel, mode='same')
+            # ── Orange HSV mask ───────────────────────────────────────────
+            hsv  = cv2.cvtColor(strip, cv2.COLOR_BGR2HSV)
+            mask = cv2.inRange(hsv, _HSV_LO, _HSV_HI)
 
-            # Ignore edge margins — wide-angle cameras are dark at the edges
-            # due to vignetting, which would always win the argmin otherwise.
-            margin   = int(w * self._edge_margin)
-            search   = smoothed[margin: w - margin]
-            line_col = int(np.argmin(search)) + margin
+            # ── Column counts inside valid (non-vignette) band ────────────
+            margin    = int(w * self._edge_margin)
+            band_mask = mask[:, margin: w - margin].astype(np.float32)
+            col_counts = band_mask.sum(axis=0)          # orange px per column
 
-            contrast  = (search.mean() - search.min()) / max(search.mean(), 1.0)
-            line_detected = contrast > _MIN_CONTRAST
+            kernel    = np.ones(_SMOOTH_WIN, dtype=np.float32) / _SMOOTH_WIN
+            smoothed  = np.convolve(col_counts, kernel, mode='same')
+
+            total_px      = int(mask[:, margin: w - margin].sum())
+            line_detected = total_px >= _MIN_ORANGE_PX
 
             if line_detected:
+                rel_col    = int(np.argmax(smoothed))
+                line_col   = rel_col + margin
                 centroid_x = line_col
-                error_norm = (centroid_x - cx) / (w / 2.0)   # [-1, 1]
+                error_norm = (centroid_x - cx) / (w / 2.0)
 
                 if abs(error_norm) < 0.02:
-                    radius = 0x8000   # straight
+                    radius = 0x8000
                 else:
                     radius = int(-self._kp / error_norm)
                     radius = max(-5000, min(5000, radius))
@@ -125,16 +127,16 @@ class LineFollowStrategy(NavigationStrategy):
                 vel    = self._vel
                 result = "following"
                 r_str  = "straight" if radius == 0x8000 else f"{radius}mm"
-                log.info("Line col=%d  error=%.3f  contrast=%.3f  vel=%d  r=%s",
-                         line_col, error_norm, contrast, vel, r_str)
+                log.info("Orange line col=%d  error=%.3f  px=%d  vel=%d  r=%s",
+                         line_col, error_norm, total_px, vel, r_str)
             else:
                 centroid_x = None
                 error_norm = 0.0
                 vel        = 0
                 radius     = 0x8000
                 result     = "line_lost"
-                log.warning("Line lost (contrast=%.3f < %.2f) — stopping",
-                            contrast, _MIN_CONTRAST)
+                log.warning("Orange line lost (px=%d < %d) — stopping",
+                            total_px, _MIN_ORANGE_PX)
 
             # ── Drive ─────────────────────────────────────────────────────
             if rover_ctrl and not state.paused.is_set():
@@ -143,8 +145,10 @@ class LineFollowStrategy(NavigationStrategy):
                 rover_ctrl.stop()
 
             # ── Annotate display frame ────────────────────────────────────
-            display = _annotate(frame, roi_top, smoothed, centroid_x,
-                                cx, vel, radius, error_norm, result, contrast)
+            strip_top_abs = roi_top + strip_top
+            display = _annotate(frame, roi_top, strip_top_abs, mask, smoothed,
+                                margin, centroid_x, cx, vel, radius,
+                                error_norm, result, total_px)
             with state.llm_lock:
                 state.llm_frame = display
 
@@ -158,7 +162,7 @@ class LineFollowStrategy(NavigationStrategy):
                     "vel_mm_s":   vel,
                     "radius_mm":  radius if radius != 0x8000 else None,
                     "error":      round(error_norm, 4),
-                    "contrast":   round(float(contrast), 4),
+                    "orange_px":  total_px,
                     "elapsed_s":  round(elapsed, 3),
                 }
 
@@ -173,53 +177,67 @@ class LineFollowStrategy(NavigationStrategy):
 def _annotate(
     frame: np.ndarray,
     roi_top: int,
-    smoothed_profile: np.ndarray,
+    strip_top_abs: int,
+    mask: np.ndarray,
+    smoothed: np.ndarray,
+    margin: int,
     centroid_x: Optional[int],
     frame_cx: int,
     vel: int,
     radius: int,
     error_norm: float,
     result: str,
-    contrast: float,
+    total_px: int,
 ) -> np.ndarray:
     out = frame.copy()
     h, w = out.shape[:2]
 
-    # Slight ROI tint
-    roi_region = out[roi_top:].astype(np.float32)
-    out[roi_top:] = (roi_region * 0.7).clip(0, 255).astype(np.uint8)
+    # Tint full ROI
+    out[roi_top:] = (out[roi_top:].astype(np.float32) * 0.7).clip(0, 255).astype(np.uint8)
 
-    # Draw column brightness profile as a mini graph at the ROI top edge
-    graph_h = min(80, (h - roi_top) // 3)
-    p_min, p_max = smoothed_profile.min(), smoothed_profile.max()
-    p_range = max(p_max - p_min, 1.0)
-    for x in range(w):
-        bar_h = int((smoothed_profile[x] - p_min) / p_range * graph_h)
-        y_top = roi_top + graph_h - bar_h
-        cv2.line(out, (x, roi_top + graph_h), (x, y_top), (60, 60, 120), 1)
+    # Overlay orange mask on the detection strip in orange colour
+    strip_h = h - strip_top_abs
+    if strip_h > 0 and mask.shape[0] > 0:
+        orange_layer = np.zeros_like(out[strip_top_abs:])
+        orange_layer[mask > 0] = (0, 100, 255)   # BGR orange
+        out[strip_top_abs:] = cv2.addWeighted(out[strip_top_abs:], 1.0,
+                                               orange_layer, 0.6, 0)
 
+    # Detection strip boundary
+    cv2.line(out, (0, strip_top_abs), (w, strip_top_abs), (0, 165, 255), 2)
     # ROI boundary
-    cv2.line(out, (0, roi_top), (w, roi_top), (0, 200, 255), 2)
+    cv2.line(out, (0, roi_top), (w, roi_top), (0, 200, 255), 1)
 
-    # Centre reference line
+    # Column count profile graph
+    graph_h = min(60, (strip_top_abs - roi_top) // 2)
+    if smoothed.size > 0 and graph_h > 0:
+        band_w  = smoothed.size
+        s_max   = max(smoothed.max(), 1.0)
+        for i, val in enumerate(smoothed):
+            x     = i + margin
+            bar_h = int(val / s_max * graph_h)
+            cv2.line(out, (x, roi_top + graph_h), (x, roi_top + graph_h - bar_h),
+                     (0, 140, 255), 1)
+
+    # Centre reference
     cv2.line(out, (frame_cx, roi_top), (frame_cx, h), (80, 80, 80), 1)
 
-    # Detected line column — vertical cyan stripe
+    # Detected line position
     if centroid_x is not None:
-        cv2.line(out, (centroid_x, roi_top), (centroid_x, h), (0, 255, 220), 3)
-        mid_y = roi_top + (h - roi_top) // 2
-        cv2.circle(out, (centroid_x, mid_y), 12, (0, 255, 100), -1)
-        cv2.line(out, (frame_cx, mid_y), (centroid_x, mid_y), (0, 255, 100), 2)
+        cv2.line(out, (centroid_x, roi_top), (centroid_x, h), (0, 165, 255), 3)
+        mid_y = strip_top_abs + (h - strip_top_abs) // 2
+        cv2.circle(out, (centroid_x, mid_y), 14, (0, 200, 255), -1)
+        cv2.line(out, (frame_cx, mid_y), (centroid_x, mid_y), (0, 200, 255), 2)
 
     # HUD
     r_str = "straight" if radius == 0x8000 else f"r={radius}mm"
     hud = [
         f"line_follow  {result}",
         f"vel={vel}mm/s  {r_str}",
-        f"error={error_norm:+.3f}  contrast={contrast:.3f}",
+        f"error={error_norm:+.3f}  px={total_px}",
     ]
     for i, txt in enumerate(hud):
         cv2.putText(out, txt, (12, 36 + i * 28),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 230, 255), 2, cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 2, cv2.LINE_AA)
 
     return out
