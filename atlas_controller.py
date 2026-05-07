@@ -250,7 +250,10 @@ class AtlasController:
 
         # General curve: differential drive kinematics
         # v_r = v * (1 + W / (2R)),  v_l = v * (1 - W / (2R))
+        # Clamp ratio to ±0.9 so the inner wheel never reverses during arc nav
+        # (true tank spins use the radius==1 / radius==-1 codes above).
         ratio = WHEEL_BASE_MM / (2 * radius_mm)
+        ratio = max(-0.9, min(0.9, ratio))
         v_r   = velocity_mm_s * (1 + ratio)
         v_l   = velocity_mm_s * (1 - ratio)
         max_v = max(abs(v_r), abs(v_l), _MAX_VELOCITY_REF_MM_S)
