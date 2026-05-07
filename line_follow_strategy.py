@@ -1,37 +1,38 @@
 """
 LineFollowStrategy — pure-CV black-line follower for the Atlas rover.
 
-Detects a black line in the lower portion of the forward camera frame
-using a brightness threshold, finds the centroid of the line, and
-steers the rover with a proportional controller.  No ML inference.
+Detection: column projection
+────────────────────────────
+Rather than thresholding (which picks up shadows and random dark patches),
+the algorithm averages each column of pixels across the ROI height.  A black
+line running straight ahead creates a consistently dark column; isolated
+shadows and other marks average out.
 
 Pipeline (each step)
 ────────────────────
   1. Crop the bottom `roi_frac` of the frame (nearest ground).
-  2. Convert to grayscale; threshold at `threshold` (dark pixels = line).
-  3. Find the centroid of the thresholded region.
-  4. Lateral error = (centroid_x - frame_cx) / half_width  ∈ [-1, 1]
-       positive = line is to the RIGHT of centre.
-  5. radius_mm = -kp / error   (negative error → right → negative radius)
-  6. drive_raw(vel_mm_s, radius_mm) for DRIVE_DURATION_S, then stop.
+  2. Gaussian blur to suppress noise.
+  3. Convert to grayscale; compute mean brightness per column → profile[w].
+  4. Smooth the profile with a 1-D moving average.
+  5. Line column = argmin of the smoothed profile.
+  6. Confirm line: contrast = (mean - min) / mean must exceed `min_contrast`.
+  7. Lateral error = (line_col - frame_cx) / half_width  ∈ [-1, 1].
+  8. radius_mm = -kp / error  (right error → negative radius → turn right).
+  9. drive_raw(vel_mm_s, radius_mm) for DRIVE_DURATION_S, then stop.
 
 Usage
 ─────
     python rover_agent.py --strategy line_follow --rover atlas \\
         --atlas-port /dev/ttyACM0 --interval 0.4 \\
-        [--line-vel 80] [--line-kp 2000] [--line-threshold 80] \\
-        [--line-roi-frac 0.35]
+        [--line-vel 80] [--line-kp 2000] [--line-roi-frac 0.4]
 
 Tuning tips
 ───────────
-  --line-threshold   Lower = only very dark pixels count (stricter).
-                     Raise if the line is not pure black.
-  --line-kp          Higher = more aggressive steering.
-                     Lower if the rover oscillates.
-  --line-roi-frac    Larger ROI sees more of the ground but may include
-                     the horizon and confuse the detector.
-  --interval         Controls how often run_query is called (seconds).
-                     0.3–0.5 s works well for line following.
+  --line-roi-frac    Fraction of frame height to look at from the bottom.
+                     Larger = sees further ahead but more background clutter.
+  --line-kp          Proportional gain. Reduce if rover oscillates.
+  --line-vel         Forward speed in mm/s.
+  --interval         How often run_query fires. 0.3–0.5 s works well.
 """
 
 import logging
@@ -46,7 +47,9 @@ from navigation_strategy import AgentState, NavigationStrategy
 
 log = logging.getLogger("rover.line_follow")
 
-DRIVE_DURATION_S = 0.3   # seconds to drive per step before re-evaluating
+DRIVE_DURATION_S  = 0.3    # seconds to drive per step before re-evaluating
+_SMOOTH_WIN       = 21     # 1-D moving-average window for the column profile
+_MIN_CONTRAST     = 0.08   # (mean - min) / mean must exceed this to confirm a line
 
 
 class LineFollowStrategy(NavigationStrategy):
@@ -55,12 +58,11 @@ class LineFollowStrategy(NavigationStrategy):
         self,
         vel_mm_s: int   = 80,
         kp: float       = 2000.0,
-        threshold: int  = 80,
+        threshold: int  = 80,   # kept for CLI compat but unused in projection mode
         roi_frac: float = 0.4,
     ):
         self._vel      = vel_mm_s
         self._kp       = kp
-        self._thresh   = threshold
         self._roi_frac = roi_frac
 
     @property
@@ -82,32 +84,25 @@ class LineFollowStrategy(NavigationStrategy):
             h, w = frame.shape[:2]
             cx   = w // 2
 
-            # ── ROI: bottom roi_frac of frame (closest ground) ────────────
+            # ── ROI: bottom roi_frac of frame ─────────────────────────────
             roi_top = int(h * (1.0 - self._roi_frac))
             roi     = frame[roi_top:, :]
 
-            # ── Detect black line ─────────────────────────────────────────
-            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-            _, mask = cv2.threshold(gray, self._thresh, 255, cv2.THRESH_BINARY_INV)
+            # ── Column projection: find the darkest column ────────────────
+            gray     = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            blurred  = cv2.GaussianBlur(gray, (7, 7), 0)
+            profile  = blurred.mean(axis=0).astype(np.float32)   # (w,)
 
-            # Find all contours, pick the one whose centroid is closest to cx
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
-                                           cv2.CHAIN_APPROX_SIMPLE)
-            best_contour = None
-            centroid_x   = None
-            if contours:
-                best_contour = min(
-                    contours,
-                    key=lambda c: abs(int(cv2.moments(c)["m10"] /
-                                         max(cv2.moments(c)["m00"], 1)) - cx)
-                )
-                M = cv2.moments(best_contour)
-                if M["m00"] > 0:
-                    centroid_x = int(M["m10"] / M["m00"])
+            # 1-D moving average to suppress narrow noise spikes
+            kernel   = np.ones(_SMOOTH_WIN, dtype=np.float32) / _SMOOTH_WIN
+            smoothed = np.convolve(profile, kernel, mode='same')
 
-            line_detected = centroid_x is not None
+            line_col  = int(np.argmin(smoothed))
+            contrast  = (smoothed.mean() - smoothed.min()) / max(smoothed.mean(), 1.0)
+            line_detected = contrast > _MIN_CONTRAST
 
             if line_detected:
+                centroid_x = line_col
                 error_norm = (centroid_x - cx) / (w / 2.0)   # [-1, 1]
 
                 if abs(error_norm) < 0.02:
@@ -119,15 +114,16 @@ class LineFollowStrategy(NavigationStrategy):
                 vel    = self._vel
                 result = "following"
                 r_str  = "straight" if radius == 0x8000 else f"{radius}mm"
-                log.info("Line: centroid_x=%d  error=%.3f  vel=%d  r=%s",
-                         centroid_x, error_norm, vel, r_str)
+                log.info("Line col=%d  error=%.3f  contrast=%.3f  vel=%d  r=%s",
+                         line_col, error_norm, contrast, vel, r_str)
             else:
                 centroid_x = None
                 error_norm = 0.0
                 vel        = 0
                 radius     = 0x8000
                 result     = "line_lost"
-                log.warning("Line lost — stopping")
+                log.warning("Line lost (contrast=%.3f < %.2f) — stopping",
+                            contrast, _MIN_CONTRAST)
 
             # ── Drive ─────────────────────────────────────────────────────
             if rover_ctrl and not state.paused.is_set():
@@ -136,8 +132,8 @@ class LineFollowStrategy(NavigationStrategy):
                 rover_ctrl.stop()
 
             # ── Annotate display frame ────────────────────────────────────
-            display = _annotate(frame, roi_top, best_contour, centroid_x,
-                                cx, vel, radius, error_norm, result)
+            display = _annotate(frame, roi_top, smoothed, centroid_x,
+                                cx, vel, radius, error_norm, result, contrast)
             with state.llm_lock:
                 state.llm_frame = display
 
@@ -146,12 +142,13 @@ class LineFollowStrategy(NavigationStrategy):
                 state.llm_response_s  = elapsed
                 state.llm_query_start = 0.0
                 state.latest_result   = {
-                    "strategy":  self.name,
-                    "result":    result,
-                    "vel_mm_s":  vel,
-                    "radius_mm": radius if radius != 0x8000 else None,
-                    "error":     round(error_norm, 4),
-                    "elapsed_s": round(elapsed, 3),
+                    "strategy":   self.name,
+                    "result":     result,
+                    "vel_mm_s":   vel,
+                    "radius_mm":  radius if radius != 0x8000 else None,
+                    "error":      round(error_norm, 4),
+                    "contrast":   round(float(contrast), 4),
+                    "elapsed_s":  round(elapsed, 3),
                 }
 
         except Exception:
@@ -165,28 +162,30 @@ class LineFollowStrategy(NavigationStrategy):
 def _annotate(
     frame: np.ndarray,
     roi_top: int,
-    contour,
+    smoothed_profile: np.ndarray,
     centroid_x: Optional[int],
     frame_cx: int,
     vel: int,
     radius: int,
     error_norm: float,
     result: str,
+    contrast: float,
 ) -> np.ndarray:
     out = frame.copy()
     h, w = out.shape[:2]
 
-    # Darken ROI slightly to distinguish it visually
+    # Slight ROI tint
     roi_region = out[roi_top:].astype(np.float32)
-    roi_region = (roi_region * 0.65).clip(0, 255).astype(np.uint8)
-    out[roi_top:] = roi_region
+    out[roi_top:] = (roi_region * 0.7).clip(0, 255).astype(np.uint8)
 
-    # Overlay only the selected contour in blue
-    if contour is not None:
-        roi_h = h - roi_top
-        blue_layer = np.zeros_like(out[roi_top:])
-        cv2.drawContours(blue_layer, [contour], -1, (255, 0, 0), cv2.FILLED)
-        out[roi_top:] = cv2.addWeighted(out[roi_top:], 1.0, blue_layer, 0.6, 0)
+    # Draw column brightness profile as a mini graph at the ROI top edge
+    graph_h = min(80, (h - roi_top) // 3)
+    p_min, p_max = smoothed_profile.min(), smoothed_profile.max()
+    p_range = max(p_max - p_min, 1.0)
+    for x in range(w):
+        bar_h = int((smoothed_profile[x] - p_min) / p_range * graph_h)
+        y_top = roi_top + graph_h - bar_h
+        cv2.line(out, (x, roi_top + graph_h), (x, y_top), (60, 60, 120), 1)
 
     # ROI boundary
     cv2.line(out, (0, roi_top), (w, roi_top), (0, 200, 255), 2)
@@ -194,10 +193,11 @@ def _annotate(
     # Centre reference line
     cv2.line(out, (frame_cx, roi_top), (frame_cx, h), (80, 80, 80), 1)
 
-    # Centroid and error line
+    # Detected line column — vertical cyan stripe
     if centroid_x is not None:
+        cv2.line(out, (centroid_x, roi_top), (centroid_x, h), (0, 255, 220), 3)
         mid_y = roi_top + (h - roi_top) // 2
-        cv2.circle(out, (centroid_x, mid_y), 14, (0, 255, 100), -1)
+        cv2.circle(out, (centroid_x, mid_y), 12, (0, 255, 100), -1)
         cv2.line(out, (frame_cx, mid_y), (centroid_x, mid_y), (0, 255, 100), 2)
 
     # HUD
@@ -205,7 +205,7 @@ def _annotate(
     hud = [
         f"line_follow  {result}",
         f"vel={vel}mm/s  {r_str}",
-        f"error={error_norm:+.3f}",
+        f"error={error_norm:+.3f}  contrast={contrast:.3f}",
     ]
     for i, txt in enumerate(hud):
         cv2.putText(out, txt, (12, 36 + i * 28),
