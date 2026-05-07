@@ -39,12 +39,6 @@ _MIN_AREA        = 300    # minimum blob area to count as the pipe
 _BLOCK_SIZE      = 61     # adaptive threshold neighbourhood (must be odd)
 _DARK_C          = 10     # pipe must be this much darker than local mean
 
-# Green plant avoidance
-_GREEN_LO        = np.array([35,  60,  40], dtype=np.uint8)   # HSV
-_GREEN_HI        = np.array([85, 255, 255], dtype=np.uint8)
-_MIN_GREEN_PX    = 200    # minimum green pixels to trigger avoidance
-_GREEN_WEIGHT    = 0.6    # how strongly green repels vs pipe attracts
-
 # Optional HSV pre-filter per colour — limits adaptive search to pixels
 # that are already roughly the right hue, reducing false positives.
 # "black" uses no pre-filter (dark = dark regardless of hue).
@@ -96,27 +90,21 @@ class LineFollowStrategy(NavigationStrategy):
             line_col, error_norm, area, proc, mask, best_stats, strip_y, cx = \
                 _detect(frame, self._hsv_bounds)
 
-            # Green plant avoidance
-            strip       = proc[strip_y:, :]
-            green_mask, avoidance, green_px = _detect_green(strip, cx, proc.shape[1])
-
             if line_col is not None:
-                combined = float(np.clip(error_norm + avoidance, -1.0, 1.0))
-                if abs(combined) < 0.02:
+                if abs(error_norm) < 0.02:
                     radius = 0x8000
                 else:
-                    radius = int(-self._kp / combined)
+                    radius = int(-self._kp / error_norm)
                     radius = max(-5000, min(5000, radius))
                 vel    = self._vel
-                result = "following" if green_px < _MIN_GREEN_PX else "avoiding"
+                result = "following"
                 r_str  = "straight" if radius == 0x8000 else f"{radius}mm"
-                log.info("%s pipe col=%d  err=%.2f  avoid=%.2f  green=%d  vel=%d  r=%s",
-                         self._color, line_col, error_norm, avoidance, green_px, vel, r_str)
+                log.info("%s pipe col=%d  err=%.2f  vel=%d  r=%s",
+                         self._color, line_col, error_norm, vel, r_str)
             else:
-                combined   = 0.0
-                radius     = 0x8000
-                vel        = 0
-                result     = "line_lost"
+                radius = 0x8000
+                vel    = 0
+                result = "line_lost"
                 log.warning("%s pipe lost (area=%d < %d) — stopping",
                             self._color, area, _MIN_AREA)
 
@@ -128,9 +116,9 @@ class LineFollowStrategy(NavigationStrategy):
                     rover_ctrl.stop()
 
             # ── Annotate ──────────────────────────────────────────────────
-            display = _annotate(proc, mask, green_mask, best_stats, line_col,
-                                cx, strip_y, vel, radius, error_norm, avoidance,
-                                result, area, green_px, self._color)
+            display = _annotate(proc, mask, best_stats, line_col,
+                                cx, strip_y, vel, radius, error_norm,
+                                result, area, self._color)
             with state.llm_lock:
                 state.llm_frame = display
 
@@ -228,42 +216,11 @@ def _detect(frame: np.ndarray, hsv_bounds: Optional[tuple]):
     return line_col, error_norm, best_area, frame, mask, best_stats, strip_y, cx
 
 
-def _detect_green(strip: np.ndarray, cx: int, w: int):
-    """
-    Detect green plants and return a left/right avoidance correction.
-
-    Compares green pixel counts in the left vs right half of the strip.
-    This handles the symmetric case (green on both sides) correctly —
-    equal green on both sides → avoidance = 0, just follow the pipe.
-
-    Returns (green_mask, avoidance_error, green_px):
-      avoidance_error > 0  → more green on left  → steer right
-      avoidance_error < 0  → more green on right → steer left
-      avoidance_error = 0  → balanced or no green
-    """
-    hsv        = cv2.cvtColor(strip, cv2.COLOR_BGR2HSV)
-    green_mask = cv2.inRange(hsv, _GREEN_LO, _GREEN_HI)
-    green_px   = int(green_mask.sum() // 255)
-
-    if green_px < _MIN_GREEN_PX:
-        return green_mask, 0.0, green_px
-
-    left_px  = int(green_mask[:, :cx].sum() // 255)
-    right_px = int(green_mask[:, cx:].sum() // 255)
-    total    = left_px + right_px
-
-    # Imbalance in [-1, 1]: +1 = all green on left, -1 = all on right
-    imbalance  = (left_px - right_px) / max(total, 1)
-    avoidance  = _GREEN_WEIGHT * imbalance   # steer away from heavier side
-    return green_mask, avoidance, green_px
-
-
 # ── Visualisation ─────────────────────────────────────────────────────────────
 
 def _annotate(
     frame: np.ndarray,
     mask: np.ndarray,
-    green_mask: np.ndarray,
     best_stats,
     line_col: Optional[int],
     cx: int,
@@ -271,24 +228,17 @@ def _annotate(
     vel: int,
     radius: int,
     error_norm: float,
-    avoidance: float,
     result: str,
     blob_area: int,
-    green_px: int,
     color: str,
 ) -> np.ndarray:
     out = frame.copy()
     h, w = out.shape[:2]
 
-    # Pipe segmentation mask (cyan)
+    # Pipe segmentation mask overlay
     overlay = np.zeros_like(out[strip_y:])
     overlay[mask > 0] = (0, 220, 80)
     out[strip_y:] = cv2.addWeighted(out[strip_y:], 0.6, overlay, 0.8, 0)
-
-    # Green plant mask (green overlay)
-    g_overlay = np.zeros_like(out[strip_y:])
-    g_overlay[green_mask > 0] = (0, 200, 0)
-    out[strip_y:] = cv2.addWeighted(out[strip_y:], 1.0, g_overlay, 0.5, 0)
 
     # Bounding box of pipe blob
     if best_stats is not None:
@@ -312,15 +262,14 @@ def _annotate(
         cv2.line(out, (cx, mid_y), (line_col, mid_y), (0, 255, 80), 2)
 
     r_str  = "straight" if radius == 0x8000 else f"r={radius}mm"
-    status = "LOST" if line_col is None else f"pipe={error_norm:+.2f} avoid={avoidance:+.2f}"
+    status = "LOST" if line_col is None else f"error={error_norm:+.3f}"
     hud = [
         f"line_follow [{color}]  {result}",
         f"vel={vel}mm/s  {r_str}",
-        f"{status}",
-        f"pipe_area={blob_area}  green_px={green_px}",
+        f"{status}  area={blob_area}px",
     ]
     for i, txt in enumerate(hud):
-        cv2.putText(out, txt, (12, 36 + i * 26),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 230, 255), 2, cv2.LINE_AA)
+        cv2.putText(out, txt, (12, 36 + i * 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 230, 255), 2, cv2.LINE_AA)
 
     return out
