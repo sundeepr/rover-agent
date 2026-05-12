@@ -46,13 +46,32 @@ eval "$(conda shell.bash hook)"
 conda activate "${CONDA_ENV}"
 
 # ── 2. PyTorch ────────────────────────────────────────────────────────────────
-info "Installing PyTorch 2.2.0 (CUDA 11.8)..."
+# Detect CUDA version and pick the matching PyTorch wheel index.
+CUDA_VER=$(nvidia-smi 2>/dev/null | grep -oP "CUDA Version: \K[0-9]+\.[0-9]+" | head -1)
+if [ -z "${CUDA_VER}" ]; then
+    warn "nvidia-smi not found — installing CPU-only PyTorch"
+    TORCH_INDEX="https://download.pytorch.org/whl/cpu"
+else
+    CUDA_MAJOR=$(echo "${CUDA_VER}" | cut -d. -f1)
+    CUDA_MINOR=$(echo "${CUDA_VER}" | cut -d. -f2)
+    info "Detected CUDA ${CUDA_VER}"
+    if   [ "${CUDA_MAJOR}" -ge 12 ] && [ "${CUDA_MINOR}" -ge 4 ]; then
+        TORCH_INDEX="https://download.pytorch.org/whl/cu124"
+    elif [ "${CUDA_MAJOR}" -ge 12 ]; then
+        TORCH_INDEX="https://download.pytorch.org/whl/cu121"
+    else
+        TORCH_INDEX="https://download.pytorch.org/whl/cu118"
+    fi
+fi
+info "PyTorch index: ${TORCH_INDEX}"
+
+# Install numpy first from PyPI, then torch from the PyTorch index separately
+pip install --quiet "numpy==1.26.4"
 pip install --quiet \
-    numpy==1.26.4 \
-    torch==2.2.0 \
-    torchvision==0.17.0 \
-    torchaudio==2.2.0 \
-    --index-url https://download.pytorch.org/whl/cu118
+    "torch==2.2.0" \
+    "torchvision==0.17.0" \
+    "torchaudio==2.2.0" \
+    --index-url "${TORCH_INDEX}"
 
 # ── 3. OmniVLA package ────────────────────────────────────────────────────────
 if [ -d "${OMNIVLA_REPO}" ]; then
