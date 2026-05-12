@@ -97,19 +97,37 @@ if [ -f "${ROVER_AGENT_DIR}/requirements.txt" ]; then
     pip install --quiet -r "${ROVER_AGENT_DIR}/requirements.txt"
 fi
 
+# ── 7. Point run_omnivla.py at the downloaded weights ────────────────────────
+# The script hardcodes vla_path = "./omnivla-original" — update it to use
+# our downloaded weights so the official test works out of the box.
+INFERENCE_SCRIPT="${OMNIVLA_REPO}/inference/run_omnivla.py"
+if [ -f "${INFERENCE_SCRIPT}" ]; then
+    info "Patching inference/run_omnivla.py to use omnivla-finetuned-cast weights..."
+    sed -i "s|vla_path: str = \"./omnivla-original\"|vla_path: str = \"${WEIGHTS_DIR}/omnivla-finetuned-cast\"|g" \
+        "${INFERENCE_SCRIPT}"
+    # Update resume_step to match finetuned-cast checkpoint
+    sed -i "s|resume_step: Optional\[int\] = 120000|resume_step: Optional[int] = None|g" \
+        "${INFERENCE_SCRIPT}"
+fi
+
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
 info "Installation complete!"
 echo ""
-echo "  Weights location : ${WEIGHTS_DIR}"
+echo "  Weights : ${WEIGHTS_DIR}/omnivla-finetuned-cast"
 echo ""
-echo "  To run the inference server:"
+echo "  ── Test the model (official example) ──────────────────────────────────"
+echo "    conda activate ${CONDA_ENV}"
+echo "    cd ${OMNIVLA_REPO}"
+echo "    python inference/run_omnivla.py"
+echo "    # Output saved to 1_ex.jpg — open it to see predicted trajectory"
+echo ""
+echo "  ── Run inference server (for rover) ───────────────────────────────────"
+echo "    tmux new -s omnivla"
 echo "    conda activate ${CONDA_ENV}"
 echo "    cd ${ROVER_AGENT_DIR}"
-echo "    python omnivla_server.py --weights ${WEIGHTS_DIR}/omnivla-finetuned-cast --port 5100"
-echo ""
-echo "  To run in the background (survives SSH disconnect):"
-echo "    tmux new -s omnivla"
-echo "    conda activate ${CONDA_ENV} && python omnivla_server.py --weights ${WEIGHTS_DIR}/omnivla-finetuned-cast --port 5100"
+echo "    python omnivla_cloud_server.py \\"
+echo "        --model-path ${WEIGHTS_DIR}/omnivla-finetuned-cast \\"
+echo "        --host 0.0.0.0 --port 8765"
 echo "    # Ctrl+B then D to detach"
 echo ""
