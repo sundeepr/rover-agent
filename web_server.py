@@ -268,29 +268,60 @@ _HTML = """<!DOCTYPE html>
       canvas.height = img.offsetHeight;
       const ctx = canvas.getContext('2d');
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // Fixed anchor at bottom-centre (rover position)
+      const ax = canvas.width  / 2;
+      const ay = canvas.height;
+
+      // Build chain: anchor → wp[0] → wp[1] → ...
+      const chain = [{px: ax, py: ay, anchor: true}];
+      _waypoints.forEach(wp => chain.push({
+        px: wp.nx * canvas.width,
+        py: wp.ny * canvas.height,
+      }));
+
+      // Draw connecting lines
+      ctx.setLineDash([6, 4]);
+      ctx.strokeStyle = 'rgba(0, 200, 120, 0.75)';
+      ctx.lineWidth   = 2;
+      for (let i = 0; i < chain.length - 1; i++) {
+        ctx.beginPath();
+        ctx.moveTo(chain[i].px, chain[i].py);
+        ctx.lineTo(chain[i+1].px, chain[i+1].py);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+
+      // Draw anchor
+      ctx.beginPath();
+      ctx.arc(ax, ay - 2, 8, 0, 2*Math.PI);
+      ctx.fillStyle   = '#fff';
+      ctx.strokeStyle = '#0af';
+      ctx.lineWidth   = 2;
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle   = '#0af';
+      ctx.font        = 'bold 9px monospace';
+      ctx.textAlign   = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('⊕', ax, ay - 2);
+
+      // Draw waypoints
       _waypoints.forEach((wp, i) => {
         const px = wp.nx * canvas.width;
         const py = wp.ny * canvas.height;
-        if (i > 0) {
-          const prev = _waypoints[i-1];
-          ctx.beginPath();
-          ctx.moveTo(prev.nx * canvas.width, prev.ny * canvas.height);
-          ctx.lineTo(px, py);
-          ctx.strokeStyle = 'rgba(0,200,100,0.7)';
-          ctx.lineWidth = 2;
-          ctx.stroke();
-        }
         ctx.beginPath();
         ctx.arc(px, py, 10, 0, 2*Math.PI);
         ctx.fillStyle = i === 0 ? '#00ff64' : '#00cc50';
         ctx.fill();
-        ctx.fillStyle = '#000';
-        ctx.font = 'bold 11px monospace';
-        ctx.textAlign = 'center';
+        ctx.fillStyle    = '#000';
+        ctx.font         = 'bold 11px monospace';
+        ctx.textAlign    = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText(i+1, px, py);
+        ctx.fillText(i + 1, px, py);
       });
-      // Update waypoint list in sidebar
+
+      // Sidebar list
       const el = document.getElementById('tp-waypoints');
       el.innerHTML = _waypoints.map((wp, i) =>
         `<div>#${i+1} x=${wp.nx.toFixed(3)} y=${wp.ny.toFixed(3)}</div>`
