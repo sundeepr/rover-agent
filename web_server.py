@@ -371,7 +371,10 @@ _HTML = """<!DOCTYPE html>
         task:         'row_following',
       };
       fetch('/chat', {method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({type:'episode_cmd', cmd:'execute', meta})
+        body: JSON.stringify({
+          type: 'episode_cmd', cmd: 'execute', meta,
+          waypoints: _waypoints.map(w => [w.nx, w.ny]),
+        })
       });
       // Clear canvas so user can set next waypoints immediately
       _waypoints.length = 0;
@@ -887,11 +890,14 @@ class WebServer:
             with self._state.lock:
                 self._state.teleop_episode_cmd  = cmd
                 self._state.teleop_episode_meta = meta
-            log.info("Teleop episode cmd: %s", cmd)
-            if cmd == "execute":
-                # Clear waypoints from server state after execute so UI resets
-                with self._state.lock:
+                if cmd == "execute":
+                    # Embed waypoints in the command so the rover receives them
+                    # in the same publisher cycle. Server state is cleared since
+                    # the canvas already reset on the browser side.
+                    wpts = data.get("waypoints", [])
+                    self._state.teleop_episode_meta["_waypoints"] = wpts
                     self._state.teleop_waypoints = []
+            log.info("Teleop episode cmd: %s", cmd)
             return jsonify({"ok": True})
 
         return jsonify({"ok": False, "message": f"Unknown type: {msg_type}"}), 400

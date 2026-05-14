@@ -73,6 +73,7 @@ class TeleopStrategy(NavigationStrategy):
         self._executing     = False   # True while following waypoints
         self._aligned_steps = 0       # steps spent aligned to current waypoint
         self._active_wp_idx = -1      # index of current waypoint (for log dedup)
+        self._was_driving   = False   # tracks idle→active transitions for stop()
 
     @property
     def name(self) -> str:
@@ -119,11 +120,16 @@ class TeleopStrategy(NavigationStrategy):
                         log.info("Episode discarded")
                         self._recorder = None
                 elif cmd == "execute":
-                    if state.teleop_waypoints:
-                        self._executing     = True
-                        self._aligned_steps = 0
-                        self._active_wp_idx = 0
-                        log.info("Executing %d waypoints", len(state.teleop_waypoints))
+                    # Waypoints are embedded in meta["_waypoints"] to avoid
+                    # a race where the server clears teleop_waypoints before
+                    # the rover receives them.
+                    wpts = meta.get("_waypoints", state.teleop_waypoints)
+                    if wpts:
+                        state.teleop_waypoints  = wpts
+                        self._executing         = True
+                        self._aligned_steps     = 0
+                        self._active_wp_idx     = -1
+                        log.info("Executing %d waypoints", len(wpts))
                     else:
                         log.warning("Execute pressed but no waypoints set")
 
@@ -183,10 +189,15 @@ class TeleopStrategy(NavigationStrategy):
                             log.info("All waypoints executed — ready for next set")
 
                 else:
-                    if rover_ctrl:
+                    # Only send stop once on transition to idle
+                    if self._was_driving and rover_ctrl:
                         rover_ctrl.stop()
                     self._last_vel    = 0
                     self._last_radius = 0x8000
+
+            # Track whether we were driving this cycle
+            driving = self._last_vel != 0
+            self._was_driving = driving
 
             # ── 3. Recording loop at target FPS ────────────────────────────
             if self._recorder is not None:
