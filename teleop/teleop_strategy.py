@@ -52,6 +52,10 @@ def _pixel_to_bearing(pixel_x: int) -> float:
     return fraction * _CAMERA_HFOV_DEG
 
 
+# Minimum steps the rover must be aligned before advancing to next waypoint
+_WAYPOINT_ADVANCE_STEPS = 5
+
+
 class TeleopStrategy(NavigationStrategy):
 
     def __init__(
@@ -60,12 +64,15 @@ class TeleopStrategy(NavigationStrategy):
         instruction: str  = "",
         fps: int          = 10,
     ):
-        self._dataset_dir  = dataset_dir
-        self._instruction  = instruction
-        self._fps          = fps
+        self._dataset_dir   = dataset_dir
+        self._instruction   = instruction
+        self._fps           = fps
         self._recorder: Optional[DatasetRecorder] = None
-        self._last_vel     = 0
-        self._last_radius  = 0x8000
+        self._last_vel      = 0
+        self._last_radius   = 0x8000
+        self._executing     = False   # True while following waypoints
+        self._aligned_steps = 0       # steps spent aligned to current waypoint
+        self._active_wp_idx = -1      # index of current waypoint (for log dedup)
 
     @property
     def name(self) -> str:
@@ -75,6 +82,7 @@ class TeleopStrategy(NavigationStrategy):
         if self._recorder is not None:
             self._recorder.close()
             self._recorder = None
+        self._executing = False
 
     def set_goal(self, goal: str) -> None:
         if goal:
@@ -93,11 +101,10 @@ class TeleopStrategy(NavigationStrategy):
             cmd  = state.teleop_episode_cmd
             meta = state.teleop_episode_meta
             if cmd:
-                state.teleop_episode_cmd = ""   # consume
+                state.teleop_episode_cmd = ""
                 if cmd == "start":
                     if self._recorder is not None:
                         self._recorder.close()
-                    instruction = meta.get("instruction", self._instruction)
                     self._recorder = DatasetRecorder(self._dataset_dir, meta)
                     log.info("Episode started: %s", self._recorder.episode_id)
                 elif cmd == "stop":
@@ -111,9 +118,16 @@ class TeleopStrategy(NavigationStrategy):
                         self._recorder.discard()
                         log.info("Episode discarded")
                         self._recorder = None
+                elif cmd == "execute":
+                    if state.teleop_waypoints:
+                        self._executing     = True
+                        self._aligned_steps = 0
+                        self._active_wp_idx = 0
+                        log.info("Executing %d waypoints", len(state.teleop_waypoints))
+                    else:
+                        log.warning("Execute pressed but no waypoints set")
 
             # ── 2. Determine drive command ─────────────────────────────────
-            # Priority: joystick (operator_control) > waypoints
             operator_active = (
                 state.operator_control is not None
                 and state.operator_until > time.time()
@@ -129,26 +143,46 @@ class TeleopStrategy(NavigationStrategy):
                         rover_ctrl.drive_raw(vel, radius)
                     self._last_vel    = vel
                     self._last_radius = radius
-                elif state.teleop_waypoints:
+
+                elif self._executing and state.teleop_waypoints:
                     nx, ny  = state.teleop_waypoints[0]
                     pixel_x = int(nx * _IMAGE_WIDTH)
                     bearing = _pixel_to_bearing(pixel_x)
+
                     if abs(bearing) > _BEARING_DEAD_BAND_DEG:
-                        # Turn toward waypoint
                         radius = -1 if bearing > 0 else 1
                         vel    = _SPIN_VEL_MM_S
+                        self._aligned_steps = 0
                     else:
-                        # Drive straight
                         vel    = _FOLLOW_VEL_MM_S
                         radius = 0x8000
+                        self._aligned_steps += 1
+
                     if rover_ctrl:
                         rover_ctrl.drive_raw(vel, radius)
                     self._last_vel    = vel
                     self._last_radius = radius
-                    log.info("Waypoint [%.2f, %.2f]  bearing=%.1f°  vel=%d",
-                             nx, ny, bearing, vel)
+
+                    # Log only when waypoint changes
+                    if self._active_wp_idx != id(state.teleop_waypoints[0]):
+                        self._active_wp_idx = id(state.teleop_waypoints[0])
+                        log.info("Waypoint [%.2f, %.2f]  bearing=%.1f°", nx, ny, bearing)
+
+                    # Advance to next waypoint once sufficiently aligned
+                    if self._aligned_steps >= _WAYPOINT_ADVANCE_STEPS:
+                        state.teleop_waypoints = state.teleop_waypoints[1:]
+                        self._aligned_steps = 0
+                        if state.teleop_waypoints:
+                            log.info("Advanced to next waypoint (%d remaining)",
+                                     len(state.teleop_waypoints))
+                        else:
+                            # All waypoints done — stop and reset
+                            self._executing = False
+                            if rover_ctrl:
+                                rover_ctrl.stop()
+                            log.info("All waypoints executed — ready for next set")
+
                 else:
-                    # No waypoints, no joystick — stop
                     if rover_ctrl:
                         rover_ctrl.stop()
                     self._last_vel    = 0

@@ -232,6 +232,10 @@ _HTML = """<!DOCTYPE html>
           <input id="tp-robot"  type="text" placeholder="Robot ID"
             style="background:#1e1e1e;border:1px solid #333;color:#ddd;padding:4px 6px;font-family:monospace;font-size:0.75em;border-radius:3px;">
         </div>
+        <button onclick="teleopExecute()"
+          style="width:100%;padding:8px;background:#e65100;border:none;color:#fff;border-radius:4px;cursor:pointer;font-family:monospace;font-size:0.9em;font-weight:bold;letter-spacing:0.05em;">
+          &#x25B6; EXECUTE WAYPOINTS
+        </button>
         <div style="display:flex;gap:6px;margin-top:2px;">
           <button id="tp-start-btn" onclick="teleopCmd('start')"
             style="flex:1;padding:6px;background:#1b5e20;border:none;color:#a5d6a7;border-radius:4px;cursor:pointer;font-family:monospace;font-size:0.8em;">
@@ -318,6 +322,30 @@ _HTML = """<!DOCTYPE html>
       window.addEventListener('resize', _redrawCanvas);
       setInterval(_redrawCanvas, 500);  // keep in sync with img resize
     });
+
+    function teleopExecute() {
+      if (_waypoints.length === 0) {
+        alert('No waypoints set. Click on the camera feed to add waypoints first.');
+        return;
+      }
+      // Send execute command with current waypoints, then clear canvas
+      const meta = {
+        instruction:  document.getElementById('tp-instruction').value.trim(),
+        crop:         document.getElementById('tp-crop').value.trim(),
+        location_id:  document.getElementById('tp-loc').value.trim(),
+        growth_stage: document.getElementById('tp-stage').value.trim(),
+        robot_id:     document.getElementById('tp-robot').value.trim(),
+        date:         new Date().toISOString().slice(0,10),
+        collection_mode: 'human_teleop',
+        task:         'row_following',
+      };
+      fetch('/chat', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({type:'episode_cmd', cmd:'execute', meta})
+      });
+      // Clear canvas so user can set next waypoints immediately
+      _waypoints.length = 0;
+      _redrawCanvas();
+    }
 
     function teleopCmd(cmd) {
       const meta = {
@@ -829,6 +857,10 @@ class WebServer:
                 self._state.teleop_episode_cmd  = cmd
                 self._state.teleop_episode_meta = meta
             log.info("Teleop episode cmd: %s", cmd)
+            if cmd == "execute":
+                # Clear waypoints from server state after execute so UI resets
+                with self._state.lock:
+                    self._state.teleop_waypoints = []
             return jsonify({"ok": True})
 
         return jsonify({"ok": False, "message": f"Unknown type: {msg_type}"}), 400
