@@ -67,6 +67,11 @@ class AgentState:
     # Optional SessionRecorder — set by rover_agent.main(); None disables recording
     recorder: object = None
 
+    # Teleop data collection — written by agent_publisher from web_server response
+    teleop_waypoints: list = field(default_factory=list)    # [[nx,ny],...] normalised
+    teleop_episode_cmd: str = ""                            # "start"|"stop"|"discard"|""
+    teleop_episode_meta: dict = field(default_factory=dict) # episode metadata from UI
+
 
 class NavigationStrategy(ABC):
     """

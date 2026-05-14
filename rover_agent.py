@@ -342,6 +342,13 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
             kp=args.line_kp,
             color=args.line_color,
         )
+    if name == "teleop":
+        from teleop.teleop_strategy import TeleopStrategy
+        return TeleopStrategy(
+            dataset_dir=args.dataset_dir,
+            instruction=args.teleop_instruction,
+            fps=args.teleop_fps,
+        )
     raise ValueError(f"Unknown strategy: {name!r}")
 
 
@@ -370,7 +377,7 @@ def main():
                         choices=["gemini", "omnivla", "clip_omnivla", "qwen_omnivla",
                                  "hough_crop_row", "crop_row", "row_centering_omnivla",
                                  "cloud_omnivla", "omnivla_full", "paligemma", "ollama",
-                                 "line_follow"],
+                                 "line_follow", "teleop"],
                         help="Navigation strategy (default: gemini)")
     parser.add_argument("--cloud-server", type=str,  default="ws://localhost:8765",
                         metavar="URL",
@@ -429,6 +436,12 @@ def main():
                         help="(unused) kept for compatibility")
     parser.add_argument("--line-edge-margin", type=float, default=0.15, metavar="FRAC",
                         help="(unused) kept for compatibility")
+    parser.add_argument("--dataset-dir", type=str, default="./dataset",
+                        help="Base directory for teleop dataset (default: ./dataset)")
+    parser.add_argument("--teleop-instruction", type=str, default="",
+                        help="Default navigation instruction for teleop episodes")
+    parser.add_argument("--teleop-fps", type=int, default=10,
+                        help="Frame recording rate for teleop strategy (default: 10)")
     parser.add_argument("--path-threshold", type=float, default=0.5,
                         metavar="FLOAT",
                         help="Path detection confidence threshold for "
@@ -517,7 +530,7 @@ def main():
 
     # If a goal was given on the CLI, apply it immediately so the agent
     # starts navigating without waiting for web chat input.
-    _NO_GOAL_STRATEGIES = ("gemini", "line_follow", "hough_crop_row")
+    _NO_GOAL_STRATEGIES = ("gemini", "line_follow", "hough_crop_row", "teleop")
     if args.goal and args.strategy not in _NO_GOAL_STRATEGIES:
         strategy.set_goal(args.goal)
         with state.result_lock:

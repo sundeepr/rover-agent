@@ -89,6 +89,7 @@ class AgentPublisher:
             self._sync_pause(state, rover_ctrl, resp.get("paused", False))
             self._sync_goal(state, strategy, resp.get("goal", ""))
             self._sync_movement(state, rover_ctrl, resp)
+            self._sync_teleop(state, resp)
 
             # ── Post "Ready" once when strategy models are loaded ─────────
             if (not posted_ready and strategy is not None
@@ -251,3 +252,15 @@ class AgentPublisher:
                 "vel":    vel,
                 "radius": radius if radius != 0x8000 else None,
             })
+
+    @staticmethod
+    def _sync_teleop(state, resp: dict) -> None:
+        """Sync teleop waypoints and episode commands from the web server response."""
+        if not hasattr(state, "teleop_waypoints"):
+            return
+        if "teleop_waypoints" in resp:
+            state.teleop_waypoints = resp["teleop_waypoints"]
+        cmd = resp.get("teleop_episode_cmd", "")
+        if cmd:
+            state.teleop_episode_cmd  = cmd
+            state.teleop_episode_meta = resp.get("teleop_episode_meta", {})

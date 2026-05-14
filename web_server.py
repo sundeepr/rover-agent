@@ -150,9 +150,10 @@ _HTML = """<!DOCTYPE html>
     <div class="content-area">
 
       <div class="videos-row">
-        <div class="video-box">
-          <div class="label">&#x1F534; Live camera</div>
-          <img src="/video/realtime" alt="live feed">
+        <div class="video-box" style="position:relative;">
+          <div class="label">&#x1F534; Live camera — click to add waypoints</div>
+          <img id="live-img" src="/video/realtime" alt="live feed" style="width:100%;display:block;">
+          <canvas id="waypoint-canvas" style="position:absolute;top:0;left:0;width:100%;height:100%;cursor:crosshair;"></canvas>
         </div>
         <div class="video-box">
           <div class="label">&#x1F9E0; Last query — with waypoints</div>
@@ -215,10 +216,133 @@ _HTML = """<!DOCTYPE html>
 
       <h2 style="margin-top:4px">Logs</h2>
       <div id="log-list" style="padding:8px 12px; overflow-y:auto; max-height:120px;"></div>
+
+      <h2 style="margin-top:4px">Teleop Recording</h2>
+      <div style="padding:8px 12px; display:flex; flex-direction:column; gap:6px;">
+        <div style="font-size:0.72em; color:#555;">Instruction</div>
+        <input id="tp-instruction" type="text" placeholder="e.g. drive between the crop rows"
+          style="background:#1e1e1e;border:1px solid #333;color:#ddd;padding:4px 6px;font-family:monospace;font-size:0.8em;border-radius:3px;">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
+          <input id="tp-crop"   type="text" placeholder="Crop (e.g. chili)"
+            style="background:#1e1e1e;border:1px solid #333;color:#ddd;padding:4px 6px;font-family:monospace;font-size:0.75em;border-radius:3px;">
+          <input id="tp-loc"    type="text" placeholder="Location ID"
+            style="background:#1e1e1e;border:1px solid #333;color:#ddd;padding:4px 6px;font-family:monospace;font-size:0.75em;border-radius:3px;">
+          <input id="tp-stage"  type="text" placeholder="Growth stage"
+            style="background:#1e1e1e;border:1px solid #333;color:#ddd;padding:4px 6px;font-family:monospace;font-size:0.75em;border-radius:3px;">
+          <input id="tp-robot"  type="text" placeholder="Robot ID"
+            style="background:#1e1e1e;border:1px solid #333;color:#ddd;padding:4px 6px;font-family:monospace;font-size:0.75em;border-radius:3px;">
+        </div>
+        <div style="display:flex;gap:6px;margin-top:2px;">
+          <button id="tp-start-btn" onclick="teleopCmd('start')"
+            style="flex:1;padding:6px;background:#1b5e20;border:none;color:#a5d6a7;border-radius:4px;cursor:pointer;font-family:monospace;font-size:0.8em;">
+            &#x25CF; Start Episode
+          </button>
+          <button id="tp-stop-btn" onclick="teleopCmd('stop')"
+            style="flex:1;padding:6px;background:#1a237e;border:none;color:#90caf9;border-radius:4px;cursor:pointer;font-family:monospace;font-size:0.8em;">
+            &#x25A0; Stop
+          </button>
+          <button onclick="teleopCmd('discard')"
+            style="padding:6px 10px;background:#311;border:none;color:#ef9a9a;border-radius:4px;cursor:pointer;font-family:monospace;font-size:0.8em;">
+            &#x2715;
+          </button>
+        </div>
+        <div id="tp-status" style="font-size:0.75em;color:#666;">idle — 0 frames</div>
+        <div style="font-size:0.72em;color:#555;margin-top:4px;">Waypoints (right-click canvas to clear)</div>
+        <div id="tp-waypoints" style="font-size:0.72em;color:#888;max-height:80px;overflow-y:auto;"></div>
+      </div>
     </div>
   </div>
 
   <script>
+    // ── Teleop waypoint canvas ────────────────────────────────────────────────
+    const _waypoints = [];  // [{nx, ny}, ...]
+
+    function _redrawCanvas() {
+      const img    = document.getElementById('live-img');
+      const canvas = document.getElementById('waypoint-canvas');
+      canvas.width  = img.offsetWidth;
+      canvas.height = img.offsetHeight;
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      _waypoints.forEach((wp, i) => {
+        const px = wp.nx * canvas.width;
+        const py = wp.ny * canvas.height;
+        if (i > 0) {
+          const prev = _waypoints[i-1];
+          ctx.beginPath();
+          ctx.moveTo(prev.nx * canvas.width, prev.ny * canvas.height);
+          ctx.lineTo(px, py);
+          ctx.strokeStyle = 'rgba(0,200,100,0.7)';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+        ctx.beginPath();
+        ctx.arc(px, py, 10, 0, 2*Math.PI);
+        ctx.fillStyle = i === 0 ? '#00ff64' : '#00cc50';
+        ctx.fill();
+        ctx.fillStyle = '#000';
+        ctx.font = 'bold 11px monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(i+1, px, py);
+      });
+      // Update waypoint list in sidebar
+      const el = document.getElementById('tp-waypoints');
+      el.innerHTML = _waypoints.map((wp, i) =>
+        `<div>#${i+1} x=${wp.nx.toFixed(3)} y=${wp.ny.toFixed(3)}</div>`
+      ).join('') || '<div style="color:#444">none — left-click on camera to add</div>';
+    }
+
+    function _sendWaypoints() {
+      fetch('/chat', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({type:'waypoints', waypoints: _waypoints.map(w => [w.nx, w.ny])})
+      });
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      const canvas = document.getElementById('waypoint-canvas');
+      canvas.addEventListener('click', e => {
+        const r = canvas.getBoundingClientRect();
+        const nx = (e.clientX - r.left) / r.width;
+        const ny = (e.clientY - r.top)  / r.height;
+        _waypoints.push({nx, ny});
+        _redrawCanvas();
+        _sendWaypoints();
+      });
+      canvas.addEventListener('contextmenu', e => {
+        e.preventDefault();
+        _waypoints.length = 0;
+        _redrawCanvas();
+        _sendWaypoints();
+      });
+      window.addEventListener('resize', _redrawCanvas);
+      setInterval(_redrawCanvas, 500);  // keep in sync with img resize
+    });
+
+    function teleopCmd(cmd) {
+      const meta = {
+        instruction:  document.getElementById('tp-instruction').value.trim(),
+        crop:         document.getElementById('tp-crop').value.trim(),
+        location_id:  document.getElementById('tp-loc').value.trim(),
+        growth_stage: document.getElementById('tp-stage').value.trim(),
+        robot_id:     document.getElementById('tp-robot').value.trim(),
+        date:         new Date().toISOString().slice(0,10),
+        collection_mode: 'human_teleop',
+        task:         'row_following',
+      };
+      fetch('/chat', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({type:'episode_cmd', cmd, meta})
+      });
+      if (cmd === 'start') {
+        document.getElementById('tp-status').style.color = '#f44336';
+        document.getElementById('tp-status').textContent = '● recording — 0 frames';
+      } else if (cmd === 'stop' || cmd === 'discard') {
+        document.getElementById('tp-status').style.color = '#666';
+        document.getElementById('tp-status').textContent = `${cmd} — 0 frames`;
+      }
+    }
+    // ── End teleop ────────────────────────────────────────────────────────────
+
     const statusColors = {
       in_progress:      'status-ok',
       phase1_complete:  'status-done',
@@ -410,6 +534,14 @@ _HTML = """<!DOCTYPE html>
           addChatMsg(m.text, m.role === 'user' ? 'user' : 'agent');
         }
         _chatIdx = serverChat.length;
+
+        // Teleop frame counter
+        if (d.recording) {
+          const f = d.frames ?? 0;
+          const el = document.getElementById('tp-status');
+          el.style.color = '#f44336';
+          el.textContent = `● recording — ${f} frames`;
+        }
       } catch(_) {}
       setTimeout(poll, 1000);
     }
@@ -521,6 +653,10 @@ class _ServerState:
         self.goal         = ""            # latest goal set via /chat
         self.movement     = {"fwd": 0, "turn": 0}  # latest joystick from /chat
         self.chat_history: list = []      # [{"role","text","ts"}] — agent-pushed messages
+        # Teleop data collection
+        self.teleop_waypoints: list = []  # [[nx,ny],...] normalised image coords
+        self.teleop_episode_cmd: str = "" # "start"|"stop"|"discard" — single-consume
+        self.teleop_episode_meta: dict = {}
 
     @property
     def agent_connected(self) -> bool:
@@ -602,14 +738,20 @@ class WebServer:
         with self._state.lock:
             self._state.touch()
             self._state.status = data
-            paused = self._state.paused
-            goal   = self._state.goal
-            mv     = dict(self._state.movement)
-            # Movement is NOT single-consumed here — the publisher reads it every
-            # cycle and drives continuously. The browser sends fwd:0,turn:0 on
-            # release; the publisher's 350 ms safety expiry stops the rover if
-            # the browser goes silent before sending the release.
-        return jsonify({"ok": True, "paused": paused, "goal": goal, "movement": mv})
+            paused   = self._state.paused
+            goal     = self._state.goal
+            mv       = dict(self._state.movement)
+            # Teleop fields — episode_cmd is single-consume (cleared after read)
+            t_wpts   = list(self._state.teleop_waypoints)
+            t_cmd    = self._state.teleop_episode_cmd
+            t_meta   = dict(self._state.teleop_episode_meta)
+            self._state.teleop_episode_cmd = ""
+        return jsonify({
+            "ok": True, "paused": paused, "goal": goal, "movement": mv,
+            "teleop_waypoints": t_wpts,
+            "teleop_episode_cmd": t_cmd,
+            "teleop_episode_meta": t_meta,
+        })
 
     def _agent_chat(self):
         """POST /agent/chat  body: {"role": "agent", "text": "..."}"""
@@ -673,6 +815,21 @@ class WebServer:
                 return jsonify({"ok": True, "paused": paused,
                                 "message": "Paused" if paused else "Resumed"})
             return jsonify({"ok": False, "message": f"Unknown action: {action}"}), 400
+
+        elif msg_type == "waypoints":
+            wpts = data.get("waypoints", [])
+            with self._state.lock:
+                self._state.teleop_waypoints = wpts
+            return jsonify({"ok": True, "count": len(wpts)})
+
+        elif msg_type == "episode_cmd":
+            cmd  = data.get("cmd", "")
+            meta = data.get("meta", {})
+            with self._state.lock:
+                self._state.teleop_episode_cmd  = cmd
+                self._state.teleop_episode_meta = meta
+            log.info("Teleop episode cmd: %s", cmd)
+            return jsonify({"ok": True})
 
         return jsonify({"ok": False, "message": f"Unknown type: {msg_type}"}), 400
 
