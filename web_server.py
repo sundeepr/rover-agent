@@ -15,9 +15,15 @@ Then start the agent:
 """
 
 import argparse
+import itertools
+import json
 import logging
+import os
+import subprocess
+import sys
 import time
 import threading
+from collections import deque
 from pathlib import Path
 
 import cv2
@@ -29,6 +35,158 @@ log = logging.getLogger("rover.web_server")
 # How long without a push before the agent is considered disconnected.
 AGENT_TIMEOUT_S = 10.0
 
+# ── Agent configuration ───────────────────────────────────────────────────────
+
+_CONFIG_FILE = Path("rover_config.json")
+
+_DEFAULT_CONFIG: dict = {
+    "device":             0,
+    "down_device":        "",
+    "strategy":           "teleop",
+    "rover":              "atlas",
+    "rover_port":         "/dev/ttyACM0",
+    "interval":           0.1,
+    "dry_run":            False,
+    "web_server":         "http://localhost:5001",
+    "control_port":       5002,
+    "line_vel":           40,
+    "line_kp":            2000.0,
+    "line_color":         "black",
+    "dataset_dir":        "./dataset",
+    "teleop_instruction": "",
+    "teleop_fps":         10,
+    "ollama_model":       "qwen2.5vl",
+    "ollama_server":      "http://localhost:11434",
+    "goal":               "",
+    "cloud_server":       "ws://localhost:8765",
+    "omnivla_velocity":   25,
+    "crop_type":          "plant",
+    "fwd_vel":            80,
+    "steering_kp":        0.003,
+}
+
+
+def _load_config() -> dict:
+    if _CONFIG_FILE.exists():
+        try:
+            return {**_DEFAULT_CONFIG, **json.loads(_CONFIG_FILE.read_text())}
+        except Exception:
+            pass
+    return dict(_DEFAULT_CONFIG)
+
+
+def _save_config(cfg: dict) -> None:
+    _CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
+
+
+def _build_agent_cmd(config: dict) -> list[str]:
+    """Turn a config dict into rover_agent.py argv."""
+    here = Path(__file__).parent
+    cmd  = [sys.executable, str(here / "rover_agent.py")]
+    cmd += ["--device",       str(config.get("device", 0))]
+    cmd += ["--strategy",     str(config.get("strategy", "teleop"))]
+    cmd += ["--rover",        str(config.get("rover", "atlas"))]
+    cmd += ["--interval",     str(config.get("interval", 0.1))]
+    cmd += ["--web-server",   str(config.get("web_server", "http://localhost:5001"))]
+    cmd += ["--control-port", str(config.get("control_port", 5002))]
+
+    rover = config.get("rover", "atlas")
+    port  = str(config.get("rover_port", "")).strip()
+    if port:
+        cmd += [f"--{rover}-port", port]
+
+    if config.get("dry_run"):
+        cmd += ["--dry-run"]
+
+    dd = str(config.get("down_device", "")).strip()
+    if dd:
+        cmd += ["--down-device", dd]
+
+    strategy = config.get("strategy", "teleop")
+    if strategy == "line_follow":
+        cmd += ["--line-vel",   str(config.get("line_vel",   40)),
+                "--line-kp",    str(config.get("line_kp",    2000.0)),
+                "--line-color", str(config.get("line_color", "black"))]
+    elif strategy == "teleop":
+        cmd += ["--dataset-dir",        str(config.get("dataset_dir",        "./dataset")),
+                "--teleop-instruction", str(config.get("teleop_instruction", "")),
+                "--teleop-fps",         str(config.get("teleop_fps",         10))]
+    elif strategy == "ollama":
+        cmd += ["--ollama-model",  str(config.get("ollama_model",  "qwen2.5vl")),
+                "--ollama-server", str(config.get("ollama_server", "http://localhost:11434"))]
+    elif strategy in ("cloud_omnivla", "omnivla_full"):
+        cmd += ["--cloud-server",     str(config.get("cloud_server",     "ws://localhost:8765")),
+                "--omnivla-velocity", str(config.get("omnivla_velocity", 25))]
+    elif strategy in ("crop_row", "hough_crop_row"):
+        cmd += ["--crop-type",   str(config.get("crop_type",   "plant")),
+                "--fwd-vel",     str(config.get("fwd_vel",     80)),
+                "--steering-kp", str(config.get("steering_kp", 0.003))]
+
+    goal = str(config.get("goal", "")).strip()
+    if goal:
+        cmd += ["--goal", goal]
+    return cmd
+
+
+class _AgentRunner:
+    """Manages the rover_agent.py subprocess and buffers its stdout/stderr."""
+
+    def __init__(self):
+        self._proc:       subprocess.Popen | None = None
+        self._start_time: float = 0.0
+        self._log_buf:    deque  = deque(maxlen=500)
+        self._lock        = threading.Lock()
+
+    def start(self, config: dict) -> None:
+        self.stop()
+        cmd = _build_agent_cmd(config)
+        log.info("Starting agent: %s", " ".join(cmd))
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1,
+        )
+        with self._lock:
+            self._proc       = proc
+            self._start_time = time.time()
+        threading.Thread(target=self._drain, args=(proc,), daemon=True).start()
+
+    def stop(self) -> None:
+        with self._lock:
+            proc       = self._proc
+            self._proc = None
+        if proc and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+    def status(self) -> dict:
+        with self._lock:
+            proc    = self._proc
+            running = proc is not None and proc.poll() is None
+            pid     = proc.pid if running else None
+            uptime  = round(time.time() - self._start_time, 1) if running else 0.0
+        return {"running": running, "pid": pid, "uptime_s": uptime}
+
+    def logs(self, n: int = 300) -> list[dict]:
+        with self._lock:
+            return list(itertools.islice(reversed(self._log_buf), n))[::-1]
+
+    def _drain(self, proc: subprocess.Popen) -> None:
+        try:
+            for line in proc.stdout:
+                with self._lock:
+                    self._log_buf.append({"ts": time.time(), "text": line.rstrip()})
+        except Exception:
+            pass
+        proc.wait()
+        log.info("Agent process exited (rc=%s)", proc.returncode)
+
+
+# Module-level runner singleton (used by WebServer route handlers)
+_runner = _AgentRunner()
+
 # ── HTML template ──────────────────────────────────────────────────────────────
 
 _HTML = """<!DOCTYPE html>
@@ -39,15 +197,72 @@ _HTML = """<!DOCTYPE html>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: #0f0f0f; color: #e0e0e0; font-family: monospace;
-           display: flex; flex-direction: column; height: 100vh; }
-    header { padding: 8px 16px; background: #1a1a1a; border-bottom: 1px solid #333;
-             font-size: 1.1em; letter-spacing: 0.05em; color: #7ecfff; flex-shrink: 0;
-             display: flex; align-items: center; gap: 16px; }
+           display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+    header { padding: 6px 16px; background: #1a1a1a; border-bottom: 1px solid #333;
+             font-size: 1.05em; letter-spacing: 0.05em; color: #7ecfff; flex-shrink: 0;
+             display: flex; align-items: center; gap: 12px; }
     #agent-indicator { font-size: 0.75em; margin-left: auto; display: flex;
                        align-items: center; gap: 6px; }
     #agent-dot { font-size: 1.1em; }
     #agent-dot.connected    { color: #4caf50; }
     #agent-dot.disconnected { color: #f44336; }
+
+    /* ── Tab nav ── */
+    .tab-nav { display: flex; background: #141414; border-bottom: 1px solid #2a2a2a;
+               flex-shrink: 0; padding: 0 8px; }
+    .tab-btn { padding: 7px 20px; background: transparent; border: none; color: #555;
+               cursor: pointer; font-family: monospace; font-size: 0.85em;
+               border-bottom: 2px solid transparent; transition: color 0.15s; letter-spacing: 0.04em; }
+    .tab-btn:hover { color: #aaa; }
+    .tab-btn.active { color: #7ecfff; border-bottom-color: #7ecfff; }
+    .tab-pane { display: none; flex: 1; overflow: hidden; min-height: 0; }
+    .tab-pane.active { display: flex; }
+
+    /* ── Configure tab ── */
+    #tab-configure { flex-direction: column; overflow-y: auto; }
+    .cfg-scroll { flex: 1; overflow-y: auto; display: flex; flex-direction: column;
+                  align-items: center; padding: 16px 20px 30px; }
+    .cfg-form { width: 100%; max-width: 860px; display: flex; flex-direction: column; gap: 14px; }
+    .cfg-agent-bar { display: flex; align-items: center; gap: 8px; padding: 12px 16px;
+                     background: #141414; border: 1px solid #252525; border-radius: 6px; }
+    #runner-badge { margin-left: auto; font-size: 0.82em; color: #555; }
+    .cfg-section { border: 1px solid #252525; border-radius: 6px; overflow: hidden; background: #111; }
+    .cfg-section-title { padding: 7px 14px; background: #1a1a1a; font-size: 0.7em;
+                         text-transform: uppercase; letter-spacing: 0.1em; color: #555;
+                         border-bottom: 1px solid #252525; }
+    .cfg-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px 14px; }
+    .cfg-label { font-size: 0.8em; color: #888; white-space: nowrap; min-width: 110px; }
+    .cfg-input { background: #0a0a0a; border: 1px solid #333; color: #e0e0e0;
+                 padding: 5px 9px; font-family: monospace; font-size: 0.85em;
+                 border-radius: 4px; outline: none; }
+    .cfg-input:focus { border-color: #7ecfff; }
+    .cfg-input[type=number] { width: 80px; }
+    select.cfg-input { cursor: pointer; }
+    .cfg-check-row { display: flex; align-items: center; gap: 6px; font-size: 0.8em; color: #888; cursor: pointer; }
+    .btn-start   { padding: 7px 18px; background: #1b5e20; border: none; color: #a5d6a7;
+                   font-family: monospace; font-size: 0.88em; border-radius: 4px; cursor: pointer; font-weight: bold; }
+    .btn-start:hover   { background: #2e7d32; }
+    .btn-stop    { padding: 7px 18px; background: #7f0000; border: none; color: #ef9a9a;
+                   font-family: monospace; font-size: 0.88em; border-radius: 4px; cursor: pointer; font-weight: bold; }
+    .btn-stop:hover    { background: #b71c1c; }
+    .btn-restart { padding: 7px 14px; background: #212121; border: 1px solid #444;
+                   color: #aaa; font-family: monospace; font-size: 0.82em; border-radius: 4px; cursor: pointer; }
+    .btn-restart:hover { background: #333; }
+
+    /* ── Logs tab ── */
+    #tab-logs { flex-direction: column; padding: 10px; gap: 8px; }
+    .log-toolbar { display: flex; align-items: center; gap: 8px; flex-shrink: 0; font-size: 0.8em; color: #666; }
+    .log-toolbar button { padding: 4px 12px; background: #1a1a1a; border: 1px solid #333; color: #aaa;
+                          font-family: monospace; font-size: 0.85em; border-radius: 4px; cursor: pointer; }
+    .log-toolbar button:hover { background: #2a2a2a; }
+    #log-output { flex: 1; overflow-y: auto; overflow-x: auto; background: #060606; border: 1px solid #1e1e1e;
+                  border-radius: 4px; padding: 10px 14px; font-family: monospace; font-size: 0.78em;
+                  color: #7a7a7a; white-space: pre; min-height: 0; }
+    #log-output .log-err  { color: #ef9a9a; }
+    #log-output .log-warn { color: #ffcc80; }
+    #log-output .log-info { color: #8a8a8a; }
+
+    /* ── Live tab (existing layout) ── */
     .main { display: flex; flex: 1; overflow: hidden; }
 
     /* Content area */
@@ -146,6 +361,171 @@ _HTML = """<!DOCTYPE html>
     </div>
   </header>
 
+  <div class="tab-nav">
+    <button class="tab-btn active" data-tab="configure" onclick="switchTab('configure')">&#x2699; Configure</button>
+    <button class="tab-btn" data-tab="live"      onclick="switchTab('live')">&#x1F4F9; Live</button>
+    <button class="tab-btn" data-tab="logs"      onclick="switchTab('logs')">&#x1F4DC; Logs</button>
+  </div>
+
+  <!-- ── Configure tab ──────────────────────────────────────────────────── -->
+  <div id="tab-configure" class="tab-pane active">
+    <div class="cfg-scroll">
+      <div class="cfg-form">
+
+        <!-- Agent control -->
+        <div class="cfg-agent-bar">
+          <button class="btn-start"   onclick="agentStart()">&#x25B6; Start</button>
+          <button class="btn-stop"    onclick="agentStop()">&#x25A0; Stop</button>
+          <button class="btn-restart" onclick="serverRestart()">&#x21BA; Restart Server</button>
+          <span id="runner-badge">&#x25CB; stopped</span>
+        </div>
+
+        <!-- Cameras -->
+        <div class="cfg-section">
+          <div class="cfg-section-title">&#x1F4F7; Cameras</div>
+          <div class="cfg-row">
+            <label class="cfg-label">Main device</label>
+            <input class="cfg-input" id="c-device" type="number" value="0" style="width:70px;" title="Camera index passed to cv2.VideoCapture">
+            <label class="cfg-label" style="margin-left:16px;">Down device</label>
+            <input class="cfg-input" id="c-down-device" type="text" placeholder="blank = disabled" style="width:160px;">
+          </div>
+        </div>
+
+        <!-- Rover -->
+        <div class="cfg-section">
+          <div class="cfg-section-title">&#x1F916; Rover</div>
+          <div class="cfg-row">
+            <label class="cfg-label">Type</label>
+            <select class="cfg-input" id="c-rover" style="width:110px;">
+              <option value="atlas">atlas</option>
+              <option value="roomba">roomba</option>
+            </select>
+            <label class="cfg-label" style="margin-left:16px;">Serial port</label>
+            <input class="cfg-input" id="c-rover-port" type="text" placeholder="/dev/ttyACM0" style="width:180px;">
+            <label class="cfg-check-row" style="margin-left:16px;">
+              <input type="checkbox" id="c-dry-run"> Dry run
+            </label>
+          </div>
+        </div>
+
+        <!-- Strategy -->
+        <div class="cfg-section">
+          <div class="cfg-section-title">&#x1F9E0; Strategy</div>
+          <div class="cfg-row">
+            <label class="cfg-label">Strategy</label>
+            <select class="cfg-input" id="c-strategy" style="width:180px;" onchange="onStrategyChange()">
+              <option value="teleop">teleop</option>
+              <option value="line_follow">line_follow</option>
+              <option value="ollama">ollama</option>
+              <option value="gemini">gemini</option>
+              <option value="cloud_omnivla">cloud_omnivla</option>
+              <option value="omnivla_full">omnivla_full</option>
+              <option value="crop_row">crop_row</option>
+              <option value="hough_crop_row">hough_crop_row</option>
+              <option value="omnivla">omnivla</option>
+            </select>
+            <label class="cfg-label" style="margin-left:16px;">Interval</label>
+            <input class="cfg-input" id="c-interval" type="number" step="0.05" value="0.1" style="width:75px;">
+            <span style="font-size:0.8em;color:#555;">s between queries</span>
+          </div>
+
+          <!-- line_follow params -->
+          <div class="cfg-strategy-params" id="sp-line_follow" style="display:none; border-top:1px solid #1e1e1e;">
+            <div class="cfg-row">
+              <label class="cfg-label">Velocity</label>
+              <input class="cfg-input" id="c-line-vel" type="number" value="40" style="width:75px;">
+              <span style="font-size:0.8em;color:#555;">mm/s</span>
+              <label class="cfg-label" style="margin-left:16px;">Steering Kp</label>
+              <input class="cfg-input" id="c-line-kp" type="number" value="2000" style="width:90px;">
+              <label class="cfg-label" style="margin-left:16px;">Color</label>
+              <select class="cfg-input" id="c-line-color" style="width:110px;">
+                <option value="black">black</option>
+                <option value="blue">blue</option>
+                <option value="orange">orange</option>
+                <option value="red">red</option>
+                <option value="grey">grey</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- teleop params -->
+          <div class="cfg-strategy-params" id="sp-teleop" style="display:none; border-top:1px solid #1e1e1e;">
+            <div class="cfg-row">
+              <label class="cfg-label">Dataset dir</label>
+              <input class="cfg-input" id="c-dataset-dir" type="text" value="./dataset" style="width:180px;">
+              <label class="cfg-label" style="margin-left:16px;">FPS</label>
+              <input class="cfg-input" id="c-teleop-fps" type="number" value="10" style="width:65px;">
+            </div>
+            <div class="cfg-row" style="padding-top:0;">
+              <label class="cfg-label">Instruction</label>
+              <input class="cfg-input" id="c-teleop-instruction" type="text"
+                     placeholder="e.g. drive between the crop rows" style="flex:1;min-width:200px;">
+            </div>
+          </div>
+
+          <!-- ollama params -->
+          <div class="cfg-strategy-params" id="sp-ollama" style="display:none; border-top:1px solid #1e1e1e;">
+            <div class="cfg-row">
+              <label class="cfg-label">Model</label>
+              <input class="cfg-input" id="c-ollama-model" type="text" value="qwen2.5vl" style="width:160px;">
+              <label class="cfg-label" style="margin-left:16px;">Server</label>
+              <input class="cfg-input" id="c-ollama-server" type="text" value="http://localhost:11434" style="width:220px;">
+            </div>
+          </div>
+
+          <!-- cloud_omnivla / omnivla_full params -->
+          <div class="cfg-strategy-params" id="sp-omnivla" style="display:none; border-top:1px solid #1e1e1e;">
+            <div class="cfg-row">
+              <label class="cfg-label">Cloud server</label>
+              <input class="cfg-input" id="c-cloud-server" type="text" value="ws://localhost:8765" style="width:230px;">
+              <label class="cfg-label" style="margin-left:16px;">Velocity</label>
+              <input class="cfg-input" id="c-omnivla-velocity" type="number" value="25" style="width:75px;">
+              <span style="font-size:0.8em;color:#555;">mm/s</span>
+            </div>
+          </div>
+
+          <!-- crop_row / hough_crop_row params -->
+          <div class="cfg-strategy-params" id="sp-crop_row" style="display:none; border-top:1px solid #1e1e1e;">
+            <div class="cfg-row">
+              <label class="cfg-label">Crop type</label>
+              <input class="cfg-input" id="c-crop-type" type="text" value="plant" style="width:110px;">
+              <label class="cfg-label" style="margin-left:16px;">Fwd velocity</label>
+              <input class="cfg-input" id="c-fwd-vel" type="number" value="80" style="width:75px;">
+              <span style="font-size:0.8em;color:#555;">mm/s</span>
+              <label class="cfg-label" style="margin-left:16px;">Steering Kp</label>
+              <input class="cfg-input" id="c-steering-kp" type="number" step="0.001" value="0.003" style="width:90px;">
+            </div>
+          </div>
+        </div>
+
+        <!-- Goal -->
+        <div class="cfg-section">
+          <div class="cfg-section-title">&#x1F3AF; Goal (optional)</div>
+          <div class="cfg-row">
+            <label class="cfg-label">Goal text</label>
+            <input class="cfg-input" id="c-goal" type="text"
+                   placeholder="e.g. Follow the dirt path" style="flex:1;min-width:200px;">
+          </div>
+        </div>
+
+      </div><!-- /cfg-form -->
+    </div><!-- /cfg-scroll -->
+  </div><!-- /tab-configure -->
+
+  <!-- ── Logs tab ───────────────────────────────────────────────────────── -->
+  <div id="tab-logs" class="tab-pane">
+    <div class="log-toolbar">
+      <span>Agent output</span>
+      <button onclick="clearLogDisplay()">Clear display</button>
+      <label class="cfg-check-row">
+        <input type="checkbox" id="log-autoscroll" checked onchange="_autoScroll=this.checked"> Auto-scroll
+      </label>
+    </div>
+    <pre id="log-output">(no output yet)</pre>
+  </div>
+
+  <!-- ── Live tab ───────────────────────────────────────────────────────── -->
+  <div id="tab-live" class="tab-pane">
   <div class="main">
     <div class="content-area">
 
@@ -256,8 +636,183 @@ _HTML = """<!DOCTYPE html>
       </div>
     </div>
   </div>
+  </div><!-- /main (live) -->
+  </div><!-- /tab-live -->
 
   <script>
+    // ── Tab switching ─────────────────────────────────────────────────────────
+    let _logsActive = false;
+    let _autoScroll = true;
+
+    function switchTab(name) {
+      document.querySelectorAll('.tab-pane').forEach(el => el.classList.remove('active'));
+      document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+      document.getElementById('tab-' + name).classList.add('active');
+      document.querySelector('.tab-btn[data-tab="' + name + '"]').classList.add('active');
+      _logsActive = (name === 'logs');
+      if (_logsActive) pollLogs();
+    }
+
+    // ── Configure: strategy param visibility ─────────────────────────────────
+    const _strategyParamMap = {
+      line_follow:    ['sp-line_follow'],
+      teleop:         ['sp-teleop'],
+      ollama:         ['sp-ollama'],
+      cloud_omnivla:  ['sp-omnivla'],
+      omnivla_full:   ['sp-omnivla'],
+      crop_row:       ['sp-crop_row'],
+      hough_crop_row: ['sp-crop_row'],
+    };
+
+    function onStrategyChange() {
+      const strategy = document.getElementById('c-strategy').value;
+      document.querySelectorAll('.cfg-strategy-params').forEach(el => el.style.display = 'none');
+      (_strategyParamMap[strategy] || []).forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.style.display = '';
+      });
+    }
+
+    // ── Configure: collect / populate ────────────────────────────────────────
+    function collectConfig() {
+      return {
+        device:             parseInt(document.getElementById('c-device').value) || 0,
+        down_device:        document.getElementById('c-down-device').value.trim(),
+        strategy:           document.getElementById('c-strategy').value,
+        rover:              document.getElementById('c-rover').value,
+        rover_port:         document.getElementById('c-rover-port').value.trim(),
+        interval:           parseFloat(document.getElementById('c-interval').value) || 0.1,
+        dry_run:            document.getElementById('c-dry-run').checked,
+        web_server:         'http://' + location.hostname + ':5001',
+        control_port:       5002,
+        line_vel:           parseInt(document.getElementById('c-line-vel').value) || 40,
+        line_kp:            parseFloat(document.getElementById('c-line-kp').value) || 2000,
+        line_color:         document.getElementById('c-line-color').value,
+        dataset_dir:        document.getElementById('c-dataset-dir').value || './dataset',
+        teleop_instruction: document.getElementById('c-teleop-instruction').value,
+        teleop_fps:         parseInt(document.getElementById('c-teleop-fps').value) || 10,
+        ollama_model:       document.getElementById('c-ollama-model').value,
+        ollama_server:      document.getElementById('c-ollama-server').value,
+        goal:               document.getElementById('c-goal').value.trim(),
+        cloud_server:       document.getElementById('c-cloud-server').value,
+        omnivla_velocity:   parseInt(document.getElementById('c-omnivla-velocity').value) || 25,
+        crop_type:          document.getElementById('c-crop-type').value,
+        fwd_vel:            parseInt(document.getElementById('c-fwd-vel').value) || 80,
+        steering_kp:        parseFloat(document.getElementById('c-steering-kp').value) || 0.003,
+      };
+    }
+
+    function populateConfig(cfg) {
+      const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v ?? el.value; };
+      const chk = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
+      set('c-device',             cfg.device ?? 0);
+      set('c-down-device',        cfg.down_device ?? '');
+      set('c-strategy',           cfg.strategy ?? 'teleop');
+      set('c-rover',              cfg.rover ?? 'atlas');
+      set('c-rover-port',         cfg.rover_port ?? '');
+      set('c-interval',           cfg.interval ?? 0.1);
+      chk('c-dry-run',            cfg.dry_run);
+      set('c-line-vel',           cfg.line_vel ?? 40);
+      set('c-line-kp',            cfg.line_kp ?? 2000);
+      set('c-line-color',         cfg.line_color ?? 'black');
+      set('c-dataset-dir',        cfg.dataset_dir ?? './dataset');
+      set('c-teleop-instruction', cfg.teleop_instruction ?? '');
+      set('c-teleop-fps',         cfg.teleop_fps ?? 10);
+      set('c-ollama-model',       cfg.ollama_model ?? 'qwen2.5vl');
+      set('c-ollama-server',      cfg.ollama_server ?? 'http://localhost:11434');
+      set('c-goal',               cfg.goal ?? '');
+      set('c-cloud-server',       cfg.cloud_server ?? 'ws://localhost:8765');
+      set('c-omnivla-velocity',   cfg.omnivla_velocity ?? 25);
+      set('c-crop-type',          cfg.crop_type ?? 'plant');
+      set('c-fwd-vel',            cfg.fwd_vel ?? 80);
+      set('c-steering-kp',        cfg.steering_kp ?? 0.003);
+      onStrategyChange();
+    }
+
+    async function loadConfig() {
+      try {
+        const r = await fetch('/api/config');
+        populateConfig(await r.json());
+      } catch(_) {}
+    }
+
+    // ── Agent start / stop / restart ──────────────────────────────────────────
+    async function agentStart() {
+      const cfg = collectConfig();
+      await fetch('/api/config', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(cfg),
+      });
+      const r = await fetch('/api/agent/start', {method: 'POST'});
+      if (r.ok) switchTab('logs');
+    }
+
+    async function agentStop() {
+      await fetch('/api/agent/stop', {method: 'POST'});
+    }
+
+    async function serverRestart() {
+      if (!confirm('Restart the web server? The page will reconnect automatically.')) return;
+      document.getElementById('runner-badge').textContent = '⟳ restarting…';
+      fetch('/api/server/restart', {method: 'POST'}).catch(() => {});
+      setTimeout(async function poll() {
+        try { await fetch('/api/agent/status'); location.reload(); }
+        catch(_) { setTimeout(poll, 600); }
+      }, 1200);
+    }
+
+    // ── Runner status badge (2 s poll) ────────────────────────────────────────
+    async function pollRunnerStatus() {
+      try {
+        const r = await fetch('/api/agent/status');
+        const s = await r.json();
+        const badge = document.getElementById('runner-badge');
+        if (s.running) {
+          badge.style.color = '#4caf50';
+          badge.textContent = '● running — PID ' + s.pid + '  (' + s.uptime_s + 's)';
+        } else {
+          badge.style.color = '#666';
+          badge.textContent = '○ stopped';
+        }
+      } catch(_) {}
+    }
+    setInterval(pollRunnerStatus, 2000);
+    pollRunnerStatus();
+
+    // ── Log tab ───────────────────────────────────────────────────────────────
+    let _logDisplayCleared = false;
+
+    async function pollLogs() {
+      if (!_logsActive) return;
+      try {
+        const r = await fetch('/api/agent/logs?n=300');
+        const d = await r.json();
+        const el = document.getElementById('log-output');
+        if (_logDisplayCleared) return;
+        if (!d.lines || d.lines.length === 0) {
+          el.textContent = '(no output yet — start the agent first)';
+          return;
+        }
+        el.textContent = d.lines.map(l => {
+          const ts = new Date(l.ts * 1000).toLocaleTimeString();
+          return '[' + ts + '] ' + l.text;
+        }).join('\n');
+        if (_autoScroll) el.scrollTop = el.scrollHeight;
+      } catch(_) {}
+    }
+    setInterval(pollLogs, 1000);
+
+    function clearLogDisplay() {
+      document.getElementById('log-output').textContent = '(display cleared — agent still running)';
+      _logDisplayCleared = true;
+      setTimeout(() => { _logDisplayCleared = false; }, 2000);
+    }
+
+    // ── Init ──────────────────────────────────────────────────────────────────
+    document.addEventListener('DOMContentLoaded', () => {
+      loadConfig();
+    });
+
     // ── Teleop waypoint canvas ────────────────────────────────────────────────
     const _waypoints = [];  // [{nx, ny}, ...]
 
@@ -776,6 +1331,14 @@ class WebServer:
         app.add_url_rule("/agent/chat",             "agent_chat",   self._agent_chat,   methods=["POST"])
         app.add_url_rule("/logs",                   "list_logs",    self._list_logs)
         app.add_url_rule("/logs/<path:filename>",   "dl_log",       self._download_log)
+        # ── Agent runner API ──
+        app.add_url_rule("/api/config",             "api_cfg_get",  self._api_config_get)
+        app.add_url_rule("/api/config",             "api_cfg_post", self._api_config_post,      methods=["POST"])
+        app.add_url_rule("/api/agent/start",        "api_ag_start", self._api_agent_start,      methods=["POST"])
+        app.add_url_rule("/api/agent/stop",         "api_ag_stop",  self._api_agent_stop,       methods=["POST"])
+        app.add_url_rule("/api/agent/status",       "api_ag_stat",  self._api_agent_status_run)
+        app.add_url_rule("/api/agent/logs",         "api_ag_logs",  self._api_agent_logs)
+        app.add_url_rule("/api/server/restart",     "api_srv_rst",  self._api_server_restart,   methods=["POST"])
 
     # ── Agent push endpoints ──────────────────────────────────────────────────
 
@@ -929,6 +1492,38 @@ class WebServer:
             return "Not found", 404
         return send_file(log_path.resolve(), as_attachment=True, download_name=filename)
 
+    # ── Agent runner API ──────────────────────────────────────────────────────
+
+    def _api_config_get(self):
+        return jsonify(_load_config())
+
+    def _api_config_post(self):
+        cfg = request.get_json(force=True) or {}
+        merged = {**_DEFAULT_CONFIG, **cfg}
+        _save_config(merged)
+        return jsonify({"ok": True})
+
+    def _api_agent_start(self):
+        cfg = _load_config()
+        _runner.start(cfg)
+        return jsonify({"ok": True})
+
+    def _api_agent_stop(self):
+        _runner.stop()
+        return jsonify({"ok": True})
+
+    def _api_agent_status_run(self):
+        return jsonify(_runner.status())
+
+    def _api_agent_logs(self):
+        n = int(request.args.get("n", 300))
+        return jsonify({"lines": _runner.logs(n)})
+
+    def _api_server_restart(self):
+        _runner.stop()
+        time.sleep(0.3)
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
     # ── MJPEG stream ──────────────────────────────────────────────────────────
 
     def _stream(self, get_jpeg_fn, placeholder_text: str):
@@ -971,7 +1566,10 @@ def main():
 
     Path("logs").mkdir(exist_ok=True)
     server = WebServer(log_dir=Path("logs"))
-    server.run(host=args.host, port=args.port)
+    try:
+        server.run(host=args.host, port=args.port)
+    finally:
+        _runner.stop()
 
 
 if __name__ == "__main__":

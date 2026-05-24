@@ -32,3 +32,6 @@ captures/
 # OS
 .DS_Store
 Thumbs.db
+
+# Rover web UI config (auto-generated, not committed)
+rover_config.json
