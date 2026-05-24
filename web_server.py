@@ -738,17 +738,32 @@ _HTML = """<!DOCTYPE html>
 
     // ── Agent start / stop / restart ──────────────────────────────────────────
     async function agentStart() {
-      const cfg = collectConfig();
-      await fetch('/api/config', {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(cfg),
-      });
-      const r = await fetch('/api/agent/start', {method: 'POST'});
-      if (r.ok) switchTab('logs');
+      const btn = document.querySelector('.btn-start');
+      btn.textContent = '⟳ Starting…';
+      btn.disabled = true;
+      switchTab('logs');   // go to Logs immediately so user sees output (or errors)
+      try {
+        const cfg = collectConfig();
+        await fetch('/api/config', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(cfg),
+        });
+        const r = await fetch('/api/agent/start', {method: 'POST'});
+        if (!r.ok) {
+          const d = await r.json().catch(() => ({}));
+          const el = document.getElementById('log-output');
+          el.textContent = '[ERROR] Server returned ' + r.status + ': ' + (d.error || 'unknown');
+        }
+      } catch(e) {
+        document.getElementById('log-output').textContent = '[ERROR] ' + e;
+      } finally {
+        btn.textContent = '▶ Start';
+        btn.disabled = false;
+      }
     }
 
     async function agentStop() {
-      await fetch('/api/agent/stop', {method: 'POST'});
+      await fetch('/api/agent/stop', {method: 'POST'}).catch(() => {});
     }
 
     async function serverRestart() {
@@ -1504,9 +1519,13 @@ class WebServer:
         return jsonify({"ok": True})
 
     def _api_agent_start(self):
-        cfg = _load_config()
-        _runner.start(cfg)
-        return jsonify({"ok": True})
+        try:
+            cfg = _load_config()
+            _runner.start(cfg)
+            return jsonify({"ok": True})
+        except Exception as e:
+            log.exception("Failed to start agent")
+            return jsonify({"ok": False, "error": str(e)}), 500
 
     def _api_agent_stop(self):
         _runner.stop()
