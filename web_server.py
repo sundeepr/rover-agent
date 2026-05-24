@@ -236,10 +236,10 @@ _HTML = """<!DOCTYPE html>
     /* ── Tab nav ── */
     .tab-nav { display: flex; background: #141414; border-bottom: 1px solid #2a2a2a;
                flex-shrink: 0; padding: 0 8px; }
-    .tab-btn { padding: 7px 20px; background: transparent; border: none; color: #555;
+    .tab-btn { padding: 7px 20px; background: transparent; border: none; color: #999;
                cursor: pointer; font-family: monospace; font-size: 0.85em;
                border-bottom: 2px solid transparent; transition: color 0.15s; letter-spacing: 0.04em; }
-    .tab-btn:hover { color: #aaa; }
+    .tab-btn:hover { color: #ddd; }
     .tab-btn.active { color: #7ecfff; border-bottom-color: #7ecfff; }
     .tab-pane { display: none; flex: 1; overflow: hidden; min-height: 0; }
     .tab-pane.active { display: flex; }
@@ -662,10 +662,22 @@ _HTML = """<!DOCTYPE html>
       </div>
     </div>
   </div>
-  </div><!-- /main (live) -->
   </div><!-- /tab-live -->
 
   <script>
+    // Surface any JS parse/runtime errors visibly (remove after debugging)
+    window.onerror = function(msg, src, line, col, err) {
+      var el = document.getElementById('js-error-banner');
+      if (!el) {
+        el = document.createElement('div');
+        el.id = 'js-error-banner';
+        el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:#7f0000;color:#fff;padding:8px 16px;font-family:monospace;font-size:0.85em;';
+        document.body.prepend(el);
+      }
+      el.textContent = 'JS ERROR: ' + msg + '  [' + src + ':' + line + ':' + col + ']';
+      return false;
+    };
+
     // ── Tab switching ─────────────────────────────────────────────────────────
     let _logsActive = false;
     let _autoScroll = true;
@@ -1432,7 +1444,9 @@ class WebServer:
     # ── Browser endpoints ─────────────────────────────────────────────────────
 
     def _index(self):
-        return render_template_string(_HTML)
+        # Return raw HTML — no Jinja2 processing needed (avoids template syntax conflicts)
+        from flask import Response as _Resp
+        return _Resp(_HTML, mimetype="text/html")
 
     def _video_realtime(self):
         return Response(
