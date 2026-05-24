@@ -269,6 +269,25 @@ _HTML = """<!DOCTYPE html>
       const ctx = canvas.getContext('2d');
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+      // ── Calibration lines: vertical dashed yellow at 25 / 50 / 75 % ──────
+      ctx.save();
+      ctx.setLineDash([8, 6]);
+      ctx.lineWidth   = 1.5;
+      ctx.strokeStyle = 'rgba(255, 220, 0, 0.85)';
+      ctx.font        = 'bold 11px monospace';
+      ctx.fillStyle   = 'rgba(255, 220, 0, 0.9)';
+      ctx.textBaseline = 'bottom';
+      [1/3, 0.50, 2/3].forEach(frac => {
+        const x = Math.round(frac * canvas.width);
+        ctx.beginPath();
+        ctx.moveTo(x, canvas.height);
+        ctx.lineTo(x, 0);
+        ctx.stroke();
+        ctx.textAlign = frac < 0.5 ? 'left' : frac > 0.5 ? 'right' : 'center';
+        ctx.fillText(Math.round(frac * 100) + '%', x + (frac < 0.5 ? 3 : frac > 0.5 ? -3 : 0), canvas.height - 4);
+      });
+      ctx.restore();
+
       // Fixed anchor at bottom-centre (rover position)
       const ax = canvas.width  / 2;
       const ay = canvas.height;
