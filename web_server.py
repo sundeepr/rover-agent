@@ -137,14 +137,40 @@ class _AgentRunner:
         self._log_buf:    deque  = deque(maxlen=500)
         self._lock        = threading.Lock()
 
+    def _emit(self, text: str) -> None:
+        """Write a synthetic log line into the buffer (visible in Logs tab)."""
+        entry = {"ts": time.time(), "text": text}
+        with self._lock:
+            self._log_buf.append(entry)
+        log.info("[runner] %s", text)
+
     def start(self, config: dict) -> None:
         self.stop()
         cmd = _build_agent_cmd(config)
-        log.info("Starting agent: %s", " ".join(cmd))
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1,
-        )
+        cwd = Path.cwd()
+        agent_path = Path(cmd[1])
+
+        self._emit(f"=== Starting rover_agent ===")
+        self._emit(f"CWD        : {cwd}")
+        self._emit(f"Python     : {cmd[0]}")
+        self._emit(f"Script     : {agent_path}  ({'EXISTS' if agent_path.exists() else 'NOT FOUND'})")
+        self._emit(f"Full cmd   : {' '.join(cmd)}")
+
+        if not agent_path.exists():
+            msg = f"rover_agent.py not found at {agent_path}"
+            self._emit(f"ERROR: {msg}")
+            raise FileNotFoundError(msg)
+
+        try:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1,
+            )
+        except Exception as e:
+            self._emit(f"ERROR: Popen failed — {e}")
+            raise
+
+        self._emit(f"Subprocess started: PID {proc.pid}")
         with self._lock:
             self._proc       = proc
             self._start_time = time.time()
@@ -178,10 +204,10 @@ class _AgentRunner:
             for line in proc.stdout:
                 with self._lock:
                     self._log_buf.append({"ts": time.time(), "text": line.rstrip()})
-        except Exception:
-            pass
-        proc.wait()
-        log.info("Agent process exited (rc=%s)", proc.returncode)
+        except Exception as e:
+            self._emit(f"[drain error] {e}")
+        rc = proc.wait()
+        self._emit(f"=== Agent process exited (rc={rc}) ===")
 
 
 # Module-level runner singleton (used by WebServer route handlers)
