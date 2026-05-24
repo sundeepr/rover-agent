@@ -160,9 +160,10 @@ _HTML = """<!DOCTYPE html>
           <img id="llm-img" src="/video/llm" alt="LLM frame" style="width:100%;display:block;">
           <canvas id="llm-canvas" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></canvas>
         </div>
-        <div class="video-box" id="down-cam-box">
+        <div class="video-box" id="down-cam-box" style="position:relative;">
           <div class="label">&#x1F4F7; Down camera — row centering</div>
-          <img src="/video/down" alt="down camera">
+          <img id="down-img" src="/video/down" alt="down camera" style="width:100%;display:block;">
+          <canvas id="down-canvas" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></canvas>
         </div>
       </div>
 
@@ -373,6 +374,32 @@ _HTML = """<!DOCTYPE html>
       ctx.restore();
     }
     setInterval(_redrawLlmCanvas, 500);
+
+    function _redrawDownCanvas() {
+      const img    = document.getElementById('down-img');
+      const canvas = document.getElementById('down-canvas');
+      canvas.width  = img.offsetWidth;
+      canvas.height = img.offsetHeight;
+      if (!canvas.width || !canvas.height) return;
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const x = Math.round(0.5 * canvas.width);
+      ctx.save();
+      ctx.setLineDash([8, 6]);
+      ctx.lineWidth   = 1.5;
+      ctx.strokeStyle = 'rgba(255, 220, 0, 0.85)';
+      ctx.beginPath();
+      ctx.moveTo(x, canvas.height);
+      ctx.lineTo(x, 0);
+      ctx.stroke();
+      ctx.font         = 'bold 11px monospace';
+      ctx.fillStyle    = 'rgba(255, 220, 0, 0.9)';
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText('50%', x, canvas.height - 4);
+      ctx.restore();
+    }
+    setInterval(_redrawDownCanvas, 500);
 
     function _sendWaypoints() {
       fetch('/chat', {method:'POST', headers:{'Content-Type':'application/json'},
