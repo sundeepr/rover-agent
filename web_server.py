@@ -277,7 +277,7 @@ _HTML = """<!DOCTYPE html>
       ctx.font        = 'bold 11px monospace';
       ctx.fillStyle   = 'rgba(255, 220, 0, 0.9)';
       ctx.textBaseline = 'bottom';
-      [1/3, 0.50, 2/3].forEach(frac => {
+      [0.20, 0.50, 0.80].forEach(frac => {
         const x = Math.round(frac * canvas.width);
         ctx.beginPath();
         ctx.moveTo(x, canvas.height);
