@@ -131,7 +131,7 @@ class InferenceEngine:
         # ── VLA backbone ──────────────────────────────────────────────────────
         self._processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
         self._vla = AutoModelForVision2Seq.from_pretrained(
-            model_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True
+            model_path, torch_dtype=torch.float16, low_cpu_mem_usage=True
         ).to(device)
         self._vla.vision_backbone.set_num_images_in_input(NUM_IMAGES_IN_INPUT)
         self._vla.eval()
@@ -154,7 +154,7 @@ class InferenceEngine:
             input_dim=self._vla.llm_dim,
             hidden_dim=self._vla.llm_dim,
             action_dim=ACTION_DIM,
-        ).to(torch.bfloat16).to(device)
+        ).to(torch.float16).to(device)
         head_ckpt = torch.load(ckpt_head, map_location=device)
         head_ckpt = {k[7:] if k.startswith("module.") else k: v for k, v in head_ckpt.items()}
         self._action_head.load_state_dict(head_ckpt)
@@ -204,7 +204,7 @@ class InferenceEngine:
         cur_tensor = self._processor.image_processor.apply_transform(cur_pil).unsqueeze(0)
         pixel_values = torch.cat(
             [cur_tensor, self._black_goal_tensor], dim=1
-        ).to(torch.bfloat16).to(self._device)
+        ).to(torch.float16).to(self._device)
 
         if goal not in self._goal_cache:
             self._goal_cache[goal] = self._build_input_ids(goal)
@@ -213,11 +213,11 @@ class InferenceEngine:
         labels     = labels.to(self._device)
         attention_mask = input_ids.ne(self._processor.tokenizer.pad_token_id)
 
-        goal_pose   = torch.zeros(1, POSE_DIM, dtype=torch.bfloat16, device=self._device)
-        modality_id = torch.as_tensor([MODALITY_LANG], dtype=torch.float32).to(torch.bfloat16).to(self._device)
+        goal_pose   = torch.zeros(1, POSE_DIM, dtype=torch.float16, device=self._device)
+        modality_id = torch.as_tensor([MODALITY_LANG], dtype=torch.float32).to(torch.float16).to(self._device)
 
         # ── Forward pass (matches run_forward_pass exactly) ───────────────────
-        with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+        with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
             output = self._vla(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -239,7 +239,7 @@ class InferenceEngine:
         actions_hidden_states = (
             text_hidden_states[current_action_mask | next_actions_mask]
             .reshape(1, NUM_ACTIONS_CHUNK * ACTION_DIM, -1)
-            .to(torch.bfloat16)
+            .to(torch.float16)
         )
 
         with torch.no_grad():
