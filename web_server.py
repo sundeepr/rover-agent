@@ -155,9 +155,10 @@ _HTML = """<!DOCTYPE html>
           <img id="live-img" src="/video/realtime" alt="live feed" style="width:100%;display:block;">
           <canvas id="waypoint-canvas" style="position:absolute;top:0;left:0;width:100%;height:100%;cursor:crosshair;"></canvas>
         </div>
-        <div class="video-box">
+        <div class="video-box" style="position:relative;">
           <div class="label">&#x1F9E0; Last query — with waypoints</div>
-          <img src="/video/llm" alt="LLM frame">
+          <img id="llm-img" src="/video/llm" alt="LLM frame" style="width:100%;display:block;">
+          <canvas id="llm-canvas" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></canvas>
         </div>
         <div class="video-box" id="down-cam-box">
           <div class="label">&#x1F4F7; Down camera — row centering</div>
@@ -346,6 +347,32 @@ _HTML = """<!DOCTYPE html>
         `<div>#${i+1} x=${wp.nx.toFixed(3)} y=${wp.ny.toFixed(3)}</div>`
       ).join('') || '<div style="color:#444">none — left-click on camera to add</div>';
     }
+
+    function _redrawLlmCanvas() {
+      const img    = document.getElementById('llm-img');
+      const canvas = document.getElementById('llm-canvas');
+      canvas.width  = img.offsetWidth;
+      canvas.height = img.offsetHeight;
+      if (!canvas.width || !canvas.height) return;
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const x = Math.round(0.5 * canvas.width);
+      ctx.save();
+      ctx.setLineDash([8, 6]);
+      ctx.lineWidth   = 1.5;
+      ctx.strokeStyle = 'rgba(255, 220, 0, 0.85)';
+      ctx.beginPath();
+      ctx.moveTo(x, canvas.height);
+      ctx.lineTo(x, 0);
+      ctx.stroke();
+      ctx.font         = 'bold 11px monospace';
+      ctx.fillStyle    = 'rgba(255, 220, 0, 0.9)';
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText('50%', x, canvas.height - 4);
+      ctx.restore();
+    }
+    setInterval(_redrawLlmCanvas, 500);
 
     function _sendWaypoints() {
       fetch('/chat', {method:'POST', headers:{'Content-Type':'application/json'},
