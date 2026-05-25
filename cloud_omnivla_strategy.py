@@ -53,67 +53,6 @@ from omnivla_strategy import (
 
 log = logging.getLogger("rover.cloud_omnivla")
 
-# ── Guard rail detection (red HSV, same logic as camera_calibrate.py) ────────
-_RAIL_H_LO1, _RAIL_H_HI1 =   0,  12   # lower red hue range
-_RAIL_H_LO2, _RAIL_H_HI2 = 165, 180   # upper red hue range (wraps at 180)
-_RAIL_S_LO                =  80        # minimum saturation
-_RAIL_V_LO                =  60        # minimum value
-_RAIL_MIN_WIDTH           =  10        # px — blobs narrower than this are noise
-_RAIL_MIN_AREA            =  50        # px²
-
-_CORRECTION_VEL_MM_S   = 50    # spin speed during 5° correction
-_CORRECTION_DURATION_S = 0.5   # approximate time to spin ~5° in place
-_MAX_RAIL_CORRECTIONS  =  5    # give up after this many correction attempts
-
-_rail_kernel = None   # lazily initialised (avoids import-time OpenCV call)
-
-
-def _detect_rails_hsv(frame: np.ndarray) -> tuple[int | None, int | None]:
-    """Return (left_cx, right_cx) for the two largest red blobs, or (None, None).
-
-    Identical algorithm to camera_calibrate.py::detect_rails.
-    """
-    global _rail_kernel
-    if _rail_kernel is None:
-        _rail_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-
-    hsv  = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    low1 = np.array([_RAIL_H_LO1, _RAIL_S_LO, _RAIL_V_LO])
-    hi1  = np.array([_RAIL_H_HI1, 255,         255        ])
-    low2 = np.array([_RAIL_H_LO2, _RAIL_S_LO, _RAIL_V_LO])
-    hi2  = np.array([_RAIL_H_HI2, 255,         255        ])
-    mask = cv2.bitwise_or(cv2.inRange(hsv, low1, hi1),
-                          cv2.inRange(hsv, low2, hi2))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  _rail_kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, _rail_kernel)
-
-    n, _, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
-    blobs = []
-    for i in range(1, n):
-        w_b = stats[i, cv2.CC_STAT_WIDTH]
-        a_b = stats[i, cv2.CC_STAT_AREA]
-        if w_b >= _RAIL_MIN_WIDTH and a_b >= _RAIL_MIN_AREA:
-            blobs.append((int(centroids[i][0]), a_b))
-    if len(blobs) < 2:
-        return None, None
-    blobs.sort(key=lambda b: b[1], reverse=True)   # two largest blobs
-    xs = sorted([blobs[0][0], blobs[1][0]])
-    return xs[0], xs[1]
-
-
-def _waypoint4_pixel_x(waypoints: np.ndarray, frame_w: int, frame_h: int) -> int:
-    """Pixel x of waypoint[WAYPOINT_IDX] projected onto the camera frame.
-
-    Mirrors the projection used in omnivla_strategy._annotate():
-        px = cx − dy * scale
-    where dy is the lateral component (positive = left in image).
-    """
-    cx    = frame_w // 2
-    scale = min(frame_h, frame_w) * 0.3
-    dy    = float(waypoints[WAYPOINT_IDX][1]) * METRIC_SPACING
-    return max(0, min(frame_w - 1, int(cx - dy * scale)))
-
-
 # Downscale frames before sending to limit cloud bandwidth.
 # The full OmniVLA model accepts any resolution — PrismaticProcessor handles it.
 _SEND_W, _SEND_H   = 640, 480
@@ -357,97 +296,11 @@ class CloudOmniVLAStrategy(NavigationStrategy):
 
         # ── Waypoint → drive command (all local, no ML) ───────────────────────
         waypoints = np.array(resp["waypoints"])   # [8, 4]
-        cloud_s   = resp.get("elapsed", 0.0)
-
-        # ── Guard rail safety: correct if waypoint[4] is outside red rails ────
-        for _corr in range(_MAX_RAIL_CORRECTIONS + 1):
-            # Grab the freshest available frame (updated if we just spun)
-            _check_frame = frame
-            with state.raw_lock:
-                if state.raw_frame is not None:
-                    _check_frame = state.raw_frame.copy()
-
-            _fh, _fw = _check_frame.shape[:2]
-            _left_cx, _right_cx = _detect_rails_hsv(_check_frame)
-
-            if _left_cx is None or _right_cx is None:
-                # Rails not visible — can't enforce; proceed normally
-                log.debug("Step %d | guard rails not detected, skipping check", step)
-                break
-
-            _wp_px = _waypoint4_pixel_x(waypoints, _fw, _fh)
-
-            if _left_cx <= _wp_px <= _right_cx:
-                # Waypoint is safely within the rails
-                if _corr > 0:
-                    log.info("Step %d | waypoint within rails after %d correction(s)",
-                             step, _corr)
-                break
-
-            if _corr == _MAX_RAIL_CORRECTIONS:
-                log.warning("Step %d | max corrections (%d) reached — proceeding anyway",
-                            step, _MAX_RAIL_CORRECTIONS)
-                break
-
-            # Waypoint outside rails — stop and spin opposite direction by ~5°
-            # spin RIGHT (radius=-1) when waypoint is left of left rail
-            # spin LEFT  (radius=+1) when waypoint is right of right rail
-            _spin_dir = 1 if _wp_px > _right_cx else -1
-            _side     = "left of left" if _wp_px < _left_cx else "right of right"
-            log.info(
-                "Step %d | correction %d: wp_px=%d outside rails [%d, %d] (%s rail) — "
-                "stopping, spinning %s ~5°",
-                step, _corr + 1, _wp_px, _left_cx, _right_cx, _side,
-                "left" if _spin_dir == 1 else "right",
-            )
-
-            _op_active = (state.operator_control is not None
-                          and state.operator_until > time.time())
-            if rover_ctrl and not state.paused.is_set() and not _op_active:
-                rover_ctrl.stop()
-                time.sleep(0.1)
-                rover_ctrl.drive_raw(_CORRECTION_VEL_MM_S, _spin_dir)
-                time.sleep(_CORRECTION_DURATION_S)
-                rover_ctrl.stop()
-                time.sleep(0.1)
-
-            # Re-encode latest frame and request a fresh inference
-            with state.raw_lock:
-                if state.raw_frame is not None:
-                    frame = state.raw_frame.copy()
-            _send = _letterbox(frame, _SEND_W, _SEND_H)
-            _, _buf = cv2.imencode(".jpg", _send,
-                                   [cv2.IMWRITE_JPEG_QUALITY, _JPEG_QUALITY])
-            _b64 = base64.b64encode(_buf.tobytes()).decode()
-
-            self._response_event.clear()
-            self._pending_response = None
-            try:
-                asyncio.run_coroutine_threadsafe(
-                    self._ws_send_infer(_b64, self._goal), self._loop
-                ).result(timeout=5.0)
-            except Exception as _e:
-                log.warning("Step %d | correction re-infer send failed: %s", step, _e)
-                break
-
-            log.info("Step %d | waiting for corrected inference…", step)
-            if not self._response_event.wait(timeout=30.0):
-                log.warning("Step %d | correction re-infer timed out", step)
-                break
-
-            _resp2 = self._pending_response
-            if _resp2 is None or _resp2.get("type") != "waypoints":
-                log.warning("Step %d | correction re-infer returned no waypoints", step)
-                break
-
-            waypoints = np.array(_resp2["waypoints"])
-            cloud_s   = _resp2.get("elapsed", 0.0)
-            log.info("Step %d | re-inference complete; checking rails again…", step)
-
         vel, radius = _waypoint_to_drive(waypoints, self._max_lin_mm_s)
         elapsed = time.time() - t0
 
-        r_str = "straight" if radius == 0x8000 else f"r={radius}mm"
+        cloud_s = resp.get("elapsed", 0.0)
+        r_str   = "straight" if radius == 0x8000 else f"r={radius}mm"
         log.info("Step %d | vel=%d  %s  cloud=%.2fs  total=%.2fs",
                  step, vel, r_str, cloud_s, elapsed)
 
