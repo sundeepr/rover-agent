@@ -50,9 +50,9 @@ METRIC_SPACING = 0.1        # 1 model unit = 0.1 m
 DT             = 1.0 / 3.0  # control period matching run_omnivla.py (tick_rate=3)
 WAYPOINT_IDX   = 4          # which of the 8 predicted waypoints to execute
 ENC_SIZE       = 1024
-MAX_LIN_MM_S   = 25         # max forward velocity mm/s
+MAX_LIN_MM_S   = 150        # max forward velocity mm/s
 MAX_ANG_RAD_S  = 0.3        # max angular velocity rad/s
-MIN_RADIUS_MM  = 200        # minimum turn radius to avoid stalling
+MIN_RADIUS_MM  = 400        # minimum turn radius to avoid stalling
 
 # Modality IDs (defined by the OmniVLA-edge model architecture):
 #   7 = language only          — language token in transformer
@@ -108,17 +108,30 @@ def _annotate(frame: np.ndarray, waypoints: np.ndarray,
     out = frame.copy()
     h, w = out.shape[:2]
     cx, cy = w // 2, h
-    scale = min(h, w) * 0.3
 
-    dot_r = max(6, w // 200)   # scale dot size to frame resolution
+    # Adaptive scale: stretch the furthest waypoint to ~15% from the top.
+    # Falls back to a fixed scale if all waypoints are zero.
+    max_dx = max((float(wp[0]) * METRIC_SPACING for wp in waypoints), default=0.0)
+    if max_dx > 1e-3:
+        scale = (h * 0.85) / max_dx   # furthest wp lands at ~15% from top
+    else:
+        scale = min(h, w) * 0.3       # fallback (stationary / no prediction)
+
+    dot_r = max(6, w // 80)   # scale dot size to frame resolution
+    prev_pt = None
     for i, wp in enumerate(waypoints):
         dx = float(wp[0]) * METRIC_SPACING
         dy = float(wp[1]) * METRIC_SPACING
         px = int(cx - dy * scale)
         py = int(cy - dx * scale)
+        px = max(0, min(w - 1, px))
+        py = max(0, min(h - 1, py))
         color = (0, 255, 100) if i == WAYPOINT_IDX else (0, 180, 60)
         r = dot_r * 2 if i == WAYPOINT_IDX else dot_r
         cv2.circle(out, (px, py), r, color, -1)
+        if prev_pt is not None:
+            cv2.line(out, prev_pt, (px, py), (0, 160, 50), 2)
+        prev_pt = (px, py)
 
     r_str = "straight" if radius == 0x8000 else f"r={radius}mm"
     cv2.putText(out, f"vel {vel} mm/s  {r_str}", (10, 24),

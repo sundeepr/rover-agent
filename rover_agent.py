@@ -418,7 +418,7 @@ def main():
                         metavar="HOST:PORT",
                         help="Address of a running omnivla_server.py "
                              "(e.g. localhost:5100)")
-    parser.add_argument("--omnivla-velocity", type=int, default=25,
+    parser.add_argument("--omnivla-velocity", type=int, default=150,
                         metavar="MM_S",
                         help="Forward velocity for OmniVLA strategies in mm/s "
                              "(default: 25). MIN_RADIUS_MM is auto-computed as "
