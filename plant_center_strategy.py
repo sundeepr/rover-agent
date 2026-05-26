@@ -111,45 +111,50 @@ def _find_nearest_walls(
     rover_left_x:  int,
     rover_right_x: int,
     min_area:      int,
-) -> tuple[int | None, int | None, list]:
+) -> tuple[int | None, int | None, list | None, list | None]:
     """
-    Find the nearest vegetation walls on each side of the rover boundary.
+    Find the single nearest vegetation blob on each side of the rover boundary.
 
-    Returns (left_inner_x, right_inner_x, boxes) where:
-      left_inner_x  — rightmost edge of the closest left-side blob
-                      (the inner/facing edge of the left plant row).
-      right_inner_x — leftmost  edge of the closest right-side blob.
-      boxes         — all qualifying [x1,y1,x2,y2] bounding boxes.
+    Returns (left_inner_x, right_inner_x, left_box, right_box) where:
+      left_inner_x  — rightmost x of the blob immediately left  of the rover
+      right_inner_x — leftmost  x of the blob immediately right of the rover
+      left_box      — [x1,y1,x2,y2] of that left  blob (or None)
+      right_box     — [x1,y1,x2,y2] of that right blob (or None)
 
-    Blobs are classified by whether their centre x lies to the LEFT of
-    rover_left_x (left blobs) or to the RIGHT of rover_right_x (right blobs).
-    Blobs that overlap the rover boundary band are ignored.
+    Only the single closest blob on each side is returned — distant rows
+    further into the field are ignored.  Blobs whose centre x falls between
+    rover_left_x and rover_right_x are discarded.
     """
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    boxes: list = []
-    left_candidates:  list[int] = []   # inner (right) edge x of left blobs
-    right_candidates: list[int] = []   # inner (left)  edge x of right blobs
+
+    left_inner_x:  int | None  = None
+    right_inner_x: int | None  = None
+    left_box:      list | None = None
+    right_box:     list | None = None
 
     for cnt in contours:
         if cv2.contourArea(cnt) < min_area:
             continue
         x, y, bw, bh = cv2.boundingRect(cnt)
         cx_blob = x + bw // 2
-        boxes.append([x, y, x + bw, y + bh])
 
         if cx_blob < rover_left_x:
-            # Blob is to the left of the rover — record its right (inner) edge
-            left_candidates.append(x + bw)
+            # Blob is to the LEFT of the rover.
+            # Nearest = largest right (inner) edge x.
+            inner_x = x + bw
+            if left_inner_x is None or inner_x > left_inner_x:
+                left_inner_x = inner_x
+                left_box     = [x, y, x + bw, y + bh]
+
         elif cx_blob > rover_right_x:
-            # Blob is to the right of the rover — record its left (inner) edge
-            right_candidates.append(x)
+            # Blob is to the RIGHT of the rover.
+            # Nearest = smallest left (inner) edge x.
+            inner_x = x
+            if right_inner_x is None or inner_x < right_inner_x:
+                right_inner_x = inner_x
+                right_box     = [x, y, x + bw, y + bh]
 
-    # Nearest left wall  = the candidate with the LARGEST  x (closest to rover)
-    # Nearest right wall = the candidate with the SMALLEST x (closest to rover)
-    left_wall  = max(left_candidates)  if left_candidates  else None
-    right_wall = min(right_candidates) if right_candidates else None
-
-    return left_wall, right_wall, boxes
+    return left_inner_x, right_inner_x, left_box, right_box
 
 
 # ── Strategy ───────────────────────────────────────────────────────────────────
@@ -234,7 +239,7 @@ class PlantCenterStrategy(NavigationStrategy):
 
         down = self._get_down_frame()
         left_wall = right_wall = None
-        boxes:    list = []
+        left_box = right_box = None
         target_cx:    int | None = None
         error_px:     int = 0
         radius:       int = _STRAIGHT
@@ -253,7 +258,11 @@ class PlantCenterStrategy(NavigationStrategy):
                     x1, y1, x2, y2 = (int(v) for v in box)
                     mask[min(y1,y2):max(y1,y2), min(x1,x2):max(x1,x2)] = 0
 
-            left_wall, right_wall, boxes = _find_nearest_walls(
+            # Ignore the bottom 30 % of the frame — those plants are already
+            # under or immediately behind the rover and should not affect steering.
+            mask[int(h * 0.70):, :] = 0
+
+            left_wall, right_wall, left_box, right_box = _find_nearest_walls(
                 mask, rover_left_x, rover_right_x, min_area)
 
             # ── Compute target centre X ───────────────────────────────────────
@@ -261,7 +270,6 @@ class PlantCenterStrategy(NavigationStrategy):
                 target_cx = (left_wall + right_wall) // 2
                 status    = f"L={left_wall}px  R={right_wall}px  target={target_cx}px"
             elif left_wall is not None:
-                # Only left wall — aim to keep it at same distance as rover half-width
                 half_w    = (rover_right_x - rover_left_x) // 2
                 target_cx = left_wall + half_w
                 status    = f"L={left_wall}px only → target={target_cx}px"
@@ -291,10 +299,10 @@ class PlantCenterStrategy(NavigationStrategy):
                 "straight" if radius == _STRAIGHT else f"{radius}mm",
             )
 
-            # Annotate
+            # Annotate — pass only the nearest boxes (left/right), not all blobs
             ann = self._annotate(
                 down, geo, poly, mask, left_wall, right_wall,
-                boxes, rover_cx, target_cx, error_px, radius, vel)
+                left_box, right_box, rover_cx, target_cx, error_px, radius, vel)
             with self._down_lock:
                 self._down_annotated = ann
 
@@ -325,18 +333,19 @@ class PlantCenterStrategy(NavigationStrategy):
 
     def _annotate(
         self,
-        frame:     np.ndarray,
-        geo:       dict,
-        poly:      np.ndarray,
-        veg_mask:  np.ndarray,
-        left_wall: int | None,
-        right_wall:int | None,
-        boxes:     list,
-        rover_cx:  int,
-        target_cx: int | None,
-        error_px:  int,
-        radius:    int,
-        vel:       int,
+        frame:      np.ndarray,
+        geo:        dict,
+        poly:       np.ndarray,
+        veg_mask:   np.ndarray,
+        left_wall:  int | None,
+        right_wall: int | None,
+        left_box:   list | None,   # nearest left  blob [x1,y1,x2,y2]
+        right_box:  list | None,   # nearest right blob [x1,y1,x2,y2]
+        rover_cx:   int,
+        target_cx:  int | None,
+        error_px:   int,
+        radius:     int,
+        vel:        int,
     ) -> np.ndarray:
         out = frame.copy()
         h, w = out.shape[:2]
@@ -347,21 +356,21 @@ class PlantCenterStrategy(NavigationStrategy):
             layer[veg_mask > 0] = (0, 200, 60)
             cv2.addWeighted(layer, 0.40, out, 0.60, 0, out)
 
-        # Blob bounding boxes — orange = left side, blue = right side
-        rover_left_x  = int(poly[:, 0].min())
-        rover_right_x = int(poly[:, 0].max())
-        for b in boxes:
-            cx_b  = (b[0] + b[2]) // 2
-            color = (0, 140, 255) if cx_b < rover_left_x else (255, 140, 0)
-            cv2.rectangle(out, (b[0], b[1]), (b[2], b[3]), color, 1)
-
-        # Left wall inner edge (orange vertical)
+        # Nearest left blob — orange box + inner-edge vertical line
+        # BGR (0,140,255) = orange
+        if left_box is not None:
+            b = left_box
+            cv2.rectangle(out, (b[0], b[1]), (b[2], b[3]), (0, 140, 255), 2)
         if left_wall is not None:
             cv2.line(out, (left_wall, 0), (left_wall, h), (0, 140, 255), 2)
             cv2.putText(out, f"L={left_wall}", (left_wall + 4, 20),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 140, 255), 1)
 
-        # Right wall inner edge (blue vertical)
+        # Nearest right blob — blue box + inner-edge vertical line
+        # BGR (255,140,0) = blue
+        if right_box is not None:
+            b = right_box
+            cv2.rectangle(out, (b[0], b[1]), (b[2], b[3]), (255, 140, 0), 2)
         if right_wall is not None:
             cv2.line(out, (right_wall, 0), (right_wall, h), (255, 140, 0), 2)
             cv2.putText(out, f"R={right_wall}", (right_wall - 60, 20),
