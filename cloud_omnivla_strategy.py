@@ -287,8 +287,20 @@ class CloudOmniVLAStrategy(NavigationStrategy):
             return
 
         resp = self._pending_response
-        log.info("Step %d | raw response: %s", step,
-                 str(resp)[:200] if resp else "None")
+        if resp and resp.get("type") == "waypoints":
+            wps = resp["waypoints"]
+            log.info(
+                "Step %d | waypoints (8×4):\n%s",
+                step,
+                "\n".join(
+                    f"  [{i}] fwd={w[0]:.4f}  lat={w[1]:.4f}  {w[2]:.4f}  {w[3]:.4f}"
+                    + (" ← used" if i == 4 else "")
+                    for i, w in enumerate(wps)
+                ),
+            )
+        else:
+            log.info("Step %d | raw response: %s", step,
+                     str(resp)[:200] if resp else "None")
         if resp is None or resp.get("type") != "waypoints":
             msg = resp.get("message", "unknown") if resp else "disconnected"
             log.warning("Step %d | no waypoints: %s", step, msg)
