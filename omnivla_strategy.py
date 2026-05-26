@@ -68,34 +68,39 @@ MODALITY_GOAL_IMG = 6
 def _waypoint_to_drive(waypoints: np.ndarray,
                        max_lin_mm_s: int = MAX_LIN_MM_S,
                        icr_offset_m: float = 0.480) -> tuple[int, int]:
-    """Convert predicted waypoints to (velocity_mm_s, radius_mm) via PD controller.
+    """Convert predicted waypoints to (velocity_mm_s, radius_mm).
 
-    Matches the controller in run_omnivla.py: atan2(dy, dx)/DT for angular rate,
-    then radius = vel / ang_rate with velocity limiting.
-    MIN_RADIUS_MM is auto-computed from max_lin_mm_s / MAX_ANG_RAD_S.
+    Waypoint format (OmniVLA): [x, y, sin(yaw), cos(yaw)]
+      wp[0] — x: forward distance (model units, 1 unit = METRIC_SPACING m)
+      wp[1] — y: lateral offset  (positive = RIGHT in camera frame)
+      wp[2] — sin(yaw): sine   of desired heading at this waypoint
+      wp[3] — cos(yaw): cosine of desired heading at this waypoint
 
-    icr_offset_m — distance (metres) from the front camera to the rover's
-    Instantaneous Centre of Rotation (rear axle).  Adding this to dx when
-    computing atan2 reduces the bearing angle for near-field waypoints,
-    correcting for the fact that the camera leads the rotation centre.
-    Set to 0.0 to recover the original behaviour.
+    Steering is derived from the heading encoded in wp[2]/wp[3] rather than
+    the raw lateral position, because the heading is a direct prediction of
+    desired angular state and is not distorted by the ICR offset.
+
+    Sign convention: positive yaw in the model = turning RIGHT.
+    In the atlas controller: negative radius = right turn.
+    So: ang_rad_s = -yaw / DT  (negate to convert model → atlas sign).
+
+    icr_offset_m is retained for the forward-velocity scaling (dx/DT) but
+    is no longer used in the angular-rate path.
     """
     wp = waypoints[WAYPOINT_IDX].copy()
-    dx = float(wp[0]) * METRIC_SPACING   # forward (m)
-    dy = float(wp[1]) * METRIC_SPACING   # lateral (m)
+    dx       = float(wp[0]) * METRIC_SPACING   # forward (m)
+    sin_yaw  = float(wp[2])                    # sin of desired heading
+    cos_yaw  = float(wp[3])                    # cos of desired heading
 
     EPS = 1e-8
-    if abs(dx) < EPS and abs(dy) < EPS:
+    if abs(dx) < EPS:
         return 0, 0x8000
-    elif abs(dx) < EPS:
-        lin_m_s   = 0.0
-        ang_rad_s = math.copysign(math.pi / (2 * DT), dy)
-    else:
-        lin_m_s   = dx / DT
-        # ICR correction: bearing is computed relative to the rotation centre,
-        # which is icr_offset_m behind the camera.  Shifting dx forward by that
-        # amount reduces over-steering on close lateral waypoints.
-        ang_rad_s = math.atan2(dy, dx + icr_offset_m) / DT
+
+    lin_m_s = dx / DT
+
+    # Heading at the chosen waypoint, negated so positive yaw → right turn
+    yaw_rad   = math.atan2(sin_yaw, cos_yaw)
+    ang_rad_s = -yaw_rad / DT
 
     maxv = max_lin_mm_s / 1000.0
     maxw = MAX_ANG_RAD_S
@@ -106,7 +111,7 @@ def _waypoint_to_drive(waypoints: np.ndarray,
         return int(lin_m_s * 1000), 0x8000
 
     radius_mm = int((lin_m_s / ang_rad_s) * 1000)
-    min_radius = int((maxv / maxw) * 1000)   # auto-computed from velocity
+    min_radius = int((maxv / maxw) * 1000)
     if 0 < abs(radius_mm) < min_radius:
         radius_mm = int(math.copysign(min_radius, radius_mm))
     return int(lin_m_s * 1000), radius_mm
@@ -132,7 +137,7 @@ def _annotate(frame: np.ndarray, waypoints: np.ndarray,
     for i, wp in enumerate(waypoints):
         dx = float(wp[0]) * METRIC_SPACING
         dy = float(wp[1]) * METRIC_SPACING
-        px = int(cx - dy * scale)
+        px = int(cx + dy * scale)   # positive lat = rightward in image
         py = int(cy - dx * scale)
         px = max(0, min(w - 1, px))
         py = max(0, min(h - 1, py))

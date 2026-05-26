@@ -288,12 +288,15 @@ class CloudOmniVLAStrategy(NavigationStrategy):
 
         resp = self._pending_response
         if resp and resp.get("type") == "waypoints":
+            import math as _math
             wps = resp["waypoints"]
             log.info(
-                "Step %d | waypoints (8×4):\n%s",
+                "Step %d | waypoints (8×4)  [fwd, lat, sin_yaw, cos_yaw → yaw_deg]:\n%s",
                 step,
                 "\n".join(
-                    f"  [{i}] fwd={w[0]:.4f}  lat={w[1]:.4f}  {w[2]:.4f}  {w[3]:.4f}"
+                    f"  [{i}] fwd={w[0]:.4f}  lat={w[1]:.4f}  "
+                    f"sin={w[2]:.4f}  cos={w[3]:.4f}  "
+                    f"yaw={_math.degrees(_math.atan2(w[2], w[3])):+.1f}°"
                     + (" ← used" if i == 4 else "")
                     for i, w in enumerate(wps)
                 ),
