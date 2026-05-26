@@ -319,6 +319,14 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
             exg_threshold=args.exg_threshold,
             exg_min_area=args.exg_min_area,
         )
+    if name == "bev_omnivla":
+        from bev_omnivla_strategy import BevOmniVLAStrategy
+        return BevOmniVLAStrategy(
+            server_url    = args.cloud_server,
+            goal          = args.goal,
+            max_lin_mm_s  = args.omnivla_velocity,
+            geometry_path = args.rover_geometry,
+        )
     if name == "cloud_omnivla":
         from cloud_omnivla_strategy import CloudOmniVLAStrategy
         _geo = load_geometry(getattr(args, "rover_geometry", None))
