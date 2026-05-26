@@ -113,48 +113,63 @@ def _find_nearest_walls(
     min_area:      int,
 ) -> tuple[int | None, int | None, list | None, list | None]:
     """
-    Find the single nearest vegetation blob on each side of the rover boundary.
+    Find the best-matched left/right vegetation wall pair.
 
-    Returns (left_inner_x, right_inner_x, left_box, right_box) where:
-      left_inner_x  — rightmost x of the blob immediately left  of the rover
-      right_inner_x — leftmost  x of the blob immediately right of the rover
-      left_box      — [x1,y1,x2,y2] of that left  blob (or None)
-      right_box     — [x1,y1,x2,y2] of that right blob (or None)
+    "Best-matched" means the left and right blobs whose Y centroids are
+    closest to each other — i.e. they are at roughly the same depth in the
+    image.  Picking blobs at very different Y positions (one near the top,
+    one near the middle) would make the computed centre X unreliable due to
+    camera perspective distortion.
 
-    Only the single closest blob on each side is returned — distant rows
-    further into the field are ignored.  Blobs whose centre x falls between
-    rover_left_x and rover_right_x are discarded.
+    Returns (left_inner_x, right_inner_x, left_box, right_box).
+      left_inner_x  — rightmost x of the chosen left  blob (its inner edge).
+      right_inner_x — leftmost  x of the chosen right blob (its inner edge).
+      left_box / right_box — [x1,y1,x2,y2] bounding boxes, or None.
+
+    If only one side has blobs, that side's nearest blob is returned and the
+    other side is None (caller uses a one-sided fallback).
     """
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    left_inner_x:  int | None  = None
-    right_inner_x: int | None  = None
-    left_box:      list | None = None
-    right_box:     list | None = None
+    # (inner_x, y_centroid, box)
+    left_cands:  list[tuple[int, int, list]] = []
+    right_cands: list[tuple[int, int, list]] = []
 
     for cnt in contours:
         if cv2.contourArea(cnt) < min_area:
             continue
         x, y, bw, bh = cv2.boundingRect(cnt)
         cx_blob = x + bw // 2
+        cy_blob = y + bh // 2
 
         if cx_blob < rover_left_x:
-            # Blob is to the LEFT of the rover.
-            # Nearest = largest right (inner) edge x.
-            inner_x = x + bw
-            if left_inner_x is None or inner_x > left_inner_x:
-                left_inner_x = inner_x
-                left_box     = [x, y, x + bw, y + bh]
-
+            left_cands.append((x + bw, cy_blob, [x, y, x + bw, y + bh]))
         elif cx_blob > rover_right_x:
-            # Blob is to the RIGHT of the rover.
-            # Nearest = smallest left (inner) edge x.
-            inner_x = x
-            if right_inner_x is None or inner_x < right_inner_x:
-                right_inner_x = inner_x
-                right_box     = [x, y, x + bw, y + bh]
+            right_cands.append((x, cy_blob, [x, y, x + bw, y + bh]))
 
-    return left_inner_x, right_inner_x, left_box, right_box
+    # ── Both sides present: pick the pair with the smallest Y difference ──────
+    if left_cands and right_cands:
+        best_dy   = float("inf")
+        best_left = left_cands[0]
+        best_right = right_cands[0]
+        for lc in left_cands:
+            for rc in right_cands:
+                dy = abs(lc[1] - rc[1])
+                if dy < best_dy:
+                    best_dy    = dy
+                    best_left  = lc
+                    best_right = rc
+        return best_left[0], best_right[0], best_left[2], best_right[2]
+
+    # ── Only one side: fall back to the nearest blob on that side ─────────────
+    if left_cands:
+        best = max(left_cands, key=lambda c: c[0])   # largest inner_x = nearest
+        return best[0], None, best[2], None
+    if right_cands:
+        best = min(right_cands, key=lambda c: c[0])  # smallest inner_x = nearest
+        return None, best[0], None, best[2]
+
+    return None, None, None, None
 
 
 # ── Strategy ───────────────────────────────────────────────────────────────────
