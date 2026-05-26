@@ -10,6 +10,9 @@
   "_rover_polygon_px_help": "Pixel corners of the rover footprint as seen in the down-camera feed [x,y]. Click corners in the browser and note coordinates. Order: top-left, top-right, bottom-right, bottom-left.",
   "rover_polygon_px": [[120, 180], [520, 180], [520, 380], [120, 380]],
 
+  "_ignore_boxes_px_help": "List of rectangular regions [x1,y1,x2,y2] in down-camera pixel space to exclude from vegetation analysis. Use this for overhanging parts of the rover (brackets, cables, sensors) that are visible in the down-camera feed and would otherwise trigger false vegetation detections. Each entry is one box; add as many as needed. Shown as grey/red-outlined overlays in the web UI.",
+  "ignore_boxes_px": [],
+
   "_lookahead_s_help": "Seconds ahead to project the drive arc. Reduce to 0.5 if rover stops too early, increase to 1.5 if vegetation is not caught in time.",
   "lookahead_s": 1.0,
 

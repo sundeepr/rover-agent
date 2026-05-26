@@ -89,6 +89,7 @@ _GEO_DEFAULTS = {
     "icr_offset_mm":          480,
     "down_px_per_mm":         2.5,
     "rover_polygon_px":       [[120, 180], [520, 180], [520, 380], [120, 380]],
+    "ignore_boxes_px":        [],   # [[x1,y1,x2,y2], ...] regions to exclude from analysis
     "lookahead_s":            1.0,
     "arc_steps":              10,
     "exg_threshold":          20,
@@ -259,6 +260,12 @@ class BevOmniVLAStrategy(CloudOmniVLAStrategy):
             poly_raw = geo.get("rover_polygon_px", _GEO_DEFAULTS["rover_polygon_px"])
             rover_poly = np.array(poly_raw, dtype=np.int32)
             cv2.fillPoly(mask, [rover_poly], 0)   # zero out rover footprint
+
+            # Zero out user-defined ignore boxes (overhangs, brackets, etc.)
+            for box in geo.get("ignore_boxes_px", []):
+                if len(box) == 4:
+                    x1, y1, x2, y2 = (int(v) for v in box)
+                    mask[min(y1,y2):max(y1,y2), min(x1,x2):max(x1,x2)] = 0
 
             left_wall, right_wall, boxes = _find_veg_walls(mask, min_area)
 
@@ -608,6 +615,21 @@ class BevOmniVLAStrategy(CloudOmniVLAStrategy):
         cy_poly = int(poly[:, 1].mean())
         cv2.putText(out, "rover", (cx_poly - 22, cy_poly + 6),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 180, 255), 1, cv2.LINE_AA)
+
+        # ── Ignore boxes (overhangs / brackets) ───────────────────────────────
+        for i, box in enumerate(geo.get("ignore_boxes_px", [])):
+            if len(box) == 4:
+                x1, y1, x2, y2 = (int(v) for v in box)
+                x1, x2 = min(x1, x2), max(x1, x2)
+                y1, y2 = min(y1, y2), max(y1, y2)
+                # Semi-transparent dark-grey fill
+                overlay = out.copy()
+                cv2.rectangle(overlay, (x1, y1), (x2, y2), (50, 50, 50), -1)
+                cv2.addWeighted(overlay, 0.40, out, 0.60, 0, out)
+                # Dashed red outline
+                cv2.rectangle(out, (x1, y1), (x2, y2), (0, 80, 220), 2)
+                cv2.putText(out, f"ignore{i}", (x1 + 4, y1 + 16),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (80, 160, 255), 1, cv2.LINE_AA)
 
         # ── Step 6: Intersection alert banner ─────────────────────────────────
         if intersect_side is not None:
