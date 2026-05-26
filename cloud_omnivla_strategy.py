@@ -5,6 +5,23 @@ Sends one camera frame per query step to omnivla_cloud_server.py running on
 a cloud GPU.  Receives 8 waypoints back and converts them to a drive command
 locally.  No ML inference happens on the rover.
 
+── OmniVLA waypoint format ───────────────────────────────────────────────────
+Each of the 8 predicted waypoints is a 4-float array [wp0, wp1, wp2, wp3]:
+
+  wp[0]  forward distance  (model units × 0.1 = metres)
+  wp[1]  lateral offset    (model units × 0.1 = metres, positive = RIGHT)
+  wp[2]  sin(yaw)          desired heading at this waypoint
+  wp[3]  cos(yaw)          desired heading at this waypoint
+
+Yaw convention — the model's zero-angle reference is the x-axis (pointing
+RIGHT), not the robot's forward direction.  Straight-ahead driving produces:
+    sin(yaw) ≈ 1.0,  cos(yaw) ≈ 0.0  →  atan2(sin, cos) ≈ 90°
+Logged as "dev" = atan2(sin, cos) - 90°, so 0° = straight, ±° = turn.
+Do NOT use yaw / DT as an angular rate — DT is the control period (0.33 s),
+not time-to-waypoint, so even a 5° deviation saturates MAX_ANG_RAD_S.
+Steering is position-based: atan2(-lat, fwd + icr_offset) scales naturally
+with distance and gives gentle turns for far waypoints.
+
 Architecture
 ────────────
   rover_agent (1 Hz) → run_query() → JPEG over WebSocket → cloud server

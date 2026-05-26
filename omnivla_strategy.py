@@ -70,19 +70,40 @@ def _waypoint_to_drive(waypoints: np.ndarray,
                        icr_offset_m: float = 0.480) -> tuple[int, int]:
     """Convert predicted waypoints to (velocity_mm_s, radius_mm).
 
-    Waypoint format (OmniVLA): [x, y, sin_or_cos(yaw), cos_or_sin(yaw)]
-      wp[0] — forward distance (model units × METRIC_SPACING = metres)
-      wp[1] — lateral offset   (positive = RIGHT in camera/model frame)
-      wp[2], wp[3] — heading components (logged for reference, not used here)
+    ── OmniVLA waypoint format ───────────────────────────────────────────────
+    Each waypoint is a 4-float array  [wp0, wp1, wp2, wp3]:
 
-    Steering uses the position-based bearing angle, not the heading directly.
-    Dividing the heading by DT gives an angular rate that is far too large
-    for far waypoints and always clips to MIN_RADIUS_MM.  The bearing angle
-    from atan2(dy, dx) naturally scales with distance: a far waypoint with a
-    small lateral offset gives a small angle and therefore a gentle turn.
+      wp[0]  forward distance  (model units; multiply by METRIC_SPACING=0.1 → metres)
+      wp[1]  lateral offset    (model units; positive = RIGHT in the camera frame)
+      wp[2]  sin(yaw)          heading component at this waypoint
+      wp[3]  cos(yaw)          heading component at this waypoint
 
-    Sign: positive dy (right) → negative ang_rad_s → negative radius (right turn).
-    ICR offset shifts dx forward to reduce over-steering for near-field waypoints.
+    ── Yaw / heading convention ──────────────────────────────────────────────
+    The model's yaw reference is the standard-math x-axis (pointing RIGHT),
+    NOT the robot's forward direction.  When the robot is going straight ahead
+    the heading vector points along +Y, so:
+
+        sin(yaw) ≈ 1.0,  cos(yaw) ≈ 0.0  →  atan2(sin, cos) ≈ 90°
+
+    All logged yaw values therefore cluster around 90° for straight driving.
+    To get the human-readable deviation from forward:
+
+        deviation_deg = degrees(atan2(wp[2], wp[3])) - 90
+                                        # 0° = straight, +° = right, -° = left
+
+    ── Why position-based steering, not heading-based ────────────────────────
+    Using the heading directly (ang_rad_s = deviation / DT) causes the rover
+    to always clip to MIN_RADIUS_MM because DT = 0.33 s is the control period,
+    not the time-to-reach-waypoint, so even a 5° deviation gives 0.26 rad/s
+    which nearly saturates MAX_ANG_RAD_S = 0.3 rad/s.
+
+    The position-based bearing atan2(-dy, dx) naturally scales with distance:
+    a far waypoint with a small lateral offset → small angle → gentle turn.
+
+    ── Sign convention ───────────────────────────────────────────────────────
+    Positive dy (right) → negate → negative ang_rad_s → negative radius_mm
+    → right turn in the Atlas controller (left wheel faster than right).
+    ICR offset shifts dx forward to reduce over-steering for near-field points.
     """
     wp = waypoints[WAYPOINT_IDX].copy()
     dx = float(wp[0]) * METRIC_SPACING   # forward  (m)
