@@ -31,6 +31,7 @@ import json
 import logging
 import math
 import threading
+import time
 from pathlib import Path
 
 import cv2
@@ -96,6 +97,12 @@ _GEO_DEFAULTS = {
 }
 
 
+# Steps before reverting to original goal once intersection clears
+_CORRECTION_CLEAR_STEPS = 3
+# Thickness (px) of the arc corridor sampled against the vegetation mask
+_ARC_CHECK_THICKNESS = 10
+
+
 def _load_geometry(path: str | None) -> dict:
     """Read rover_geometry.json, filling missing keys from defaults."""
     cfg = _GEO_DEFAULTS.copy()
@@ -157,6 +164,11 @@ class BevOmniVLAStrategy(CloudOmniVLAStrategy):
         self._last_vel:    int = 0
         self._last_radius: int = 0x8000
 
+        # Intersection guard state (Step 6)
+        self._base_goal              = goal   # original goal before any correction
+        self._correcting             = False  # True while corrective goal is active
+        self._correction_clear_steps = 0      # consecutive clear steps since correction
+
         log.info(
             "BevOmniVLAStrategy ready  icr_offset=%.0fmm  geometry=%s",
             geo["icr_offset_mm"],
@@ -208,8 +220,10 @@ class BevOmniVLAStrategy(CloudOmniVLAStrategy):
         # Run the parent cloud inference + ICR-corrected drive
         super()._do_query(state, frame, rover_ctrl)
 
-        # ── Down-camera: ExG mask + annotation ───────────────────────────────
+        # ── Down-camera: ExG mask + arc + intersection guard ─────────────────
         down = self._get_down_frame()
+        intersect_side: str | None = None   # 'left' | 'right' | None
+
         if down is not None:
             # Step 4: compute vegetation mask and wall positions
             threshold = int(geo.get("exg_threshold", 20))
@@ -217,7 +231,6 @@ class BevOmniVLAStrategy(CloudOmniVLAStrategy):
             mask = _exg_mask(down, threshold)
             left_wall, right_wall, boxes = _find_veg_walls(mask, min_area)
 
-            # Store for Step 6 (intersection check)
             self._veg_mask   = mask
             self._left_wall  = left_wall
             self._right_wall = right_wall
@@ -225,8 +238,12 @@ class BevOmniVLAStrategy(CloudOmniVLAStrategy):
             # Step 5: project drive arc onto down-camera frame
             arc_px = self._compute_arc_pixels(geo)
 
+            # Step 6: intersection check
+            intersect_side = self._check_arc_intersection(arc_px, mask, down.shape[1])
+            self._handle_intersection(intersect_side, geo, rover_ctrl, state)
+
             annotated = self._annotate_down(
-                down, geo, mask, left_wall, right_wall, boxes, arc_px)
+                down, geo, mask, left_wall, right_wall, boxes, arc_px, intersect_side)
             with self._down_lock:
                 self._down_annotated = annotated
 
@@ -290,6 +307,89 @@ class BevOmniVLAStrategy(CloudOmniVLAStrategy):
 
         return pixel_pts
 
+    # ── Intersection check + goal correction (Step 6) ────────────────────────
+
+    def _check_arc_intersection(
+        self,
+        arc_px: list[tuple[int, int]],
+        veg_mask: np.ndarray,
+        frame_w: int,
+    ) -> str | None:
+        """
+        Return 'left', 'right', or None depending on whether the planned arc
+        corridor overlaps with the vegetation mask and which side it's on.
+
+        The arc is rasterised as a thick line (_ARC_CHECK_THICKNESS px wide)
+        onto a blank canvas, then ANDed with the ExG mask.  Only the first
+        half of the arc is checked ('immediate' intersection).
+        """
+        if not arc_px or veg_mask is None:
+            return None
+
+        h, w = veg_mask.shape[:2]
+        # Only check the near half of the arc (immediate collision)
+        near_arc = arc_px[: max(2, len(arc_px) // 2)]
+        arc_canvas = np.zeros((h, w), dtype=np.uint8)
+        pts = np.array(near_arc, dtype=np.int32).reshape(-1, 1, 2)
+        cv2.polylines(arc_canvas, [pts], False, 255, _ARC_CHECK_THICKNESS)
+
+        overlap = cv2.bitwise_and(arc_canvas, veg_mask)
+        if not np.any(overlap):
+            return None
+
+        # Determine side by comparing left vs right pixel counts
+        ys, xs = np.where(overlap > 0)
+        cx = frame_w // 2
+        return "left" if int(np.sum(xs < cx)) >= int(np.sum(xs >= cx)) else "right"
+
+    def _handle_intersection(
+        self,
+        side: str | None,
+        geo: dict,
+        rover_ctrl,
+        state,
+    ) -> None:
+        """Stop rover and issue corrective goal when arc intersects vegetation."""
+        operator_active = (
+            state.operator_control is not None
+            and state.operator_until > time.time()
+        )
+
+        if side is not None:
+            # ── Intersection detected ─────────────────────────────────────────
+            if not operator_active and rover_ctrl and not state.paused.is_set():
+                rover_ctrl.stop()
+                log.info("Arc intersects vegetation on %s — stopping rover", side)
+
+            if not self._correcting:
+                # Save original goal and send corrective one
+                self._base_goal  = self._goal
+                self._correcting = True
+                self._correction_clear_steps = 0
+                suffix  = geo.get("correction_goal_suffix",
+                                  "steer slightly {direction} to avoid vegetation")
+                # opposite direction: veg on left → steer right, and vice versa
+                steer   = "right" if side == "left" else "left"
+                corrective = (f"{self._base_goal}, "
+                              f"{suffix.format(direction=steer)}")
+                log.info("Sending corrective goal: '%s'", corrective)
+                self.set_goal(corrective)
+            else:
+                # Still intersecting — reset the clear counter
+                self._correction_clear_steps = 0
+
+        else:
+            # ── No intersection ───────────────────────────────────────────────
+            if self._correcting:
+                self._correction_clear_steps += 1
+                log.debug("Intersection clear for %d/%d steps",
+                          self._correction_clear_steps, _CORRECTION_CLEAR_STEPS)
+                if self._correction_clear_steps >= _CORRECTION_CLEAR_STEPS:
+                    log.info("Arc clear — reverting to base goal: '%s'", self._base_goal)
+                    self.set_goal(self._base_goal)
+                    self._correcting             = False
+                    self._correction_clear_steps = 0
+
     # ── Down-camera annotation (grows with each step) ─────────────────────────
 
     def _annotate_down(
@@ -301,6 +401,7 @@ class BevOmniVLAStrategy(CloudOmniVLAStrategy):
         right_wall: int | None = None,
         boxes: list | None = None,
         arc_px: list | None = None,
+        intersect_side: str | None = None,
     ) -> np.ndarray:
         """Draw overlays onto the down-camera frame.
 
@@ -308,6 +409,7 @@ class BevOmniVLAStrategy(CloudOmniVLAStrategy):
         Step 3: Rover footprint polygon (purple).
         Step 4: ExG vegetation mask (green tint) + wall markers.
         Step 5: Planned drive arc (orange polyline).
+        Step 6: Red alert banner when arc intersects vegetation.
         """
         out = frame.copy()
         h, w = out.shape[:2]
@@ -379,6 +481,23 @@ class BevOmniVLAStrategy(CloudOmniVLAStrategy):
         cy_poly = int(poly[:, 1].mean())
         cv2.putText(out, "rover", (cx_poly - 22, cy_poly + 6),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 180, 255), 1, cv2.LINE_AA)
+
+        # ── Step 6: Intersection alert banner ─────────────────────────────────
+        if intersect_side is not None:
+            steer = "RIGHT" if intersect_side == "left" else "LEFT"
+            banner = f"⚠ VEGETATION {intersect_side.upper()} — STEER {steer}"
+            # Red semi-transparent bar across the top
+            cv2.rectangle(out, (0, 0), (w, 70), (0, 0, 180), -1)
+            cv2.addWeighted(out, 0.6, frame.copy(), 0.4, 0, out)
+            # Re-draw rectangle cleanly after blend
+            cv2.rectangle(out, (0, 0), (w, 70), (0, 0, 200), -1)
+            cv2.putText(out, banner, (10, 48),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2, cv2.LINE_AA)
+        elif self._correcting:
+            # Intersection cleared but still in correction mode
+            cv2.rectangle(out, (0, 0), (w, 70), (0, 140, 0), -1)
+            cv2.putText(out, f"Clearing... ({self._correction_clear_steps}/{_CORRECTION_CLEAR_STEPS})",
+                        (10, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 255, 200), 2, cv2.LINE_AA)
 
         # ── HUD ───────────────────────────────────────────────────────────────
         cv2.putText(out, "bev_omnivla  down-cam",
