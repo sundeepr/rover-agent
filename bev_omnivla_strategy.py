@@ -29,6 +29,7 @@ Usage
 
 import json
 import logging
+import math
 import threading
 from pathlib import Path
 
@@ -152,6 +153,10 @@ class BevOmniVLAStrategy(CloudOmniVLAStrategy):
         self._left_wall:  int | None = None           # inner x of left veg row
         self._right_wall: int | None = None           # inner x of right veg row
 
+        # Latest drive command (captured via _write_result override, used for arc)
+        self._last_vel:    int = 0
+        self._last_radius: int = 0x8000
+
         log.info(
             "BevOmniVLAStrategy ready  icr_offset=%.0fmm  geometry=%s",
             geo["icr_offset_mm"],
@@ -217,9 +222,73 @@ class BevOmniVLAStrategy(CloudOmniVLAStrategy):
             self._left_wall  = left_wall
             self._right_wall = right_wall
 
-            annotated = self._annotate_down(down, geo, mask, left_wall, right_wall, boxes)
+            # Step 5: project drive arc onto down-camera frame
+            arc_px = self._compute_arc_pixels(geo)
+
+            annotated = self._annotate_down(
+                down, geo, mask, left_wall, right_wall, boxes, arc_px)
             with self._down_lock:
                 self._down_annotated = annotated
+
+    # ── Capture vel/radius from parent's result writer ────────────────────────
+
+    def _write_result(self, state, step, phase, waypoints,
+                      vel, radius, goal_status, elapsed) -> None:
+        """Intercept drive command before writing result (used for arc in Step 5)."""
+        self._last_vel    = vel
+        self._last_radius = radius
+        super()._write_result(state, step, phase, waypoints,
+                              vel, radius, goal_status, elapsed)
+
+    # ── Arc computation (Step 5) ──────────────────────────────────────────────
+
+    def _compute_arc_pixels(self, geo: dict) -> list[tuple[int, int]]:
+        """
+        Integrate the planned drive arc in rover-frame mm, then project into
+        down-camera pixel coordinates.
+
+        Rover frame convention (matches the down-camera view):
+          x — lateral  (positive = right in image, increasing pixel-x)
+          y — forward  (positive = ahead of rover, decreasing pixel-y)
+          θ — heading  (0 = straight ahead; positive = turning left)
+
+        Reference pixel: top-centre of rover polygon (forward edge of rover).
+        """
+        vel_mm_s   = self._last_vel
+        radius_mm  = self._last_radius
+        px_per_mm  = float(geo.get("down_px_per_mm", 2.5))
+        lookahead  = float(geo.get("lookahead_s",    1.0))
+        steps      = int(geo.get("arc_steps",        10))
+        poly_raw   = geo.get("rover_polygon_px", _GEO_DEFAULTS["rover_polygon_px"])
+        poly       = np.array(poly_raw, dtype=np.float32)
+
+        # Forward edge of rover = minimum y in image (top of polygon)
+        ref_px = int(poly[:, 0].mean())
+        ref_py = int(poly[:, 1].min())
+
+        dt = lookahead / max(steps, 1)
+        x, y, theta = 0.0, 0.0, 0.0   # rover-frame pose in mm / radians
+
+        pixel_pts: list[tuple[int, int]] = []
+        for _ in range(steps + 1):
+            px = int(ref_px + x * px_per_mm)
+            py = int(ref_py - y * px_per_mm)
+            pixel_pts.append((px, py))
+
+            if vel_mm_s == 0:
+                break                             # stationary — single point
+
+            if radius_mm == 0x8000:               # straight ahead
+                y += vel_mm_s * dt
+            else:
+                ang_rate = vel_mm_s / radius_mm   # rad/s (positive = left)
+                dtheta   = ang_rate * dt
+                # Euler integration in rover frame
+                x     += vel_mm_s * math.sin(theta) * dt
+                y     += vel_mm_s * math.cos(theta) * dt
+                theta += dtheta
+
+        return pixel_pts
 
     # ── Down-camera annotation (grows with each step) ─────────────────────────
 
@@ -231,13 +300,14 @@ class BevOmniVLAStrategy(CloudOmniVLAStrategy):
         left_wall: int | None = None,
         right_wall: int | None = None,
         boxes: list | None = None,
+        arc_px: list | None = None,
     ) -> np.ndarray:
         """Draw overlays onto the down-camera frame.
 
         Step 2: HUD label.
         Step 3: Rover footprint polygon (purple).
         Step 4: ExG vegetation mask (green tint) + wall markers.
-        Arc added in Step 5.
+        Step 5: Planned drive arc (orange polyline).
         """
         out = frame.copy()
         h, w = out.shape[:2]
@@ -275,6 +345,20 @@ class BevOmniVLAStrategy(CloudOmniVLAStrategy):
                 for y in range(0, h, 18):
                     cv2.line(out, (gap_cx, y), (gap_cx, min(y + 10, h)),
                              (0, 220, 255), 1)
+
+        # ── Step 5: Planned drive arc ──────────────────────────────────────────
+        if arc_px and len(arc_px) >= 2:
+            pts = np.array(arc_px, dtype=np.int32).reshape(-1, 1, 2)
+            cv2.polylines(out, [pts], isClosed=False,
+                          color=(0, 140, 255), thickness=3)
+            # Dot at each step
+            for i, pt in enumerate(arc_px):
+                r = 6 if i == 0 else 4
+                cv2.circle(out, pt, r, (0, 100, 255), -1)
+            # Arrowhead at final point
+            if len(arc_px) >= 2:
+                p1, p2 = arc_px[-2], arc_px[-1]
+                cv2.arrowedLine(out, p1, p2, (0, 80, 255), 3, tipLength=0.5)
 
         # ── Step 3: Rover footprint polygon ───────────────────────────────────
         poly_raw = geo.get("rover_polygon_px", _GEO_DEFAULTS["rover_polygon_px"])
