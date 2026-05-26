@@ -180,8 +180,13 @@ class PlantCenterStrategy(NavigationStrategy):
     Pure down-camera reactive control — no cloud inference required.
     """
 
-    # No language goal needed — signal agent_loop to skip the goal_ready gate
+    # No language goal needed — signal agent_loop to skip the goal_ready gate.
     requires_goal = False
+
+    # Pure-vision strategy: each step takes ~5 ms (NumPy + OpenCV, no cloud call).
+    # Run at 10 Hz so the Atlas watchdog (~500 ms timeout) always gets a fresh
+    # drive command and the rover moves smoothly without stop-start behaviour.
+    cycle_interval = 0.10   # seconds between query cycles (10 Hz)
 
     def __init__(self, geometry_path: str | None = None) -> None:
         self._geometry_path = geometry_path

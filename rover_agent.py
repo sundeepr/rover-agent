@@ -160,6 +160,14 @@ def agent_loop(
     last_query_time    = 0.0
     _logged_in_flight  = False
 
+    # Prefer the strategy's own cycle_interval over the CLI --interval flag.
+    # Pure-vision strategies (plant_center, boundary_guard) set this to ~0.1 s
+    # so the rover gets a fresh drive command at 10 Hz instead of the default 3 s.
+    # Cloud/LLM strategies leave it None and rely on the user-supplied --interval.
+    effective_interval = getattr(strategy, "cycle_interval", None) or interval
+    log.info("Query cycle interval: %.2f s  (strategy=%s, cli_interval=%.2f s)",
+             effective_interval, strategy.name, interval)
+
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -182,7 +190,7 @@ def agent_loop(
         goal_ok = (state.goal_ready.is_set()
                    or not getattr(strategy, "requires_goal", True))
         if (goal_ok
-                and now - last_query_time >= interval
+                and now - last_query_time >= effective_interval
                 and not state.paused.is_set()):
             if state.query_in_flight.is_set():
                 if not _logged_in_flight:

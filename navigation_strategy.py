@@ -84,7 +84,20 @@ class NavigationStrategy(ABC):
       1. Create a new file (e.g. my_strategy.py) with a subclass.
       2. Implement run_query(), on_reset(), and name.
       3. Register it in rover_agent._build_strategy().
+
+    Class attributes (override in subclass to customise):
+      requires_goal   — if False, agent_loop skips the goal_ready gate
+                        (useful for strategies that don't use an LLM goal).
+      cycle_interval  — preferred seconds between query cycles, or None to
+                        use the --interval CLI value.  Set to a small value
+                        (e.g. 0.1) for pure-vision strategies that don't
+                        hit a cloud backend — they process in ~5 ms and the
+                        rover's safety watchdog needs a fresh command every
+                        ~500 ms to keep moving.
     """
+
+    requires_goal:  bool        = True   # override to False if no goal needed
+    cycle_interval: float | None = None  # override to e.g. 0.1 for fast local loops
 
     @property
     @abstractmethod
