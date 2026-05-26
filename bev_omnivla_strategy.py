@@ -249,7 +249,11 @@ class BevOmniVLAStrategy(CloudOmniVLAStrategy):
         down = self._get_down_frame()
         intersect_side: str | None = None   # 'left' | 'right' | None
 
-        if down is not None:
+        if down is None:
+            log.warning("bev | down frame not available — skipping intersection guard")
+        else:
+            h_d, w_d = down.shape[:2]
+
             # Step 4: compute vegetation mask and wall positions.
             # Blank out the rover polygon area first so the rover body cannot
             # trigger a false-positive vegetation detection.
@@ -267,7 +271,14 @@ class BevOmniVLAStrategy(CloudOmniVLAStrategy):
                     x1, y1, x2, y2 = (int(v) for v in box)
                     mask[min(y1,y2):max(y1,y2), min(x1,x2):max(x1,x2)] = 0
 
+            veg_px = int(np.sum(mask > 0))
             left_wall, right_wall, boxes = _find_veg_walls(mask, min_area)
+            log.info(
+                "bev | down %dx%d  exg_px=%d  blobs=%d  L=%s  R=%s",
+                w_d, h_d, veg_px, len(boxes),
+                f"{left_wall}px" if left_wall is not None else "none",
+                f"{right_wall}px" if right_wall is not None else "none",
+            )
 
             self._veg_mask   = mask
             self._left_wall  = left_wall
@@ -275,9 +286,25 @@ class BevOmniVLAStrategy(CloudOmniVLAStrategy):
 
             # Step 5: project drive arc onto down-camera frame
             arc_px = self._compute_arc_pixels(geo)
+            log.info(
+                "bev | arc  vel=%d  r=%s  ref=(%d,%d)  pts=%d  tip=(%d,%d)",
+                self._last_vel,
+                "straight" if self._last_radius == 0x8000 else f"{self._last_radius}mm",
+                arc_px[0][0] if arc_px else -1,
+                arc_px[0][1] if arc_px else -1,
+                len(arc_px),
+                arc_px[-1][0] if arc_px else -1,
+                arc_px[-1][1] if arc_px else -1,
+            )
 
             # Step 6: intersection check
             intersect_side = self._check_arc_intersection(arc_px, mask, down.shape[1])
+            log.info(
+                "bev | intersection=%s  correcting=%s  goal='%s'",
+                intersect_side or "none",
+                self._correcting,
+                self._goal[:60],
+            )
             self._handle_intersection(intersect_side, geo, rover_ctrl, state)
 
             # Write comprehensive per-step data record
@@ -404,6 +431,10 @@ class BevOmniVLAStrategy(CloudOmniVLAStrategy):
           θ — heading  (0 = straight ahead; positive = turning left)
 
         Reference pixel: top-centre of rover polygon (forward edge of rover).
+
+        Always returns at least one point (the reference point).
+        Returns exactly one point when vel == 0 so the caller can show a
+        "stopped" indicator instead of no arc at all.
         """
         vel_mm_s   = self._last_vel
         radius_mm  = self._last_radius
@@ -417,6 +448,16 @@ class BevOmniVLAStrategy(CloudOmniVLAStrategy):
         ref_px = int(poly[:, 0].mean())
         ref_py = int(poly[:, 1].min())
 
+        # Rover is stopped — return ref point only so annotation shows a marker
+        if vel_mm_s == 0:
+            return [(ref_px, ref_py)]
+
+        # Spot-turn (radius sentinel ±1): use wheel-base radius as a visual
+        # stand-in — the rover turns on the spot so there is no forward arc,
+        # but showing a tight curve is more informative than nothing.
+        if radius_mm in (1, -1):
+            radius_mm = _WHEEL_BASE_MM // 2 * (-1 if radius_mm == -1 else 1)
+
         dt = lookahead / max(steps, 1)
         x, y, theta = 0.0, 0.0, 0.0   # rover-frame pose in mm / radians
 
@@ -426,13 +467,10 @@ class BevOmniVLAStrategy(CloudOmniVLAStrategy):
             py = int(ref_py - y * px_per_mm)
             pixel_pts.append((px, py))
 
-            if vel_mm_s == 0:
-                break                             # stationary — single point
-
             if radius_mm == 0x8000:               # straight ahead
                 y += vel_mm_s * dt
             else:
-                ang_rate = vel_mm_s / radius_mm   # rad/s (positive = left)
+                ang_rate = vel_mm_s / radius_mm   # rad/s (positive = left turn)
                 dtheta   = ang_rate * dt
                 # Euler integration in rover frame
                 x     += vel_mm_s * math.sin(theta) * dt
@@ -583,7 +621,13 @@ class BevOmniVLAStrategy(CloudOmniVLAStrategy):
                              (0, 220, 255), 1)
 
         # ── Step 5: Planned drive arc ──────────────────────────────────────────
-        if arc_px and len(arc_px) >= 2:
+        if arc_px and len(arc_px) == 1:
+            # Rover is stopped — draw a grey ring at the reference point
+            cv2.circle(out, arc_px[0], 12, (160, 160, 160), 2)
+            cv2.circle(out, arc_px[0],  4, (160, 160, 160), -1)
+            cv2.putText(out, "stopped", (arc_px[0][0] + 16, arc_px[0][1] + 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1, cv2.LINE_AA)
+        elif arc_px and len(arc_px) >= 2:
             pts = np.array(arc_px, dtype=np.int32).reshape(-1, 1, 2)
             cv2.polylines(out, [pts], isClosed=False,
                           color=(0, 140, 255), thickness=3)
@@ -592,9 +636,8 @@ class BevOmniVLAStrategy(CloudOmniVLAStrategy):
                 r = 6 if i == 0 else 4
                 cv2.circle(out, pt, r, (0, 100, 255), -1)
             # Arrowhead at final point
-            if len(arc_px) >= 2:
-                p1, p2 = arc_px[-2], arc_px[-1]
-                cv2.arrowedLine(out, p1, p2, (0, 80, 255), 3, tipLength=0.5)
+            p1, p2 = arc_px[-2], arc_px[-1]
+            cv2.arrowedLine(out, p1, p2, (0, 80, 255), 3, tipLength=0.5)
 
         # ── Step 3: Rover footprint polygon ───────────────────────────────────
         poly_raw = geo.get("rover_polygon_px", _GEO_DEFAULTS["rover_polygon_px"])
