@@ -70,37 +70,35 @@ def _waypoint_to_drive(waypoints: np.ndarray,
                        icr_offset_m: float = 0.480) -> tuple[int, int]:
     """Convert predicted waypoints to (velocity_mm_s, radius_mm).
 
-    Waypoint format (OmniVLA): [x, y, sin(yaw), cos(yaw)]
-      wp[0] — x: forward distance (model units, 1 unit = METRIC_SPACING m)
-      wp[1] — y: lateral offset  (positive = RIGHT in camera frame)
-      wp[2] — sin(yaw): sine   of desired heading at this waypoint
-      wp[3] — cos(yaw): cosine of desired heading at this waypoint
+    Waypoint format (OmniVLA): [x, y, sin_or_cos(yaw), cos_or_sin(yaw)]
+      wp[0] — forward distance (model units × METRIC_SPACING = metres)
+      wp[1] — lateral offset   (positive = RIGHT in camera/model frame)
+      wp[2], wp[3] — heading components (logged for reference, not used here)
 
-    Steering is derived from the heading encoded in wp[2]/wp[3] rather than
-    the raw lateral position, because the heading is a direct prediction of
-    desired angular state and is not distorted by the ICR offset.
+    Steering uses the position-based bearing angle, not the heading directly.
+    Dividing the heading by DT gives an angular rate that is far too large
+    for far waypoints and always clips to MIN_RADIUS_MM.  The bearing angle
+    from atan2(dy, dx) naturally scales with distance: a far waypoint with a
+    small lateral offset gives a small angle and therefore a gentle turn.
 
-    Sign convention: positive yaw in the model = turning RIGHT.
-    In the atlas controller: negative radius = right turn.
-    So: ang_rad_s = -yaw / DT  (negate to convert model → atlas sign).
-
-    icr_offset_m is retained for the forward-velocity scaling (dx/DT) but
-    is no longer used in the angular-rate path.
+    Sign: positive dy (right) → negative ang_rad_s → negative radius (right turn).
+    ICR offset shifts dx forward to reduce over-steering for near-field waypoints.
     """
     wp = waypoints[WAYPOINT_IDX].copy()
-    dx       = float(wp[0]) * METRIC_SPACING   # forward (m)
-    sin_yaw  = float(wp[2])                    # sin of desired heading
-    cos_yaw  = float(wp[3])                    # cos of desired heading
+    dx = float(wp[0]) * METRIC_SPACING   # forward  (m)
+    dy = float(wp[1]) * METRIC_SPACING   # lateral  (m, positive = right)
 
     EPS = 1e-8
-    if abs(dx) < EPS:
+    if abs(dx) < EPS and abs(dy) < EPS:
         return 0, 0x8000
-
-    lin_m_s = dx / DT
-
-    # Heading at the chosen waypoint, negated so positive yaw → right turn
-    yaw_rad   = math.atan2(sin_yaw, cos_yaw)
-    ang_rad_s = -yaw_rad / DT
+    elif abs(dx) < EPS:
+        lin_m_s   = 0.0
+        ang_rad_s = math.copysign(math.pi / (2 * DT), -dy)   # pure lateral
+    else:
+        lin_m_s = dx / DT
+        # Negate dy: positive lat (right) → negative ang_rad_s → right turn.
+        # ICR offset added to dx reduces bearing for near-field waypoints.
+        ang_rad_s = math.atan2(-dy, dx + icr_offset_m) / DT
 
     maxv = max_lin_mm_s / 1000.0
     maxw = MAX_ANG_RAD_S
