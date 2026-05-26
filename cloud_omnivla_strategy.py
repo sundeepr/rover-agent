@@ -290,13 +290,15 @@ class CloudOmniVLAStrategy(NavigationStrategy):
         if resp and resp.get("type") == "waypoints":
             import math as _math
             wps = resp["waypoints"]
+            # Model forward direction = 90° in standard math (sin≈1, cos≈0 when straight).
+            # Show deviation from 90° so 0° = straight, +ve = right, -ve = left.
             log.info(
-                "Step %d | waypoints (8×4)  [fwd, lat, sin_yaw, cos_yaw → yaw_deg]:\n%s",
+                "Step %d | waypoints (8×4)  [fwd, lat, sin, cos → deviation from fwd]:\n%s",
                 step,
                 "\n".join(
                     f"  [{i}] fwd={w[0]:.4f}  lat={w[1]:.4f}  "
                     f"sin={w[2]:.4f}  cos={w[3]:.4f}  "
-                    f"yaw={_math.degrees(_math.atan2(w[2], w[3])):+.1f}°"
+                    f"dev={_math.degrees(_math.atan2(w[2], w[3])) - 90.0:+.1f}°"
                     + (" ← used" if i == 4 else "")
                     for i, w in enumerate(wps)
                 ),
