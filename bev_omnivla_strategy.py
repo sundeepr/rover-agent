@@ -168,11 +168,34 @@ class BevOmniVLAStrategy(CloudOmniVLAStrategy):
     def _annotate_down(self, frame: np.ndarray, geo: dict) -> np.ndarray:
         """Draw overlays onto the down-camera frame.
 
-        Currently just stamps a HUD label so we know the feed is live.
-        Rover polygon, ExG mask and arc are added in Steps 3-5.
+        Step 2: HUD label.
+        Step 3: Rover footprint polygon (purple).
+        ExG mask and arc arc added in Steps 4-5.
         """
         out = frame.copy()
         h, w = out.shape[:2]
+
+        # ── Step 3: Rover footprint polygon ───────────────────────────────────
+        poly_raw = geo.get("rover_polygon_px", _GEO_DEFAULTS["rover_polygon_px"])
+        poly = np.array(poly_raw, dtype=np.int32)
+
+        # Semi-transparent purple fill
+        overlay = out.copy()
+        cv2.fillPoly(overlay, [poly], (180, 0, 180))
+        cv2.addWeighted(overlay, 0.20, out, 0.80, 0, out)
+
+        # Solid purple outline + corner dots
+        cv2.polylines(out, [poly], isClosed=True, color=(220, 0, 220), thickness=2)
+        for pt in poly:
+            cv2.circle(out, tuple(pt), 5, (255, 80, 255), -1)
+
+        # Label inside the polygon (centroid)
+        cx_poly = int(poly[:, 0].mean())
+        cy_poly = int(poly[:, 1].mean())
+        cv2.putText(out, "rover", (cx_poly - 22, cy_poly + 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 180, 255), 1, cv2.LINE_AA)
+
+        # ── HUD ───────────────────────────────────────────────────────────────
         cv2.putText(out, "bev_omnivla  down-cam",
                     (10, 28), cv2.FONT_HERSHEY_SIMPLEX,
                     0.7, (0, 230, 255), 2, cv2.LINE_AA)
