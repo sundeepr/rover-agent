@@ -117,6 +117,9 @@ class BoundaryGuardStrategy(NavigationStrategy):
     Stop the moment any plant encroaches into the guard zone.
     """
 
+    # No language goal needed — signal agent_loop to skip the goal_ready gate
+    requires_goal = False
+
     def __init__(self, geometry_path: str | None = None) -> None:
         self._geometry_path = geometry_path
 

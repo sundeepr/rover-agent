@@ -177,8 +177,11 @@ def agent_loop(
         now = time.time()
 
         # Fire strategy query in a separate thread so camera loop never blocks.
-        # Gate on goal_ready so no queries fire until a goal has been received.
-        if (state.goal_ready.is_set()
+        # Gate on goal_ready so no queries fire until a goal has been received,
+        # unless the strategy declares requires_goal=False (e.g. plant_center).
+        goal_ok = (state.goal_ready.is_set()
+                   or not getattr(strategy, "requires_goal", True))
+        if (goal_ok
                 and now - last_query_time >= interval
                 and not state.paused.is_set()):
             if state.query_in_flight.is_set():

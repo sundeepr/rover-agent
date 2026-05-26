@@ -160,6 +160,9 @@ class PlantCenterStrategy(NavigationStrategy):
     Pure down-camera reactive control — no cloud inference required.
     """
 
+    # No language goal needed — signal agent_loop to skip the goal_ready gate
+    requires_goal = False
+
     def __init__(self, geometry_path: str | None = None) -> None:
         self._geometry_path = geometry_path
 
