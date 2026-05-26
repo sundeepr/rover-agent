@@ -325,6 +325,9 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
     if name == "boundary_guard":
         from boundary_guard_strategy import BoundaryGuardStrategy
         return BoundaryGuardStrategy(geometry_path=args.rover_geometry)
+    if name == "plant_center":
+        from plant_center_strategy import PlantCenterStrategy
+        return PlantCenterStrategy(geometry_path=args.rover_geometry)
     if name == "cloud_omnivla":
         from cloud_omnivla_strategy import CloudOmniVLAStrategy
         _geo = load_geometry(getattr(args, "rover_geometry", None))
@@ -418,7 +421,7 @@ def main():
                         choices=["gemini", "omnivla", "clip_omnivla", "qwen_omnivla",
                                  "hough_crop_row", "crop_row", "row_centering_omnivla",
                                  "cloud_omnivla", "omnivla_full", "bev_omnivla",
-                                 "boundary_guard",
+                                 "boundary_guard", "plant_center",
                                  "paligemma", "ollama", "line_follow", "teleop"],
                         help="Navigation strategy (default: gemini)")
     parser.add_argument("--cloud-server", type=str,  default="ws://localhost:8765",

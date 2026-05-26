@@ -33,5 +33,9 @@
   "boundary_margin_px": 30,
 
   "_boundary_vel_mm_s_help": "Forward velocity (mm/s) while the guard zone is clear. Keep slow — this strategy has no look-ahead, it reacts only when plants are already near the boundary.",
-  "boundary_vel_mm_s": 30
+  "boundary_vel_mm_s": 30,
+
+  "_plant_center_help": "Settings for the plant_center strategy (down-camera-only X-centering between nearest plant walls).",
+  "_centering_gain_help": "P-controller gain: rad/s per mm of lateral error. Default 0.003. Increase (0.005-0.01) for sharper corrections, decrease (0.001-0.002) for smoother but slower corrections. Tune until the rover converges without oscillating.",
+  "centering_gain": 0.003
 }
