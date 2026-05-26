@@ -26,5 +26,12 @@
   "exg_min_area": 500,
 
   "_correction_goal_suffix_help": "Text appended to base goal when correcting. {direction} is auto-filled with 'left' or 'right'.",
-  "correction_goal_suffix": "steer slightly {direction} to avoid vegetation"
+  "correction_goal_suffix": "steer slightly {direction} to avoid vegetation",
+
+  "_boundary_guard_help": "Settings for the boundary_guard strategy (down-camera-only crop row navigation).",
+  "_boundary_margin_px_help": "Width in pixels of the guard zone dilated outward from the rover polygon. Increase if the rover clips plants before stopping. Start at 30 and tune up.",
+  "boundary_margin_px": 30,
+
+  "_boundary_vel_mm_s_help": "Forward velocity (mm/s) while the guard zone is clear. Keep slow — this strategy has no look-ahead, it reacts only when plants are already near the boundary.",
+  "boundary_vel_mm_s": 30
 }
