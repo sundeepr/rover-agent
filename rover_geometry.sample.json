@@ -1,0 +1,27 @@
+{
+  "_comment": "Copy this file to rover_geometry.json and fill in your measured values. All distances in mm, pixels in down-camera space. The file is hot-reloaded every inference cycle — edit and save while the rover is running.",
+
+  "_icr_offset_mm_help": "Distance from front camera lens to rear-axle ICR. Measure with a tape measure.",
+  "icr_offset_mm": 480,
+
+  "_down_px_per_mm_help": "Place a known-size object under the down camera, count pixels it spans, divide by its real width in mm. e.g. credit card (85.6mm wide) spans 214px → 214/85.6 = 2.5",
+  "down_px_per_mm": 2.5,
+
+  "_rover_polygon_px_help": "Pixel corners of the rover footprint as seen in the down-camera feed [x,y]. Click corners in the browser and note coordinates. Order: top-left, top-right, bottom-right, bottom-left.",
+  "rover_polygon_px": [[120, 180], [520, 180], [520, 380], [120, 380]],
+
+  "_lookahead_s_help": "Seconds ahead to project the drive arc. Reduce to 0.5 if rover stops too early, increase to 1.5 if vegetation is not caught in time.",
+  "lookahead_s": 1.0,
+
+  "_arc_steps_help": "Number of integration steps along the arc. Leave at 10.",
+  "arc_steps": 10,
+
+  "_exg_threshold_help": "Excess Green threshold for vegetation detection (ExG = 2G-R-B). Increase (30-40) if soil/path turns green, decrease (10-15) if rows are missed.",
+  "exg_threshold": 20,
+
+  "_exg_min_area_help": "Minimum blob area in pixels to count as vegetation. Increase to 1000-2000 to ignore small speckles.",
+  "exg_min_area": 500,
+
+  "_correction_goal_suffix_help": "Text appended to base goal when correcting. {direction} is auto-filled with 'left' or 'right'.",
+  "correction_goal_suffix": "steer slightly {direction} to avoid vegetation"
+}
