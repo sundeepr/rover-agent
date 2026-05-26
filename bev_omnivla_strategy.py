@@ -39,6 +39,49 @@ from cloud_omnivla_strategy import CloudOmniVLAStrategy
 
 log = logging.getLogger("rover.bev_omnivla")
 
+
+# ── ExG vegetation detection ───────────────────────────────────────────────────
+
+def _exg_mask(frame_bgr: np.ndarray, threshold: int = 20) -> np.ndarray:
+    """Return a binary uint8 mask where ExG = 2G - R - B > threshold."""
+    f   = frame_bgr.astype(np.float32)
+    exg = 2.0 * f[:, :, 1] - f[:, :, 0] - f[:, :, 2]
+    raw = np.clip(exg, 0, 255).astype(np.uint8)
+    _, mask = cv2.threshold(raw, threshold, 255, cv2.THRESH_BINARY)
+    kernel  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    mask    = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    mask    = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel)
+    return mask
+
+
+def _find_veg_walls(
+    mask: np.ndarray, min_area: int = 500
+) -> tuple[int | None, int | None, list]:
+    """
+    From a binary ExG mask find left/right vegetation wall x-positions.
+
+    Returns (left_wall_x, right_wall_x, boxes) where boxes are [x1,y1,x2,y2].
+    left_wall_x  — inner (rightmost) edge of left-side vegetation.
+    right_wall_x — inner (leftmost)  edge of right-side vegetation.
+    Either can be None if that side has no vegetation blobs.
+    """
+    h, w = mask.shape[:2]
+    cx   = w // 2
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    boxes = []
+    for cnt in contours:
+        if cv2.contourArea(cnt) < min_area:
+            continue
+        x, y, bw, bh = cv2.boundingRect(cnt)
+        boxes.append([x, y, x + bw, y + bh])
+
+    left_boxes  = [b for b in boxes if (b[0] + b[2]) / 2 < cx]
+    right_boxes = [b for b in boxes if (b[0] + b[2]) / 2 >= cx]
+
+    left_wall  = int(max((b[2] for b in left_boxes),  default=None or -1)) if left_boxes  else None
+    right_wall = int(min((b[0] for b in right_boxes), default=None or w))  if right_boxes else None
+    return left_wall, right_wall, boxes
+
 # ── Geometry defaults (mirrors rover_agent._GEOMETRY_DEFAULTS) ─────────────────
 _GEO_DEFAULTS = {
     "icr_offset_mm":          480,
@@ -104,6 +147,11 @@ class BevOmniVLAStrategy(CloudOmniVLAStrategy):
         self._down_lock  = threading.Lock()
         self._down_annotated: np.ndarray | None = None  # updated each query cycle
 
+        # Vegetation detection results (set in _do_query, used by Step 6)
+        self._veg_mask:   np.ndarray | None = None   # binary ExG mask
+        self._left_wall:  int | None = None           # inner x of left veg row
+        self._right_wall: int | None = None           # inner x of right veg row
+
         log.info(
             "BevOmniVLAStrategy ready  icr_offset=%.0fmm  geometry=%s",
             geo["icr_offset_mm"],
@@ -155,25 +203,78 @@ class BevOmniVLAStrategy(CloudOmniVLAStrategy):
         # Run the parent cloud inference + ICR-corrected drive
         super()._do_query(state, frame, rover_ctrl)
 
-        # Annotate down-camera frame (currently: pass-through; overlays added in
-        # later steps as rover footprint, ExG mask and arc are implemented)
+        # ── Down-camera: ExG mask + annotation ───────────────────────────────
         down = self._get_down_frame()
         if down is not None:
-            annotated = self._annotate_down(down, geo)
+            # Step 4: compute vegetation mask and wall positions
+            threshold = int(geo.get("exg_threshold", 20))
+            min_area  = int(geo.get("exg_min_area",  500))
+            mask = _exg_mask(down, threshold)
+            left_wall, right_wall, boxes = _find_veg_walls(mask, min_area)
+
+            # Store for Step 6 (intersection check)
+            self._veg_mask   = mask
+            self._left_wall  = left_wall
+            self._right_wall = right_wall
+
+            annotated = self._annotate_down(down, geo, mask, left_wall, right_wall, boxes)
             with self._down_lock:
                 self._down_annotated = annotated
 
     # ── Down-camera annotation (grows with each step) ─────────────────────────
 
-    def _annotate_down(self, frame: np.ndarray, geo: dict) -> np.ndarray:
+    def _annotate_down(
+        self,
+        frame: np.ndarray,
+        geo: dict,
+        veg_mask: np.ndarray | None = None,
+        left_wall: int | None = None,
+        right_wall: int | None = None,
+        boxes: list | None = None,
+    ) -> np.ndarray:
         """Draw overlays onto the down-camera frame.
 
         Step 2: HUD label.
         Step 3: Rover footprint polygon (purple).
-        ExG mask and arc arc added in Steps 4-5.
+        Step 4: ExG vegetation mask (green tint) + wall markers.
+        Arc added in Step 5.
         """
         out = frame.copy()
         h, w = out.shape[:2]
+
+        # ── Step 4: ExG vegetation overlay ────────────────────────────────────
+        if veg_mask is not None:
+            # Green tint wherever vegetation is detected
+            green_layer = np.zeros_like(out)
+            green_layer[veg_mask > 0] = (0, 200, 60)
+            cv2.addWeighted(green_layer, 0.45, out, 0.55, 0, out)
+
+            # Draw bounding boxes (orange=left side, blue=right side)
+            if boxes:
+                cx = w // 2
+                for b in boxes:
+                    color = (0, 140, 255) if (b[0] + b[2]) / 2 < cx else (255, 140, 0)
+                    cv2.rectangle(out, (b[0], b[1]), (b[2], b[3]), color, 1)
+
+            # Left wall edge (orange vertical line)
+            if left_wall is not None:
+                cv2.line(out, (left_wall, 0), (left_wall, h), (0, 140, 255), 2)
+                cv2.putText(out, f"L={left_wall}px", (left_wall + 4, h - 6),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 140, 255), 1)
+
+            # Right wall edge (blue vertical line)
+            if right_wall is not None:
+                cv2.line(out, (right_wall, 0), (right_wall, h), (255, 140, 0), 2)
+                cv2.putText(out, f"R={right_wall}px",
+                            (max(right_wall - 70, 0), h - 6),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 140, 0), 1)
+
+            # Gap centre dashed line (yellow)
+            if left_wall is not None and right_wall is not None:
+                gap_cx = (left_wall + right_wall) // 2
+                for y in range(0, h, 18):
+                    cv2.line(out, (gap_cx, y), (gap_cx, min(y + 10, h)),
+                             (0, 220, 255), 1)
 
         # ── Step 3: Rover footprint polygon ───────────────────────────────────
         poly_raw = geo.get("rover_polygon_px", _GEO_DEFAULTS["rover_polygon_px"])
