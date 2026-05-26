@@ -414,8 +414,8 @@ def main():
     parser.add_argument("--strategy",    type=str,   default="gemini",
                         choices=["gemini", "omnivla", "clip_omnivla", "qwen_omnivla",
                                  "hough_crop_row", "crop_row", "row_centering_omnivla",
-                                 "cloud_omnivla", "omnivla_full", "paligemma", "ollama",
-                                 "line_follow", "teleop"],
+                                 "cloud_omnivla", "omnivla_full", "bev_omnivla",
+                                 "paligemma", "ollama", "line_follow", "teleop"],
                         help="Navigation strategy (default: gemini)")
     parser.add_argument("--cloud-server", type=str,  default="ws://localhost:8765",
                         metavar="URL",
