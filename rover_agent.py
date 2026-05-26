@@ -462,11 +462,11 @@ def main():
                              "(ICR offset, down-camera scale, rover polygon, etc.). "
                              "Defaults to rover_geometry.json in the working directory. "
                              "Hot-reloaded each inference cycle by bev_omnivla.")
-    parser.add_argument("--omnivla-velocity", type=int, default=150,
+    parser.add_argument("--omnivla-velocity", type=int, default=55,
                         metavar="MM_S",
                         help="Forward velocity for OmniVLA strategies in mm/s "
-                             "(default: 25). MIN_RADIUS_MM is auto-computed as "
-                             "vel / MAX_ANG_RAD_S.")
+                             "(default: 55, ~27%% wheel power). MIN_RADIUS_MM "
+                             "is auto-computed as vel / MAX_ANG_RAD_S.")
     parser.add_argument("--line-vel", type=int, default=80, metavar="MM_S",
                         help="Forward speed for line_follow strategy (default: 80)")
     parser.add_argument("--line-kp", type=float, default=2000.0, metavar="GAIN",
