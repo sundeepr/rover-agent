@@ -249,10 +249,17 @@ class BevOmniVLAStrategy(CloudOmniVLAStrategy):
         intersect_side: str | None = None   # 'left' | 'right' | None
 
         if down is not None:
-            # Step 4: compute vegetation mask and wall positions
+            # Step 4: compute vegetation mask and wall positions.
+            # Blank out the rover polygon area first so the rover body cannot
+            # trigger a false-positive vegetation detection.
             threshold = int(geo.get("exg_threshold", 20))
             min_area  = int(geo.get("exg_min_area",  500))
             mask = _exg_mask(down, threshold)
+
+            poly_raw = geo.get("rover_polygon_px", _GEO_DEFAULTS["rover_polygon_px"])
+            rover_poly = np.array(poly_raw, dtype=np.int32)
+            cv2.fillPoly(mask, [rover_poly], 0)   # zero out rover footprint
+
             left_wall, right_wall, boxes = _find_veg_walls(mask, min_area)
 
             self._veg_mask   = mask
