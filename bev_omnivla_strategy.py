@@ -102,6 +102,29 @@ _CORRECTION_CLEAR_STEPS = 3
 # Thickness (px) of the arc corridor sampled against the vegetation mask
 _ARC_CHECK_THICKNESS = 10
 
+# Atlas wheel base / reference speed (mirrors atlas_controller constants)
+_WHEEL_BASE_MM        = 650
+_MAX_VEL_REF_MM_S     = 200
+
+
+def _vel_radius_to_lr(vel: int, radius: int) -> tuple[int, int]:
+    """Replicate atlas_controller._velocity_radius_to_lr for data logging."""
+    if vel == 0:
+        return 0, 0
+    if radius == 0x8000:
+        pct = max(-100, min(100, int(vel / _MAX_VEL_REF_MM_S * 100)))
+        return pct, pct
+    if radius == 1:
+        return 60, -60   # DRIVE_SPEED_PCT
+    if radius == -1:
+        return -60, 60
+    ratio = max(-0.9, min(0.9, _WHEEL_BASE_MM / (2 * radius)))
+    v_r   = vel * (1 + ratio)
+    v_l   = vel * (1 - ratio)
+    max_v = max(abs(v_r), abs(v_l), _MAX_VEL_REF_MM_S)
+    return (max(-100, min(100, int(v_l / max_v * 100))),
+            max(-100, min(100, int(v_r / max_v * 100))))
+
 
 def _load_geometry(path: str | None) -> dict:
     """Read rover_geometry.json, filling missing keys from defaults."""
@@ -160,9 +183,10 @@ class BevOmniVLAStrategy(CloudOmniVLAStrategy):
         self._left_wall:  int | None = None           # inner x of left veg row
         self._right_wall: int | None = None           # inner x of right veg row
 
-        # Latest drive command (captured via _write_result override, used for arc)
-        self._last_vel:    int = 0
-        self._last_radius: int = 0x8000
+        # Latest drive command + waypoints (captured via _write_result, used for arc + logging)
+        self._last_vel:       int             = 0
+        self._last_radius:    int             = 0x8000
+        self._last_waypoints: np.ndarray | None = None
 
         # Intersection guard state (Step 6)
         self._base_goal              = goal   # original goal before any correction
@@ -242,18 +266,114 @@ class BevOmniVLAStrategy(CloudOmniVLAStrategy):
             intersect_side = self._check_arc_intersection(arc_px, mask, down.shape[1])
             self._handle_intersection(intersect_side, geo, rover_ctrl, state)
 
+            # Write comprehensive per-step data record
+            self._write_step_data(state, geo, left_wall, right_wall,
+                                  len(boxes), arc_px, intersect_side)
+
             annotated = self._annotate_down(
                 down, geo, mask, left_wall, right_wall, boxes, arc_px, intersect_side)
             with self._down_lock:
                 self._down_annotated = annotated
 
+    # ── Per-step data logging ─────────────────────────────────────────────────
+
+    def _write_step_data(
+        self,
+        state,
+        geo:          dict,
+        left_wall:    int | None,
+        right_wall:   int | None,
+        blob_count:   int,
+        arc_px:       list[tuple[int, int]],
+        intersect_side: str | None,
+    ) -> None:
+        """Write one record to data.jsonl with all computed values for this step."""
+        if state.recorder is None:
+            return
+
+        vel    = self._last_vel
+        radius = self._last_radius
+        wps    = self._last_waypoints
+        L, R   = _vel_radius_to_lr(vel, radius)
+
+        # Angular rate at ICR
+        if radius not in (0, 0x8000, 1, -1) and vel != 0:
+            ang_rad_s = round(vel / radius, 4)
+        else:
+            ang_rad_s = 0.0
+
+        # Waypoints: raw model units and converted to metres
+        wps_raw: list | None = None
+        wps_metric: list | None = None
+        if wps is not None:
+            from omnivla_strategy import METRIC_SPACING, WAYPOINT_IDX
+            wps_raw    = wps.tolist()
+            wps_metric = [[round(float(w[0]) * METRIC_SPACING, 4),
+                           round(float(w[1]) * METRIC_SPACING, 4)]
+                          for w in wps]
+
+        gap_cx = ((left_wall + right_wall) // 2
+                  if left_wall is not None and right_wall is not None else None)
+
+        record = {
+            "step":    state.step,
+            "goal":    self._goal,
+            "correcting":       self._correcting,
+            "corrective_active": self._correcting,
+            "base_goal":        self._base_goal if self._correcting else None,
+
+            "drive": {
+                "vel_mm_s":        vel,
+                "radius_mm":       None if radius == 0x8000 else radius,
+                "angular_rate_rad_s": ang_rad_s,
+                "wheel_L_pct":     L,
+                "wheel_R_pct":     R,
+                "icr_offset_mm":   geo.get("icr_offset_mm", 480),
+                "straight":        radius == 0x8000,
+            },
+
+            "waypoints": {
+                "used_idx":     4,   # WAYPOINT_IDX
+                "raw_units":    wps_raw,
+                "metric_m":     wps_metric,
+            },
+
+            "vegetation": {
+                "detected":      left_wall is not None or right_wall is not None,
+                "left_wall_px":  left_wall,
+                "right_wall_px": right_wall,
+                "gap_cx_px":     gap_cx,
+                "blob_count":    blob_count,
+                "exg_threshold": geo.get("exg_threshold", 20),
+                "exg_min_area":  geo.get("exg_min_area",  500),
+            },
+
+            "arc": {
+                "lookahead_s":  geo.get("lookahead_s",    1.0),
+                "steps":        geo.get("arc_steps",      10),
+                "px_per_mm":    geo.get("down_px_per_mm", 2.5),
+                "points_px":    arc_px,
+            },
+
+            "intersection": {
+                "detected": intersect_side is not None,
+                "side":     intersect_side,
+            },
+        }
+
+        try:
+            state.recorder.write_data(record)
+        except Exception as e:
+            log.debug("write_data error: %s", e)
+
     # ── Capture vel/radius from parent's result writer ────────────────────────
 
     def _write_result(self, state, step, phase, waypoints,
                       vel, radius, goal_status, elapsed) -> None:
-        """Intercept drive command before writing result (used for arc in Step 5)."""
-        self._last_vel    = vel
-        self._last_radius = radius
+        """Intercept drive command before writing result (arc + data logging)."""
+        self._last_vel       = vel
+        self._last_radius    = radius
+        self._last_waypoints = waypoints.copy() if waypoints is not None else None
         super()._write_result(state, step, phase, waypoints,
                               vel, radius, goal_status, elapsed)
 

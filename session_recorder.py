@@ -18,18 +18,21 @@ Creates a new timestamped directory under the resolved sessions root each run:
 
     <sessions_dir>/
       YYYYMMDD_HHMMSS/
-        raw.avi           — continuous raw camera feed (MJPG; crash-safe)
-        annotated.avi     — LLM-annotated frames (MJPG; last decision held
-                            until the next one arrives)
-        decisions.jsonl   — one JSON record per LLM/VLM decision step
-        raw.avi           — raw video (MJPG; replaces raw.mp4)
-        annotated.avi     — annotated video (MJPG; replaces annotated.mp4)
-        events.jsonl      — every drive command, goal change, pause/resume, and
-                            operator joystick input; each record has ts (epoch
-                            float) and frame_idx for video correlation
+        raw.avi        — front camera raw feed (MJPG; crash-safe)
+        down.avi       — downward camera raw feed (MJPG; when --down-device set)
+        data.jsonl     — one JSON record per inference step containing:
+                           waypoints, drive command (vel, radius, L%, R%),
+                           vegetation detection (walls, gap, blobs),
+                           trajectory arc pixel points, intersection side,
+                           ICR offset, goal string
+        decisions.jsonl — one JSON record per LLM/VLM decision step (legacy)
+        events.jsonl   — every drive command, goal change, pause/resume, and
+                         operator joystick input; each record has ts (epoch
+                         float) and frame_idx for video correlation
 
 write_frames() is called from the agent_loop thread on every camera tick.
 write_decision() is called from strategy threads (thread-safe via lock).
+write_data() is called from strategy threads with per-step computed values.
 close() is called once on agent shutdown.
 """
 
@@ -140,8 +143,8 @@ class SessionRecorder:
 
         # VideoWriters are lazy-initialised on the first write call so the
         # frame dimensions are known before the writers are created.
+        # Only raw video is saved — annotated frames are not written to disk.
         self._raw_writer:  Optional[cv2.VideoWriter] = None
-        self._ann_writer:  Optional[cv2.VideoWriter] = None
         self._down_writer: Optional[cv2.VideoWriter] = None
 
         # Frame counter — incremented on every write_frames() call so that
@@ -157,30 +160,22 @@ class SessionRecorder:
         self._events_lock = threading.Lock()
         self._events_fh = open(self._events_path, "a", encoding="utf-8")
 
+        # Per-step data log: waypoints, drive params, vegetation, arc, intersection
+        self._data_path = self.session_dir / "data.jsonl"
+        self._data_lock = threading.Lock()
+        self._data_fh = open(self._data_path, "a", encoding="utf-8")
+
         log.info("Session recording started: %s", self.session_dir.resolve())
 
     # ── Video ──────────────────────────────────────────────────────────────────
     # Called from the agent_loop thread — VideoWriters need no locking.
 
-    def write_frames(
-        self,
-        raw: np.ndarray,
-        annotated: Optional[np.ndarray],
-    ) -> None:
-        """
-        Write one camera-rate frame pair.
-
-        raw       — the unmodified camera frame.
-        annotated — the latest LLM-annotated frame, or None to repeat raw
-                    (used before the first decision arrives).
-        """
+    def write_frames(self, raw: np.ndarray) -> None:
+        """Write one raw camera frame to raw.avi (lazy-init, no annotated copy)."""
         h, w = raw.shape[:2]
-
         if self._raw_writer is None:
             # MJPG in .avi writes the index incrementally — files are playable
             # even if the process is killed before close() is called.
-            # mp4v/.mp4 writes the moov atom only on release(), so any crash
-            # produces an unplayable file.
             fourcc = cv2.VideoWriter_fourcc(*"MJPG")
             self._raw_writer = cv2.VideoWriter(
                 str(self.session_dir / "raw.avi"), fourcc, self._fps, (w, h)
@@ -194,20 +189,8 @@ class SessionRecorder:
                 )
                 import os
                 os._exit(1)
-
-        if self._ann_writer is None:
-            fourcc = cv2.VideoWriter_fourcc(*"MJPG")
-            self._ann_writer = cv2.VideoWriter(
-                str(self.session_dir / "annotated.avi"), fourcc, self._fps, (w, h)
-            )
-            if not self._ann_writer.isOpened():
-                log.error("annotated.avi VideoWriter failed to open — annotated video will not be saved")
-                self._ann_writer = None
-
         if self._raw_writer:
             self._raw_writer.write(raw)
-        if self._ann_writer:
-            self._ann_writer.write(annotated if annotated is not None else raw)
         self._frame_idx += 1
 
     def write_down_frame(self, frame: np.ndarray) -> None:
@@ -223,6 +206,21 @@ class SessionRecorder:
                 self._down_writer = None
         if self._down_writer:
             self._down_writer.write(frame)
+
+    # ── Per-step data log ──────────────────────────────────────────────────────
+    # Called from strategy threads — guarded by a lock.
+
+    def write_data(self, record: dict) -> None:
+        """Append one JSON record to data.jsonl (thread-safe).
+
+        Intended for per-inference-step computed values: waypoints, drive
+        command, wheel powers, vegetation detection, arc points, intersection.
+        Automatically injects 'ts' and 'frame_idx'.
+        """
+        record = {"ts": time.time(), "frame_idx": self._frame_idx, **record}
+        with self._data_lock:
+            self._data_fh.write(json.dumps(record) + "\n")
+            self._data_fh.flush()
 
     # ── Decisions ──────────────────────────────────────────────────────────────
     # Called from strategy threads — guarded by a lock.
@@ -257,13 +255,10 @@ class SessionRecorder:
     # ── Cleanup ────────────────────────────────────────────────────────────────
 
     def close(self) -> None:
-        """Release video writers and close the decisions file."""
+        """Release video writers and close all log files."""
         if self._raw_writer:
             self._raw_writer.release()
             self._raw_writer = None
-        if self._ann_writer:
-            self._ann_writer.release()
-            self._ann_writer = None
         if self._down_writer:
             self._down_writer.release()
             self._down_writer = None
@@ -271,4 +266,6 @@ class SessionRecorder:
             self._decisions_fh.close()
         with self._events_lock:
             self._events_fh.close()
+        with self._data_lock:
+            self._data_fh.close()
         log.info("Session recording saved: %s", self.session_dir.resolve())
