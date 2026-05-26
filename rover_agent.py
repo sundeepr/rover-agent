@@ -32,6 +32,7 @@ Usage:
 """
 
 import argparse
+import json
 import logging
 import signal
 import sys
@@ -76,6 +77,36 @@ def setup_logging() -> logging.Logger:
 
 
 log = setup_logging()
+
+
+# ── Rover geometry helpers ────────────────────────────────────────────────────
+
+_GEOMETRY_DEFAULTS = {
+    "icr_offset_mm":          480,
+    "down_px_per_mm":         2.5,
+    "rover_polygon_px":       [[120, 180], [520, 180], [520, 380], [120, 380]],
+    "lookahead_s":            1.0,
+    "arc_steps":              10,
+    "exg_threshold":          20,
+    "exg_min_area":           500,
+    "correction_goal_suffix": "steer slightly {direction} to avoid vegetation",
+}
+
+
+def load_geometry(path: str | None) -> dict:
+    """Load rover_geometry.json, merging with defaults for any missing keys."""
+    cfg = _GEOMETRY_DEFAULTS.copy()
+    if path:
+        p = Path(path)
+        if p.exists():
+            try:
+                cfg.update(json.loads(p.read_text()))
+                log.info("Rover geometry loaded from %s", p)
+            except Exception as e:
+                log.warning("Could not read %s (%s) — using defaults", p, e)
+        else:
+            log.warning("rover-geometry file not found: %s — using defaults", p)
+    return cfg
 
 
 # ── Agent loop (runs on a daemon thread) ───────────────────────────────────────
@@ -290,17 +321,21 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
         )
     if name == "cloud_omnivla":
         from cloud_omnivla_strategy import CloudOmniVLAStrategy
+        _geo = load_geometry(getattr(args, "rover_geometry", None))
         return CloudOmniVLAStrategy(
             server_url=args.cloud_server,
             goal=args.goal,
             max_lin_mm_s=args.omnivla_velocity,
+            icr_offset_m=_geo["icr_offset_mm"] / 1000.0,
         )
     if name == "omnivla_full":
         from omnivla_full_strategy import OmniVLAFullStrategy
+        _geo = load_geometry(getattr(args, "rover_geometry", None))
         return OmniVLAFullStrategy(
             server_url=args.cloud_server,
             goal=args.goal,
             max_lin_mm_s=args.omnivla_velocity,
+            icr_offset_m=_geo["icr_offset_mm"] / 1000.0,
         )
     if name == "paligemma":
         from paligemma_strategy import PaliGemmaStrategy
@@ -418,6 +453,12 @@ def main():
                         metavar="HOST:PORT",
                         help="Address of a running omnivla_server.py "
                              "(e.g. localhost:5100)")
+    parser.add_argument("--rover-geometry", type=str, default="rover_geometry.json",
+                        metavar="FILE",
+                        help="Path to rover_geometry.json for tunable measurements "
+                             "(ICR offset, down-camera scale, rover polygon, etc.). "
+                             "Defaults to rover_geometry.json in the working directory. "
+                             "Hot-reloaded each inference cycle by bev_omnivla.")
     parser.add_argument("--omnivla-velocity", type=int, default=150,
                         metavar="MM_S",
                         help="Forward velocity for OmniVLA strategies in mm/s "

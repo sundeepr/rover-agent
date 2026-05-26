@@ -32,3 +32,6 @@ captures/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local rover tuning (machine-specific, not committed)
+rover_geometry.json

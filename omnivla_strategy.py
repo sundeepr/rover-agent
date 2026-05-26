@@ -66,12 +66,19 @@ MODALITY_GOAL_IMG = 6
 # ── Pure functions (no torch imports needed) ───────────────────────────────────
 
 def _waypoint_to_drive(waypoints: np.ndarray,
-                       max_lin_mm_s: int = MAX_LIN_MM_S) -> tuple[int, int]:
+                       max_lin_mm_s: int = MAX_LIN_MM_S,
+                       icr_offset_m: float = 0.480) -> tuple[int, int]:
     """Convert predicted waypoints to (velocity_mm_s, radius_mm) via PD controller.
 
     Matches the controller in run_omnivla.py: atan2(dy, dx)/DT for angular rate,
     then radius = vel / ang_rate with velocity limiting.
     MIN_RADIUS_MM is auto-computed from max_lin_mm_s / MAX_ANG_RAD_S.
+
+    icr_offset_m — distance (metres) from the front camera to the rover's
+    Instantaneous Centre of Rotation (rear axle).  Adding this to dx when
+    computing atan2 reduces the bearing angle for near-field waypoints,
+    correcting for the fact that the camera leads the rotation centre.
+    Set to 0.0 to recover the original behaviour.
     """
     wp = waypoints[WAYPOINT_IDX].copy()
     dx = float(wp[0]) * METRIC_SPACING   # forward (m)
@@ -85,7 +92,10 @@ def _waypoint_to_drive(waypoints: np.ndarray,
         ang_rad_s = math.copysign(math.pi / (2 * DT), dy)
     else:
         lin_m_s   = dx / DT
-        ang_rad_s = math.atan2(dy, dx) / DT
+        # ICR correction: bearing is computed relative to the rotation centre,
+        # which is icr_offset_m behind the camera.  Shifting dx forward by that
+        # amount reduces over-steering on close lateral waypoints.
+        ang_rad_s = math.atan2(dy, dx + icr_offset_m) / DT
 
     maxv = max_lin_mm_s / 1000.0
     maxw = MAX_ANG_RAD_S
