@@ -365,20 +365,35 @@ _HTML = """<!DOCTYPE html>
     const _waypoints = [];  // [{nx, ny}, ...]
 
     /**
-     * Return the pixel rect {x, y, w, h} of the actual image content inside
-     * the <img> element, accounting for object-fit:contain letterboxing.
-     * nx/ny waypoint coords (0-1) are relative to this rect, not the element.
+     * Return the pixel rect {x, y, w, h} of the actual image content in
+     * CANVAS coordinates (i.e. relative to the .video-box / positioned parent).
+     *
+     * The canvas is position:absolute over the full .video-box which includes
+     * the label div above the <img>.  img.offsetTop accounts for that gap so
+     * all returned coordinates are directly usable in canvas draw calls and
+     * for mapping click events from canvas.getBoundingClientRect().
+     *
+     * object-fit:contain may add letterbox bars inside the <img> element when
+     * the container aspect ratio doesn't match the stream (4:3).  Those are
+     * also folded in so {x,y} is the top-left of the actual video pixels.
      */
     function _imgContentRect(img) {
       const cw = img.offsetWidth;
       const ch = img.offsetHeight;
       const nw = img.naturalWidth  || 640;
       const nh = img.naturalHeight || 480;
-      if (!nw || !nh || !cw || !ch) return {x: 0, y: 0, w: cw, h: ch};
+      // img's top-left in the canvas / .video-box coordinate system
+      const ox = img.offsetLeft;
+      const oy = img.offsetTop;
+      if (!nw || !nh || !cw || !ch) return {x: ox, y: oy, w: cw, h: ch};
       const scale = Math.min(cw / nw, ch / nh);
       const w = nw * scale;
       const h = nh * scale;
-      return { x: (cw - w) / 2, y: (ch - h) / 2, w, h };
+      return {
+        x: ox + (cw - w) / 2,
+        y: oy + (ch - h) / 2,
+        w, h,
+      };
     }
 
     function _redrawCanvas() {
