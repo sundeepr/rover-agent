@@ -15,6 +15,7 @@ Then start the agent:
 """
 
 import argparse
+import asyncio
 import logging
 import time
 import threading
@@ -26,8 +27,56 @@ from flask import Flask, Response, jsonify, render_template_string, request, sen
 
 log = logging.getLogger("rover.web_server")
 
+# ── WebRTC imports (optional — falls back to MJPEG if not installed) ──────────
+try:
+    import fractions
+    from av import VideoFrame
+    from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
+    from aiortc.contrib.media import MediaBlackhole
+    _WEBRTC_AVAILABLE = True
+except ImportError:
+    _WEBRTC_AVAILABLE = False
+    log.warning("aiortc not installed — WebRTC disabled, MJPEG fallback active. "
+                "Install with: pip install aiortc")
+
 # How long without a push before the agent is considered disconnected.
 AGENT_TIMEOUT_S = 10.0
+
+# ── WebRTC video track ────────────────────────────────────────────────────────
+
+if _WEBRTC_AVAILABLE:
+    class JpegVideoTrack(MediaStreamTrack):
+        """
+        Pulls the latest JPEG from _ServerState and yields VideoFrames at ~20 fps.
+        Always sends the most recent frame — never queues stale frames.
+        """
+        kind = "video"
+
+        def __init__(self, get_jpeg_fn, blank_jpeg: bytes):
+            super().__init__()
+            self._get_jpeg = get_jpeg_fn
+            self._blank    = blank_jpeg
+            self._pts      = 0
+            self._clock    = fractions.Fraction(1, 20)   # 20 fps time base
+
+        async def recv(self):
+            jpeg = self._get_jpeg()
+            data = jpeg if jpeg is not None else self._blank
+
+            buf = np.frombuffer(data, dtype=np.uint8)
+            img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+            if img is None:
+                img = np.zeros((480, 640, 3), dtype=np.uint8)
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+            frame = VideoFrame.from_ndarray(img_rgb, format="rgb24")
+            frame.pts      = self._pts
+            frame.time_base = self._clock
+            self._pts      += 1
+
+            # Pace at 20 fps
+            await asyncio.sleep(0.05)
+            return frame
 
 # ── HTML template ──────────────────────────────────────────────────────────────
 
@@ -152,17 +201,17 @@ _HTML = """<!DOCTYPE html>
       <div class="videos-row">
         <div class="video-box" style="position:relative;">
           <div class="label">&#x1F534; Live camera — click to add waypoints</div>
-          <img id="live-img" src="/video/realtime" alt="live feed" style="width:100%;display:block;">
+          <video id="live-img" autoplay playsinline muted style="width:100%;display:block;background:#000;"></video>
           <canvas id="waypoint-canvas" style="position:absolute;top:0;left:0;width:100%;height:100%;cursor:crosshair;"></canvas>
         </div>
         <div class="video-box" style="position:relative;">
           <div class="label">&#x1F9E0; Last query — with waypoints</div>
-          <img id="llm-img" src="/video/llm" alt="LLM frame" style="width:100%;display:block;">
+          <video id="llm-img" autoplay playsinline muted style="width:100%;display:block;background:#000;"></video>
           <canvas id="llm-canvas" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></canvas>
         </div>
         <div class="video-box" id="down-cam-box" style="position:relative;">
           <div class="label">&#x1F4F7; Down camera — row centering</div>
-          <img id="down-img" src="/video/down" alt="down camera" style="width:100%;display:block;">
+          <video id="down-img" autoplay playsinline muted style="width:100%;display:block;background:#000;"></video>
           <canvas id="down-canvas" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></canvas>
         </div>
       </div>
@@ -260,6 +309,64 @@ _HTML = """<!DOCTYPE html>
   </div>
 
   <script>
+    // ── WebRTC video setup ────────────────────────────────────────────────────
+    async function _startWebRTC(elementId, stream) {
+      const pc = new RTCPeerConnection({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+      });
+
+      pc.ontrack = e => {
+        const el = document.getElementById(elementId);
+        if (el && e.streams[0]) el.srcObject = e.streams[0];
+      };
+
+      // Dummy transceiver to receive video
+      pc.addTransceiver('video', { direction: 'recvonly' });
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      // Wait for ICE gathering to complete
+      await new Promise(resolve => {
+        if (pc.iceGatheringState === 'complete') { resolve(); return; }
+        pc.onicegatheringstatechange = () => {
+          if (pc.iceGatheringState === 'complete') resolve();
+        };
+        setTimeout(resolve, 3000);  // fallback timeout
+      });
+
+      try {
+        const r = await fetch('/webrtc/offer/' + stream, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sdp:  pc.localDescription.sdp,
+            type: pc.localDescription.type,
+          }),
+        });
+        if (!r.ok) throw new Error('offer rejected: ' + r.status);
+        const answer = await r.json();
+        await pc.setRemoteDescription(new RTCSessionDescription(answer));
+      } catch (e) {
+        console.warn('WebRTC failed for', stream, '— falling back to MJPEG:', e);
+        // Fallback: replace <video> with <img> MJPEG
+        const el = document.getElementById(elementId);
+        if (el) {
+          const img = document.createElement('img');
+          img.id    = elementId;
+          img.src   = '/video/' + stream;
+          img.style = el.getAttribute('style') || '';
+          el.parentNode.replaceChild(img, el);
+        }
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      _startWebRTC('live-img',  'realtime');
+      _startWebRTC('llm-img',   'llm');
+      _startWebRTC('down-img',  'down');
+    });
+
     // ── Teleop waypoint canvas ────────────────────────────────────────────────
     const _waypoints = [];  // [{nx, ny}, ...]
 
@@ -823,6 +930,17 @@ class WebServer:
         self._app     = Flask(__name__)
         self._register_routes()
 
+        # Blank JPEG for WebRTC tracks before agent connects
+        _, buf = cv2.imencode(".jpg", self._blank)
+        self._blank_jpeg = buf.tobytes()
+
+        # Asyncio loop for aiortc (runs in a daemon thread)
+        self._loop = asyncio.new_event_loop()
+        self._pcs: set = set()   # active RTCPeerConnections
+        if _WEBRTC_AVAILABLE:
+            threading.Thread(target=self._loop.run_forever, daemon=True,
+                             name="webrtc-loop").start()
+
     def run(self, host: str = "0.0.0.0", port: int = 5001) -> None:
         werkzeug_log = logging.getLogger("werkzeug")
         werkzeug_log.handlers   = []
@@ -837,18 +955,19 @@ class WebServer:
 
     def _register_routes(self) -> None:
         app = self._app
-        app.add_url_rule("/",                       "index",        self._index)
-        app.add_url_rule("/video/realtime",         "v_realtime",   self._video_realtime)
-        app.add_url_rule("/video/llm",              "v_llm",        self._video_llm)
-        app.add_url_rule("/video/down",             "v_down",       self._video_down)
-        app.add_url_rule("/status",                 "status",       self._status)
-        app.add_url_rule("/pause",                  "pause",        self._pause,        methods=["POST"])
-        app.add_url_rule("/agent/frame",            "agent_frame",  self._agent_frame,  methods=["POST"])
-        app.add_url_rule("/agent/status",           "agent_status", self._agent_status, methods=["POST"])
-        app.add_url_rule("/chat",                   "chat",         self._chat,         methods=["POST"])
-        app.add_url_rule("/agent/chat",             "agent_chat",   self._agent_chat,   methods=["POST"])
-        app.add_url_rule("/logs",                   "list_logs",    self._list_logs)
-        app.add_url_rule("/logs/<path:filename>",   "dl_log",       self._download_log)
+        app.add_url_rule("/",                           "index",        self._index)
+        app.add_url_rule("/video/realtime",             "v_realtime",   self._video_realtime)
+        app.add_url_rule("/video/llm",                  "v_llm",        self._video_llm)
+        app.add_url_rule("/video/down",                 "v_down",       self._video_down)
+        app.add_url_rule("/webrtc/offer/<stream>",      "webrtc_offer", self._webrtc_offer, methods=["POST"])
+        app.add_url_rule("/status",                     "status",       self._status)
+        app.add_url_rule("/pause",                      "pause",        self._pause,        methods=["POST"])
+        app.add_url_rule("/agent/frame",                "agent_frame",  self._agent_frame,  methods=["POST"])
+        app.add_url_rule("/agent/status",               "agent_status", self._agent_status, methods=["POST"])
+        app.add_url_rule("/chat",                       "chat",         self._chat,         methods=["POST"])
+        app.add_url_rule("/agent/chat",                 "agent_chat",   self._agent_chat,   methods=["POST"])
+        app.add_url_rule("/logs",                       "list_logs",    self._list_logs)
+        app.add_url_rule("/logs/<path:filename>",       "dl_log",       self._download_log)
 
     # ── Agent push endpoints ──────────────────────────────────────────────────
 
@@ -897,6 +1016,62 @@ class WebServer:
         with self._state.lock:
             self._state.chat_history.append(msg)
         return jsonify({"ok": True})
+
+    # ── WebRTC offer/answer ───────────────────────────────────────────────────
+
+    def _webrtc_offer(self, stream: str):
+        """POST /webrtc/offer/<stream> — SDP offer from browser, returns SDP answer."""
+        if not _WEBRTC_AVAILABLE:
+            return jsonify({"error": "aiortc not installed"}), 503
+
+        data = request.get_json(force=True) or {}
+        sdp  = data.get("sdp", "")
+        kind = data.get("type", "offer")
+
+        # Run async negotiation on the dedicated event loop and block for result
+        future = asyncio.run_coroutine_threadsafe(
+            self._do_webrtc_offer(stream, sdp, kind), self._loop
+        )
+        try:
+            answer_sdp, answer_type = future.result(timeout=10.0)
+        except Exception as e:
+            log.error("WebRTC offer error for %s: %s", stream, e)
+            return jsonify({"error": str(e)}), 500
+
+        return jsonify({"sdp": answer_sdp, "type": answer_type})
+
+    async def _do_webrtc_offer(self, stream: str, sdp: str, kind: str):
+        pc = RTCPeerConnection()
+        self._pcs.add(pc)
+
+        # Build getter for the right JPEG stream
+        state = self._state
+        if stream == "llm":
+            def get_jpeg():
+                with state.lock: return state.llm_jpeg
+        elif stream == "down":
+            def get_jpeg():
+                with state.lock: return state.down_jpeg
+        else:
+            def get_jpeg():
+                with state.lock: return state.raw_jpeg
+
+        track = JpegVideoTrack(get_jpeg, self._blank_jpeg)
+        pc.addTrack(track)
+
+        @pc.on("connectionstatechange")
+        async def on_state():
+            if pc.connectionState in ("failed", "closed", "disconnected"):
+                await pc.close()
+                self._pcs.discard(pc)
+                log.debug("WebRTC %s connection %s", stream, pc.connectionState)
+
+        offer = RTCSessionDescription(sdp=sdp, type=kind)
+        await pc.setRemoteDescription(offer)
+        answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+
+        return pc.localDescription.sdp, pc.localDescription.type
 
     # ── Browser endpoints ─────────────────────────────────────────────────────
 
