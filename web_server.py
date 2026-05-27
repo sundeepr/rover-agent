@@ -364,6 +364,23 @@ _HTML = """<!DOCTYPE html>
     // ── Teleop waypoint canvas ────────────────────────────────────────────────
     const _waypoints = [];  // [{nx, ny}, ...]
 
+    /**
+     * Return the pixel rect {x, y, w, h} of the actual image content inside
+     * the <img> element, accounting for object-fit:contain letterboxing.
+     * nx/ny waypoint coords (0-1) are relative to this rect, not the element.
+     */
+    function _imgContentRect(img) {
+      const cw = img.offsetWidth;
+      const ch = img.offsetHeight;
+      const nw = img.naturalWidth  || 640;
+      const nh = img.naturalHeight || 480;
+      if (!nw || !nh || !cw || !ch) return {x: 0, y: 0, w: cw, h: ch};
+      const scale = Math.min(cw / nw, ch / nh);
+      const w = nw * scale;
+      const h = nh * scale;
+      return { x: (cw - w) / 2, y: (ch - h) / 2, w, h };
+    }
+
     function _redrawCanvas() {
       const img    = document.getElementById('live-img');
       const canvas = document.getElementById('waypoint-canvas');
@@ -372,34 +389,38 @@ _HTML = """<!DOCTYPE html>
       const ctx = canvas.getContext('2d');
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      // ── Calibration lines: vertical dashed yellow at 25 / 50 / 75 % ──────
+      const cr = _imgContentRect(img);   // actual image content bounds
+
+      // ── Calibration lines: vertical dashed yellow at 20 / 50 / 80 % ──────
       ctx.save();
       ctx.setLineDash([8, 6]);
-      ctx.lineWidth   = 1.5;
-      ctx.strokeStyle = 'rgba(255, 220, 0, 0.85)';
-      ctx.font        = 'bold 11px monospace';
-      ctx.fillStyle   = 'rgba(255, 220, 0, 0.9)';
+      ctx.lineWidth    = 1.5;
+      ctx.strokeStyle  = 'rgba(255, 220, 0, 0.85)';
+      ctx.font         = 'bold 11px monospace';
+      ctx.fillStyle    = 'rgba(255, 220, 0, 0.9)';
       ctx.textBaseline = 'bottom';
       [0.20, 0.50, 0.80].forEach(frac => {
-        const x = Math.round(frac * canvas.width);
+        const x = Math.round(cr.x + frac * cr.w);
         ctx.beginPath();
-        ctx.moveTo(x, canvas.height);
-        ctx.lineTo(x, 0);
+        ctx.moveTo(x, cr.y + cr.h);
+        ctx.lineTo(x, cr.y);
         ctx.stroke();
         ctx.textAlign = frac < 0.5 ? 'left' : frac > 0.5 ? 'right' : 'center';
-        ctx.fillText(Math.round(frac * 100) + '%', x + (frac < 0.5 ? 3 : frac > 0.5 ? -3 : 0), canvas.height - 4);
+        ctx.fillText(Math.round(frac * 100) + '%',
+                     x + (frac < 0.5 ? 3 : frac > 0.5 ? -3 : 0),
+                     cr.y + cr.h - 4);
       });
       ctx.restore();
 
-      // Fixed anchor at bottom-centre (rover position)
-      const ax = canvas.width  / 2;
-      const ay = canvas.height;
+      // Fixed anchor at bottom-centre of image content (rover position)
+      const ax = cr.x + cr.w / 2;
+      const ay = cr.y + cr.h;
 
       // Build chain: anchor → wp[0] → wp[1] → ...
       const chain = [{px: ax, py: ay, anchor: true}];
       _waypoints.forEach(wp => chain.push({
-        px: wp.nx * canvas.width,
-        py: wp.ny * canvas.height,
+        px: cr.x + wp.nx * cr.w,
+        py: cr.y + wp.ny * cr.h,
       }));
 
       // Draw connecting lines
@@ -511,9 +532,12 @@ _HTML = """<!DOCTYPE html>
     document.addEventListener('DOMContentLoaded', () => {
       const canvas = document.getElementById('waypoint-canvas');
       canvas.addEventListener('click', e => {
-        const r = canvas.getBoundingClientRect();
-        const nx = (e.clientX - r.left) / r.width;
-        const ny = (e.clientY - r.top)  / r.height;
+        const r   = canvas.getBoundingClientRect();
+        const img = document.getElementById('live-img');
+        const cr  = _imgContentRect(img);
+        // Map click to 0-1 coords within the actual image content
+        const nx = Math.max(0, Math.min(1, (e.clientX - r.left  - cr.x) / cr.w));
+        const ny = Math.max(0, Math.min(1, (e.clientY - r.top   - cr.y) / cr.h));
         _waypoints.push({nx, ny});
         _redrawCanvas();
         _sendWaypoints();
