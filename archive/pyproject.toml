@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rover-agent"
+version = "0.1.0"
+description = "LLM-guided rover navigation agent"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.40.0",
+    "pydantic>=2.0.0",
+    "python-dotenv>=1.0.0",
+    "pillow>=10.0.0",
+]
+
+[project.optional-dependencies]
+gemini = [
+    "google-genai>=1.0.0",
+]
+rpi = [
+    "picamera2",
+    "gpiozero",
+    "RPi.GPIO",
+]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-mock>=3.0.0",
+]
+all-providers = [
+    "google-genai>=1.0.0",
+]
+
+[project.scripts]
+rover-agent = "rover_agent.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

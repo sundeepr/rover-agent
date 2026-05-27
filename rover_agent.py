@@ -11,24 +11,33 @@ leave it running; the agent connects to it on startup and publishes frames and
 status over HTTP. The browser tab survives agent restarts and crashes.
 
 Supported rovers    : roomba (iRobot OI), atlas (STM32 $CMD protocol)
-Supported strategies: gemini (Gemini vision API), omnivla (local neural network)
+Supported strategies:
+    omnivla_full   — full OmniVLA on cloud GPU (primary)
+    bev_omnivla    — BEV safety layer + cloud OmniVLA
+    omnivla        — OmniVLA-edge local inference
+    cloud_omnivla  — full OmniVLA over WebSocket (alias for omnivla_full)
+    line_follow    — pure-CV HSV line/pipe follower
+    plant_center   — down-camera plant centering (no cloud)
+    boundary_guard — down-camera crop row safety stop
+    teleop         — human teleoperation + data collection
 
 Usage:
     # Start the web server once (separate terminal):
     python web_server.py
 
+    # Full OmniVLA on cloud (primary use case)
+    python rover_agent.py --strategy omnivla_full \\
+        --cloud-server ws://<cloud-ip>:8765 \\
+        --goal "Follow the crop row" \\
+        --rover roomba --roomba-port /dev/ttyUSB0
+
+    # Line following (no cloud needed)
+    python rover_agent.py --strategy line_follow \\
+        --rover atlas --atlas-port /dev/ttyACM0 \\
+        --line-color black
+
     # Camera only, no hardware
     python rover_agent.py --dry-run
-
-    # Roomba + Gemini (default strategy)
-    python rover_agent.py --roomba-port /dev/ttyUSB0
-
-    # Atlas-1 + Gemini
-    python rover_agent.py --rover atlas --atlas-port /dev/ttyACM0
-
-    # Atlas-1 + OmniVLA
-    python rover_agent.py --rover atlas --atlas-port /dev/ttyACM0 \\
-        --strategy omnivla --goal "Follow the brown path" --interval 1.0
 """
 
 import argparse
@@ -43,8 +52,6 @@ from pathlib import Path
 
 import cv2
 
-import gemini_client
-import prompts
 import roomba_controller
 import atlas_controller
 from navigation_strategy import AgentState, NavigationStrategy
@@ -285,46 +292,10 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
     Strategies are imported lazily so their heavy dependencies (torch, etc.)
     are only loaded when actually needed.
     """
-    if name == "gemini":
-        from gemini_strategy import GeminiStrategy
-        return GeminiStrategy()
     if name == "omnivla":
         from omnivla_strategy import OmniVLAStrategy
         return OmniVLAStrategy(goal=args.goal, goal_image_path=args.goal_image,
                                server_addr=args.omnivla_server)
-    if name == "clip_omnivla":
-        from clip_omnivla_strategy import ClipOmniVLAStrategy
-        return ClipOmniVLAStrategy(goal=args.goal, goal_image_path=args.goal_image,
-                                   server_addr=args.omnivla_server,
-                                   path_threshold=args.path_threshold,
-                                   ollama_url=args.ollama_server,
-                                   weights_path=args.omnivla_weights)
-    if name == "qwen_omnivla":
-        from qwen_omnivla_strategy import QwenOmniVLAStrategy
-        return QwenOmniVLAStrategy(goal=args.goal, goal_image_path=args.goal_image,
-                                   server_addr=args.omnivla_server,
-                                   path_threshold=args.path_threshold,
-                                   ollama_url=args.ollama_server)
-    if name == "hough_crop_row":
-        from hough_crop_row_strategy import HoughCropRowStrategy
-        return HoughCropRowStrategy(goal=args.goal, goal_image_path=args.goal_image,
-                                    server_addr=args.omnivla_server,
-                                    path_threshold=args.path_threshold,
-                                    ollama_url=args.ollama_server)
-    if name == "row_centering_omnivla":
-        from row_centering_omnivla_strategy import RowCenteringOmniVLAStrategy
-        return RowCenteringOmniVLAStrategy(
-            goal=args.goal,
-            goal_image_path=args.goal_image,
-            server_addr=args.omnivla_server,
-            path_threshold=args.path_threshold,
-            ollama_url=args.ollama_server,
-            weights_path=args.omnivla_weights,
-            centering_gain=args.centering_gain,
-            centering_alpha=args.centering_alpha,
-            exg_threshold=args.exg_threshold,
-            exg_min_area=args.exg_min_area,
-        )
     if name == "bev_omnivla":
         from bev_omnivla_strategy import BevOmniVLAStrategy
         return BevOmniVLAStrategy(
@@ -356,39 +327,6 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
             goal=args.goal,
             max_lin_mm_s=args.omnivla_velocity,
             icr_offset_m=_geo["icr_offset_mm"] / 1000.0,
-        )
-    if name == "paligemma":
-        from paligemma_strategy import PaliGemmaStrategy
-        return PaliGemmaStrategy(
-            server_url=args.cloud_server,
-            goal=args.goal,
-        )
-    if name == "ollama":
-        from ollama_strategy import OllamaStrategy
-        return OllamaStrategy(
-            ollama_url=args.ollama_server,
-            model=args.ollama_model,
-            history_size=args.ollama_history,
-            rover_type=args.rover,
-        )
-    if name == "crop_row":
-        from crop_row_strategy import CropRowStrategy
-        if args.lab_mode:
-            log.info("crop_row: LAB MODE — yolov8n.pt, class 58 (potted plant)")
-            return CropRowStrategy(
-                crop_type="lab-plant",
-                model_path="yolov8n.pt",
-                class_ids=[58],
-                fwd_vel=args.fwd_vel,
-                kp=args.steering_kp,
-                conf=args.yolo_conf,
-            )
-        return CropRowStrategy(
-            crop_type=args.crop_type,
-            model_path=args.yolo_model or None,
-            fwd_vel=args.fwd_vel,
-            kp=args.steering_kp,
-            conf=args.yolo_conf,
         )
     if name == "line_follow":
         from line_follow_strategy import LineFollowStrategy
@@ -428,13 +366,11 @@ def main():
                         help="Atlas-1 serial port (e.g. /dev/ttyACM0)")
     parser.add_argument("--dry-run",     action="store_true",
                         help="Log rover commands but do not send them")
-    parser.add_argument("--strategy",    type=str,   default="gemini",
-                        choices=["gemini", "omnivla", "clip_omnivla", "qwen_omnivla",
-                                 "hough_crop_row", "crop_row", "row_centering_omnivla",
-                                 "cloud_omnivla", "omnivla_full", "bev_omnivla",
-                                 "boundary_guard", "plant_center",
-                                 "paligemma", "ollama", "line_follow", "teleop"],
-                        help="Navigation strategy (default: gemini)")
+    parser.add_argument("--strategy",    type=str,   default="omnivla_full",
+                        choices=["omnivla_full", "cloud_omnivla", "bev_omnivla",
+                                 "omnivla", "line_follow", "plant_center",
+                                 "boundary_guard", "teleop"],
+                        help="Navigation strategy (default: omnivla_full)")
     parser.add_argument("--cloud-server", type=str,  default="ws://localhost:8765",
                         metavar="URL",
                         help="WebSocket URL of omnivla_cloud_server.py "
@@ -443,28 +379,6 @@ def main():
                         metavar="PATH",
                         help="Path to custom OmniVLA-edge weights (.pth). "
                              "Defaults to downloading from HuggingFace if not set.")
-    parser.add_argument("--crop-type",   type=str,   default="plant",
-                        metavar="NAME",
-                        help="Crop type for crop_row strategy, e.g. chilli, tomato, corn "
-                             "(default: plant). Also used as default model filename: <crop>.pt")
-    parser.add_argument("--yolo-model",  type=str,   default="yolov8n-oiv7.pt",
-                        metavar="PATH",
-                        help="YOLOv8/v11 weights file (default: yolov8n-oiv7.pt). "
-                             "For row_centering_omnivla the plant class is auto-detected "
-                             "from the model's class names.")
-    parser.add_argument("--yolo-conf",   type=float, default=0.35,
-                        metavar="FLOAT",
-                        help="YOLO detection confidence threshold (default: 0.35)")
-    parser.add_argument("--fwd-vel",     type=int,   default=80,
-                        metavar="MM_S",
-                        help="Forward velocity mm/s for crop_row (default: 80)")
-    parser.add_argument("--steering-kp", type=float, default=0.003,
-                        metavar="FLOAT",
-                        help="Proportional steering gain for crop_row (default: 0.003)")
-    parser.add_argument("--lab-mode",    action="store_true",
-                        help="crop_row lab testing mode: use yolov8n.pt (COCO) and detect "
-                             "'potted plant' (class 58) — works with plastic/fake plants "
-                             "on the floor. Overrides --yolo-model and --crop-type.")
     parser.add_argument("--goal",        type=str,   default="",
                         help="Language goal for omnivla strategies. "
                              "If omitted, wait for goal via web chat UI.")
@@ -504,43 +418,10 @@ def main():
                         help="Default navigation instruction for teleop episodes")
     parser.add_argument("--teleop-fps", type=int, default=10,
                         help="Frame recording rate for teleop strategy (default: 10)")
-    parser.add_argument("--path-threshold", type=float, default=0.5,
-                        metavar="FLOAT",
-                        help="Path detection confidence threshold for "
-                             "clip_omnivla / qwen_omnivla (default: 0.5)")
-    parser.add_argument("--ollama-server",  type=str,
-                        default="http://localhost:11434",
-                        metavar="URL",
-                        help="Ollama API URL (default: http://localhost:11434)")
-    parser.add_argument("--ollama-model",   type=str,
-                        default="qwen2.5vl",
-                        metavar="NAME",
-                        help="Ollama model name for ollama strategy "
-                             "(default: qwen2.5vl)")
-    parser.add_argument("--ollama-history", type=int,
-                        default=5,
-                        metavar="N",
-                        help="Frame history size for ollama strategy (default: 5)")
     parser.add_argument("--down-device",     type=int,   default=None,
                         metavar="INDEX",
                         help="Camera device index for downward-facing camera. "
                              "Omit to disable the down camera entirely.")
-    parser.add_argument("--centering-gain",  type=float, default=0.001,
-                        metavar="FLOAT",
-                        help="Proportional gain (rad/s per pixel) for row-centering correction "
-                             "(row_centering_omnivla strategy, default: 0.001)")
-    parser.add_argument("--centering-alpha", type=float, default=0.4,
-                        metavar="FLOAT",
-                        help="Centering correction blend weight: 0=off, 1=full override "
-                             "(row_centering_omnivla strategy, default: 0.4)")
-    parser.add_argument("--exg-threshold",   type=int,   default=20,
-                        metavar="INT",
-                        help="ExG threshold (2G-R-B) for vegetation detection "
-                             "(row_centering_omnivla strategy, default: 20)")
-    parser.add_argument("--exg-min-area",    type=int,   default=500,
-                        metavar="INT",
-                        help="Minimum blob area in pixels to count as a plant "
-                             "(row_centering_omnivla strategy, default: 500)")
     parser.add_argument("--control-port",  type=int, default=5002,
                         metavar="PORT",
                         help="WebSocket joystick control port for browser/Android "
@@ -553,9 +434,7 @@ def main():
     log.info("Camera device : %d", args.device)
     log.info("Query interval: %.1fs", args.interval)
     log.info("Strategy      : %s", args.strategy)
-    _omnivla_strategies = ("omnivla", "clip_omnivla", "qwen_omnivla",
-                           "hough_crop_row", "row_centering_omnivla")
-    if args.strategy in _omnivla_strategies:
+    if args.strategy == "omnivla":
         log.info("Goal          : %s", args.goal)
         if args.goal_image:
             log.info("Goal image    : %s", args.goal_image)
@@ -563,20 +442,9 @@ def main():
             log.info("OmniVLA server: %s", args.omnivla_server)
         else:
             log.info("OmniVLA server: (loading locally)")
-        if args.strategy in ("clip_omnivla", "qwen_omnivla",
-                              "hough_crop_row", "row_centering_omnivla"):
-            log.info("Path threshold: %.2f", args.path_threshold)
-            log.info("Ollama server : %s", args.ollama_server)
-        if args.strategy == "row_centering_omnivla":
-            log.info("Down device   : %d", args.down_device)
-            log.info("Center gain   : %.4f  alpha: %.2f",
-                     args.centering_gain, args.centering_alpha)
-            log.info("ExG threshold : %d  min_area: %d",
-                     args.exg_threshold, args.exg_min_area)
-    if args.strategy in ("cloud_omnivla", "omnivla_full"):
+    if args.strategy in ("cloud_omnivla", "omnivla_full", "bev_omnivla"):
         log.info("Cloud server  : %s", args.cloud_server)
-    else:
-        log.info("Model         : %s", gemini_client.MODEL)
+        log.info("Goal          : %s", args.goal)
     log.info("Web server    : %s", args.web_server)
     log.info("Rover         : %s", args.rover)
     if rover_port:
@@ -592,7 +460,7 @@ def main():
 
     # If a goal was given on the CLI, apply it immediately so the agent
     # starts navigating without waiting for web chat input.
-    _NO_GOAL_STRATEGIES = ("gemini", "line_follow", "hough_crop_row", "teleop")
+    _NO_GOAL_STRATEGIES = ("line_follow", "plant_center", "boundary_guard", "teleop")
     if args.goal and args.strategy not in _NO_GOAL_STRATEGIES:
         strategy.set_goal(args.goal)
         with state.result_lock:
