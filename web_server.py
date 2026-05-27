@@ -201,17 +201,17 @@ _HTML = """<!DOCTYPE html>
       <div class="videos-row">
         <div class="video-box" style="position:relative;">
           <div class="label">&#x1F534; Live camera — click to add waypoints</div>
-          <video id="live-img" autoplay playsinline muted style="width:100%;display:block;background:#000;"></video>
+          <img id="live-img" src="/video/realtime" style="width:100%;display:block;background:#000;">
           <canvas id="waypoint-canvas" style="position:absolute;top:0;left:0;width:100%;height:100%;cursor:crosshair;"></canvas>
         </div>
         <div class="video-box" style="position:relative;">
           <div class="label">&#x1F9E0; Last query — with waypoints</div>
-          <video id="llm-img" autoplay playsinline muted style="width:100%;display:block;background:#000;"></video>
+          <img id="llm-img" src="/video/llm" style="width:100%;display:block;background:#000;">
           <canvas id="llm-canvas" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></canvas>
         </div>
         <div class="video-box" id="down-cam-box" style="position:relative;">
           <div class="label">&#x1F4F7; Down camera — row centering</div>
-          <video id="down-img" autoplay playsinline muted style="width:100%;display:block;background:#000;"></video>
+          <img id="down-img" src="/video/down" style="width:100%;display:block;background:#000;">
           <canvas id="down-canvas" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></canvas>
         </div>
       </div>
@@ -360,12 +360,6 @@ _HTML = """<!DOCTYPE html>
         }
       }
     }
-
-    document.addEventListener('DOMContentLoaded', () => {
-      _startWebRTC('live-img',  'realtime');
-      _startWebRTC('llm-img',   'llm');
-      _startWebRTC('down-img',  'down');
-    });
 
     // ── Teleop waypoint canvas ────────────────────────────────────────────────
     const _waypoints = [];  // [{nx, ny}, ...]
