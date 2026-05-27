@@ -366,32 +366,31 @@ _HTML = """<!DOCTYPE html>
 
     /**
      * Return the pixel rect {x, y, w, h} of the actual image content in
-     * CANVAS coordinates (i.e. relative to the .video-box / positioned parent).
+     * CANVAS coordinates.
      *
-     * The canvas is position:absolute over the full .video-box which includes
-     * the label div above the <img>.  img.offsetTop accounts for that gap so
-     * all returned coordinates are directly usable in canvas draw calls and
-     * for mapping click events from canvas.getBoundingClientRect().
+     * Uses getBoundingClientRect() on both elements — reliable in all
+     * browsers and layout modes (flex, absolute, etc.) unlike offsetTop
+     * which is ambiguous inside flex containers.
      *
-     * object-fit:contain may add letterbox bars inside the <img> element when
-     * the container aspect ratio doesn't match the stream (4:3).  Those are
-     * also folded in so {x,y} is the top-left of the actual video pixels.
+     * Accounts for object-fit:contain letterboxing inside the <img>.
      */
-    function _imgContentRect(img) {
-      const cw = img.offsetWidth;
-      const ch = img.offsetHeight;
+    function _imgContentRect(img, canvas) {
+      const cr = canvas.getBoundingClientRect();
+      const ir = img.getBoundingClientRect();
+      const iw = ir.width;
+      const ih = ir.height;
       const nw = img.naturalWidth  || 640;
       const nh = img.naturalHeight || 480;
-      // img's top-left in the canvas / .video-box coordinate system
-      const ox = img.offsetLeft;
-      const oy = img.offsetTop;
-      if (!nw || !nh || !cw || !ch) return {x: ox, y: oy, w: cw, h: ch};
-      const scale = Math.min(cw / nw, ch / nh);
+      // img top-left in canvas pixel coordinates
+      const ox = ir.left - cr.left;
+      const oy = ir.top  - cr.top;
+      if (!nw || !nh || !iw || !ih) return {x: ox, y: oy, w: iw, h: ih};
+      const scale = Math.min(iw / nw, ih / nh);
       const w = nw * scale;
       const h = nh * scale;
       return {
-        x: ox + (cw - w) / 2,
-        y: oy + (ch - h) / 2,
+        x: ox + (iw - w) / 2,
+        y: oy + (ih - h) / 2,
         w, h,
       };
     }
@@ -399,12 +398,13 @@ _HTML = """<!DOCTYPE html>
     function _redrawCanvas() {
       const img    = document.getElementById('live-img');
       const canvas = document.getElementById('waypoint-canvas');
-      canvas.width  = img.offsetWidth;
-      canvas.height = img.offsetHeight;
+      // Size canvas to its own display dimensions (full video-box, not img)
+      canvas.width  = canvas.clientWidth;
+      canvas.height = canvas.clientHeight;
       const ctx = canvas.getContext('2d');
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      const cr = _imgContentRect(img);   // actual image content bounds
+      const cr = _imgContentRect(img, canvas);   // actual image content bounds
 
       // ── Calibration lines: vertical dashed yellow at 20 / 50 / 80 % ──────
       ctx.save();
@@ -549,10 +549,10 @@ _HTML = """<!DOCTYPE html>
       canvas.addEventListener('click', e => {
         const r   = canvas.getBoundingClientRect();
         const img = document.getElementById('live-img');
-        const cr  = _imgContentRect(img);
+        const cr  = _imgContentRect(img, canvas);
         // Map click to 0-1 coords within the actual image content
-        const nx = Math.max(0, Math.min(1, (e.clientX - r.left  - cr.x) / cr.w));
-        const ny = Math.max(0, Math.min(1, (e.clientY - r.top   - cr.y) / cr.h));
+        const nx = Math.max(0, Math.min(1, (e.clientX - r.left - cr.x) / cr.w));
+        const ny = Math.max(0, Math.min(1, (e.clientY - r.top  - cr.y) / cr.h));
         _waypoints.push({nx, ny});
         _redrawCanvas();
         _sendWaypoints();
