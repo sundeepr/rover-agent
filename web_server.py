@@ -466,8 +466,8 @@ _HTML = """<!DOCTYPE html>
 
       // Draw waypoints
       _waypoints.forEach((wp, i) => {
-        const px = wp.nx * canvas.width;
-        const py = wp.ny * canvas.height;
+        const px = cr.x + wp.nx * cr.w;
+        const py = cr.y + wp.ny * cr.h;
         ctx.beginPath();
         ctx.arc(px, py, 10, 0, 2*Math.PI);
         ctx.fillStyle = i === 0 ? '#00ff64' : '#00cc50';
