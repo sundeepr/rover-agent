@@ -1,259 +1,251 @@
 #!/usr/bin/env python3
 """
-Rover calibration tool.
+Rover calibration tool — reads the Atlas STM32's built-in IMU.
 
-Sends motion commands to the Atlas rover and reads heading / gyro data
-from an IMU to verify the rover is behaving as expected.
+The Atlas rover streams IMU data on the same serial port used for motor
+commands (/dev/ttyACM0).  This script opens that port once, reads IMU
+frames in a background thread, and sends motor commands from the main
+thread.
 
-Supported IMUs (auto-detected if not specified):
-  BNO055  — most common, I2C address 0x28 or 0x29, provides fused Euler angles
-  MPU6050 — raw gyro/accel only, I2C address 0x68 or 0x69
-  ICM-20948 — high-end, I2C 0x68 or 0x69
+IMU frame format (sent at ~60 Hz by the Atlas STM32):
+  $IMU,<ts_ms>,<qw>,<qx>,<qy>,<qz>,<gx>,<gy>,<gz>,<ax>,<ay>,<az>,<temp>,<voltage>#
+
+  ts_ms   — timestamp in milliseconds (rover clock)
+  qw/x/y/z — unit quaternion (orientation)
+  gx/gy/gz — gyro in rad/s (or deg/s — treat as relative only)
+  ax/ay/az — accelerometer in g
+  temp     — temperature °C
+  voltage  — battery voltage V
+
+Heading (yaw) is derived from the quaternion:
+  yaw_rad = atan2(2*(qw*qz + qx*qy), 1 - 2*(qy² + qz²))
+
+Other frames (informational, not used by calibration):
+  $DBG,...#   — debug text from firmware
+  $DATA,...#  — motor feedback, mode info
+  $MODE,...#  — mode change notification
 
 Usage examples
 ──────────────
-  # Monitor IMU live (no movement):
-  python calibration/calibrate.py --imu bno055 --atlas-port /dev/ttyACM0
+  # Live IMU monitor (no movement, 60 s):
+  python calibration/calibrate.py
 
-  # Send a 90° right turn and measure actual heading change:
-  python calibration/calibrate.py --imu bno055 --atlas-port /dev/ttyACM0 \\
-      --test turn --angle 90
+  # 90° right turn:
+  python calibration/calibrate.py --test turn --angle 90 --speed 40
 
-  # Drive straight for 2 s and record heading drift:
-  python calibration/calibrate.py --imu bno055 --atlas-port /dev/ttyACM0 \\
-      --test straight --duration 2.0
+  # Straight-line drift test (2 s):
+  python calibration/calibrate.py --test straight --duration 2.0 --speed 40
 
-  # Full calibration sequence (turn left/right/straight):
-  python calibration/calibrate.py --imu bno055 --atlas-port /dev/ttyACM0 \\
-      --test full
+  # Full calibration sequence:
+  python calibration/calibrate.py --test full --speed 40
 
-  # Dry-run (no serial hardware, print commands only):
-  python calibration/calibrate.py --imu bno055 --dry-run
+  # Dry-run (print commands only, no serial port):
+  python calibration/calibrate.py --test full --dry-run
 """
 
 import argparse
 import math
+import re
 import sys
-import time
 import threading
+import time
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Optional
 
 log = logging.getLogger("rover.calibrate")
 
-# ── Atlas serial command ──────────────────────────────────────────────────────
+# ── Wire format ───────────────────────────────────────────────────────────────
 
-def _atlas_frame(L: int, R: int, AUX: int = 0) -> bytes:
+_IMU_RE = re.compile(
+    r"\$IMU,"
+    r"(\d+),"                       # ts_ms
+    r"([+-]?\d+\.?\d*),"            # qw
+    r"([+-]?\d+\.?\d*),"            # qx
+    r"([+-]?\d+\.?\d*),"            # qy
+    r"([+-]?\d+\.?\d*),"            # qz
+    r"([+-]?\d+\.?\d*),"            # gx
+    r"([+-]?\d+\.?\d*),"            # gy
+    r"([+-]?\d+\.?\d*),"            # gz
+    r"([+-]?\d+\.?\d*),"            # ax
+    r"([+-]?\d+\.?\d*),"            # ay
+    r"([+-]?\d+\.?\d*),"            # az
+    r"([+-]?\d+\.?\d*),"            # temp
+    r"([+-]?\d+\.?\d*)#"            # voltage
+)
+
+
+def _atlas_cmd(L: int, R: int, AUX: int = 0) -> bytes:
     L   = max(-100, min(100, int(L)))
     R   = max(-100, min(100, int(R)))
     AUX = max(   0, min(100, int(AUX)))
     return f"$CMD,L={L},R={R},AUX={AUX}#\n".encode("ascii")
 
 
-# ── IMU reading ───────────────────────────────────────────────────────────────
+# ── Data model ────────────────────────────────────────────────────────────────
 
 @dataclass
 class IMUReading:
-    """One snapshot from the IMU."""
-    timestamp:  float   = 0.0
-    heading:    float   = 0.0   # degrees, 0 = north / forward at calibration start
-    pitch:      float   = 0.0   # degrees, nose up = positive
-    roll:       float   = 0.0   # degrees, right lean = positive
-    gyro_z:     float   = 0.0   # deg/s yaw rate (raw, before fusion)
-    valid:      bool    = False
+    """One parsed IMU frame from the Atlas STM32."""
+    ts_ms:    int   = 0
+    qw:       float = 1.0
+    qx:       float = 0.0
+    qy:       float = 0.0
+    qz:       float = 0.0
+    gx:       float = 0.0
+    gy:       float = 0.0
+    gz:       float = 0.0
+    ax:       float = 0.0
+    ay:       float = 0.0
+    az:       float = 0.0
+    temp_c:   float = 0.0
+    voltage:  float = 0.0
+    wall_t:   float = 0.0    # time.time() when received
+    valid:    bool  = False
+
+    @property
+    def heading_deg(self) -> float:
+        """Yaw angle derived from quaternion, degrees, −180 to +180."""
+        # Standard quaternion → yaw formula
+        yaw = math.atan2(
+            2.0 * (self.qw * self.qz + self.qx * self.qy),
+            1.0 - 2.0 * (self.qy ** 2 + self.qz ** 2),
+        )
+        return math.degrees(yaw)
+
+    @property
+    def pitch_deg(self) -> float:
+        sinp = 2.0 * (self.qw * self.qy - self.qz * self.qx)
+        sinp = max(-1.0, min(1.0, sinp))
+        return math.degrees(math.asin(sinp))
+
+    @property
+    def roll_deg(self) -> float:
+        sinr = 2.0 * (self.qw * self.qx + self.qy * self.qz)
+        cosr = 1.0 - 2.0 * (self.qx ** 2 + self.qy ** 2)
+        return math.degrees(math.atan2(sinr, cosr))
 
 
-class BNO055Reader:
+def _parse_imu(line: str) -> IMUReading | None:
+    """Try to parse a $IMU,...# line; return None on failure."""
+    m = _IMU_RE.search(line)
+    if not m:
+        return None
+    ts, qw, qx, qy, qz, gx, gy, gz, ax, ay, az, temp, volt = m.groups()
+    return IMUReading(
+        ts_ms   = int(ts),
+        qw      = float(qw),
+        qx      = float(qx),
+        qy      = float(qy),
+        qz      = float(qz),
+        gx      = float(gx),
+        gy      = float(gy),
+        gz      = float(gz),
+        ax      = float(ax),
+        ay      = float(ay),
+        az      = float(az),
+        temp_c  = float(temp),
+        voltage = float(volt),
+        wall_t  = time.time(),
+        valid   = True,
+    )
+
+
+# ── AtlasPort — one port, two directions ─────────────────────────────────────
+
+class AtlasPort:
     """
-    Reads fused Euler angles from a Bosch BNO055 over I2C.
+    Manages the Atlas serial port for both command TX and IMU RX.
 
-    The BNO055 does all sensor fusion on-chip and outputs Euler angles
-    (heading/pitch/roll) in degrees directly — no integration needed.
+    A background thread continuously reads lines from the port, parses
+    $IMU frames, and stores them for the main thread to query.
 
-    I2C address: 0x28 (ADDR pin low) or 0x29 (ADDR pin high).
-    """
-
-    # BNO055 register addresses
-    _CHIP_ID_REG      = 0x00
-    _BNO055_CHIP_ID   = 0xA0
-    _OPR_MODE_REG     = 0x3D
-    _OPR_MODE_NDOF    = 0x0C   # 9-DOF fusion mode (best accuracy)
-    _EULER_H_LSB      = 0x1A   # Euler heading low byte (6 bytes: H, R, P)
-    _GYRO_DATA_Z_LSB  = 0x18   # raw gyro Z low byte
-    _UNIT_SEL_REG     = 0x3B
-
-    def __init__(self, i2c_bus: int = 1, address: int = 0x28):
-        self._bus_num = i2c_bus
-        self._addr    = address
-        self._bus     = None
-
-    def open(self) -> None:
-        try:
-            import smbus2
-            self._bus = smbus2.SMBus(self._bus_num)
-        except ImportError:
-            raise RuntimeError(
-                "smbus2 not installed.  Run: pip install smbus2")
-
-        # Verify chip ID
-        chip_id = self._bus.read_byte_data(self._addr, self._CHIP_ID_REG)
-        if chip_id != self._BNO055_CHIP_ID:
-            raise RuntimeError(
-                f"BNO055 not found at 0x{self._addr:02X} on I2C bus {self._bus_num}. "
-                f"Got chip ID 0x{chip_id:02X}, expected 0x{self._BNO055_CHIP_ID:02X}. "
-                f"Check wiring and --i2c-address.")
-
-        # Set NDOF fusion mode (takes ~650 ms to stabilise)
-        self._bus.write_byte_data(self._addr, self._OPR_MODE_REG, self._OPR_MODE_NDOF)
-        log.info("BNO055 found at 0x%02X on bus %d — waiting for fusion mode…",
-                 self._addr, self._bus_num)
-        time.sleep(0.7)
-        log.info("BNO055 ready")
-
-    def read(self) -> IMUReading:
-        if self._bus is None:
-            return IMUReading()
-        try:
-            # Read 6 bytes: Euler H (2), R (2), P (2) — little-endian, 1/16 deg
-            data = self._bus.read_i2c_block_data(self._addr, self._EULER_H_LSB, 6)
-            h = (data[1] << 8 | data[0])
-            r = (data[3] << 8 | data[2])
-            p = (data[5] << 8 | data[4])
-
-            # Signed conversion
-            if r > 32767: r -= 65536
-            if p > 32767: p -= 65536
-
-            # Read raw gyro Z (2 bytes) — 1/16 deg/s
-            gz_data = self._bus.read_i2c_block_data(self._addr, self._GYRO_DATA_Z_LSB, 2)
-            gz = (gz_data[1] << 8 | gz_data[0])
-            if gz > 32767: gz -= 65536
-
-            return IMUReading(
-                timestamp = time.time(),
-                heading   = h / 16.0,
-                pitch     = p / 16.0,
-                roll      = r / 16.0,
-                gyro_z    = gz / 16.0,
-                valid     = True,
-            )
-        except Exception as e:
-            log.debug("BNO055 read error: %s", e)
-            return IMUReading()
-
-    def close(self) -> None:
-        if self._bus:
-            self._bus.close()
-            self._bus = None
-
-
-class MPU6050Reader:
-    """
-    Reads raw gyro data from an MPU-6050 over I2C and integrates to heading.
-
-    The MPU-6050 has no on-chip fusion — only raw gyro.  Heading is obtained
-    by integrating gyro Z.  Drift accumulates over time; use the BNO055 for
-    accurate absolute heading.
-
-    I2C address: 0x68 (AD0 low) or 0x69 (AD0 high).
+    Motor commands are written from the main thread.  The STM32 handles
+    the interleaved traffic transparently.
     """
 
-    _PWR_MGMT_1  = 0x6B
-    _GYRO_CONFIG = 0x1B   # FS_SEL bits 3:4 (00=250°/s, 01=500°/s)
-    _GYRO_ZOUT_H = 0x47   # raw gyro Z high byte
-    _WHO_AM_I    = 0x75
+    def __init__(self, port: str, baud: int = 115200, dry_run: bool = False):
+        self._port    = port
+        self._baud    = baud
+        self._dry_run = dry_run
+        self._ser     = None
 
-    def __init__(self, i2c_bus: int = 1, address: int = 0x68):
-        self._bus_num  = i2c_bus
-        self._addr     = address
-        self._bus      = None
-        self._heading  = 0.0
-        self._last_t   = None
-        self._scale    = 250.0 / 32768.0   # deg/s per LSB (FS_SEL=0)
-
-    def open(self) -> None:
-        try:
-            import smbus2
-            self._bus = smbus2.SMBus(self._bus_num)
-        except ImportError:
-            raise RuntimeError("smbus2 not installed.  Run: pip install smbus2")
-
-        who = self._bus.read_byte_data(self._addr, self._WHO_AM_I)
-        if who not in (0x68, 0x69, 0x70, 0x12):
-            log.warning("MPU6050 WHO_AM_I = 0x%02X (expected 0x68)", who)
-
-        # Wake up (clear sleep bit)
-        self._bus.write_byte_data(self._addr, self._PWR_MGMT_1, 0x00)
-        time.sleep(0.1)
-        log.info("MPU6050 at 0x%02X on bus %d ready", self._addr, self._bus_num)
-
-    def read(self) -> IMUReading:
-        if self._bus is None:
-            return IMUReading()
-        try:
-            hi = self._bus.read_byte_data(self._addr, self._GYRO_ZOUT_H)
-            lo = self._bus.read_byte_data(self._addr, self._GYRO_ZOUT_H + 1)
-            raw = (hi << 8) | lo
-            if raw > 32767: raw -= 65536
-            gz = raw * self._scale   # deg/s
-
-            now = time.time()
-            if self._last_t is not None:
-                dt = now - self._last_t
-                self._heading += gz * dt
-            self._last_t = now
-
-            return IMUReading(
-                timestamp = now,
-                heading   = self._heading % 360,
-                pitch     = 0.0,
-                roll      = 0.0,
-                gyro_z    = gz,
-                valid     = True,
-            )
-        except Exception as e:
-            log.debug("MPU6050 read error: %s", e)
-            return IMUReading()
-
-    def close(self) -> None:
-        if self._bus:
-            self._bus.close()
-            self._bus = None
-
-
-# ── IMU background thread ─────────────────────────────────────────────────────
-
-class IMUMonitor:
-    """Reads the IMU at ~50 Hz in a background thread."""
-
-    def __init__(self, reader):
-        self._reader  = reader
-        self._latest  = IMUReading()
+        self._latest: IMUReading = IMUReading()
+        self._history: list[IMUReading] = []
         self._lock    = threading.Lock()
         self._running = False
         self._thread  = None
-        self._history: list[IMUReading] = []
 
-    def start(self) -> None:
-        self._reader.open()
+        self._armed   = False   # set when $DATA,SWD=ON (ARMED)# seen
+
+    # ── Lifecycle ─────────────────────────────────────────────────────────────
+
+    def open(self) -> None:
+        if self._dry_run:
+            log.info("[dry-run] AtlasPort: no serial port opened")
+            return
+        import serial
+        self._ser = serial.Serial(
+            self._port, self._baud, timeout=0.5, write_timeout=0.2)
+        time.sleep(0.3)
+        self._ser.reset_input_buffer()
+        log.info("Opened %s @ %d baud", self._port, self._baud)
         self._running = True
-        self._thread  = threading.Thread(target=self._loop, daemon=True)
+        self._thread  = threading.Thread(target=self._reader_loop, daemon=True,
+                                         name="atlas-imu-rx")
         self._thread.start()
 
-    def stop(self) -> None:
+    def close(self) -> None:
+        self.send(0, 0)   # stop motors
         self._running = False
         if self._thread:
-            self._thread.join(timeout=1.0)
-        self._reader.close()
+            self._thread.join(timeout=1.5)
+        if self._ser:
+            self._ser.close()
+            self._ser = None
+            log.info("AtlasPort closed")
 
-    def latest(self) -> IMUReading:
+    # ── Command TX ────────────────────────────────────────────────────────────
+
+    def send(self, L: int, R: int, AUX: int = 0) -> None:
+        frame = _atlas_cmd(L, R, AUX)
+        if self._dry_run:
+            print(f"  [dry-run] {frame.decode().strip()}")
+            return
+        if self._ser:
+            self._ser.write(frame)
+            self._ser.flush()
+
+    def stop(self) -> None:
+        self.send(0, 0)
+
+    def drive_straight(self, pct: int) -> None:
+        self.send(pct, pct)
+
+    def spin_right(self, pct: int) -> None:
+        """Spin in place clockwise (positive yaw change)."""
+        self.send(pct, -pct)
+
+    def spin_left(self, pct: int) -> None:
+        """Spin in place counter-clockwise (negative yaw change)."""
+        self.send(-pct, pct)
+
+    # ── IMU RX ────────────────────────────────────────────────────────────────
+
+    def latest_imu(self) -> IMUReading:
         with self._lock:
             return self._latest
 
+    def wait_for_imu(self, timeout: float = 5.0) -> bool:
+        """Block until the first valid IMU reading arrives or timeout."""
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            if self.latest_imu().valid:
+                return True
+            time.sleep(0.05)
+        return False
+
     def snapshot_history(self) -> list[IMUReading]:
-        """Return and clear the reading history."""
+        """Return and clear the IMU history list."""
         with self._lock:
             h = list(self._history)
             self._history.clear()
@@ -263,101 +255,102 @@ class IMUMonitor:
         with self._lock:
             self._history.clear()
 
-    def _loop(self) -> None:
+    @property
+    def armed(self) -> bool:
+        return self._armed
+
+    # ── Background reader ─────────────────────────────────────────────────────
+
+    def _reader_loop(self) -> None:
         while self._running:
-            r = self._reader.read()
-            if r.valid:
+            try:
+                raw = self._ser.readline()
+            except Exception as e:
+                if self._running:
+                    log.warning("Serial read error: %s", e)
+                break
+            if not raw:
+                continue
+
+            try:
+                line = raw.decode("ascii", errors="replace").strip()
+            except Exception:
+                continue
+
+            # Parse IMU frame
+            reading = _parse_imu(line)
+            if reading:
                 with self._lock:
-                    self._latest = r
-                    self._history.append(r)
-            time.sleep(0.02)   # 50 Hz
+                    self._latest = reading
+                    self._history.append(reading)
+                continue
 
+            # Track arming state
+            if "ARMED" in line:
+                if "SWD=ON" in line or "ARMED" in line:
+                    self._armed = True
+                    log.info("Atlas ARMED")
+            elif "UNARMED" in line:
+                self._armed = False
+                log.debug("Atlas unarmed")
 
-# ── Atlas driver (thin, calibration-specific) ─────────────────────────────────
-
-class AtlasDriver:
-    """Minimal Atlas serial driver for calibration (no rover_agent dependency)."""
-
-    WHEEL_BASE_MM      = 650
-    MAX_VEL_REF_MM_S   = 200
-    DRIVE_SPEED_PCT    = 60
-
-    def __init__(self, port: str, baud: int = 115200, dry_run: bool = False):
-        self._port    = port
-        self._baud    = baud
-        self._dry_run = dry_run
-        self._ser     = None
-
-    def connect(self) -> None:
-        if self._dry_run:
-            log.info("[dry-run] Atlas driver ready (no serial port opened)")
-            return
-        import serial
-        self._ser = serial.Serial(
-            self._port, self._baud, timeout=0.2, write_timeout=0.2)
-        time.sleep(0.2)
-        log.info("Atlas connected on %s @ %d", self._port, self._baud)
-
-    def disconnect(self) -> None:
-        self.stop()
-        if self._ser:
-            self._ser.close()
-            self._ser = None
-            log.info("Atlas disconnected")
-
-    def send(self, L: int, R: int) -> None:
-        frame = _atlas_frame(L, R)
-        if self._dry_run:
-            print(f"  [dry-run] {frame.decode().strip()}")
-        else:
-            if self._ser:
-                self._ser.write(frame)
-                self._ser.flush()
-
-    def stop(self) -> None:
-        self.send(0, 0)
-
-    def drive_straight(self, pct: int = 60) -> None:
-        self.send(pct, pct)
-
-    def spin_right(self, pct: int = 60) -> None:
-        """Spin in place clockwise."""
-        self.send(pct, -pct)
-
-    def spin_left(self, pct: int = 60) -> None:
-        """Spin in place counter-clockwise."""
-        self.send(-pct, pct)
+            # Log other informational frames at DEBUG level
+            if line.startswith("$DBG,") or line.startswith("$MODE,"):
+                log.debug("Atlas: %s", line)
+            elif line.startswith("$DATA,") and "L=" not in line:
+                # Motor feedback ($DATA,L=0,R=0,...) is too spammy; skip
+                log.debug("Atlas: %s", line)
 
 
 # ── Heading helpers ───────────────────────────────────────────────────────────
 
 def _heading_diff(start: float, end: float) -> float:
-    """Signed shortest-arc difference (degrees), result in [-180, 180]."""
+    """Signed shortest-arc difference (degrees), result in (−180, +180]."""
     d = (end - start) % 360
     if d > 180:
         d -= 360
     return d
 
 
+# ── Wheel-base geometry estimate ──────────────────────────────────────────────
+#
+# The Atlas M2 has a wheelbase of roughly 650 mm and MAX speed ~200 mm/s at
+# 100% PWM.  Used only to estimate how long a turn should take; the actual
+# heading is always measured from the IMU.
+#
+_WHEEL_BASE_MM    = 650
+_MAX_VEL_MM_S     = 200    # at 100% PWM, approximate
+
+
+def _estimated_turn_duration(target_deg: float, speed_pct: int) -> float:
+    """Estimate spin duration in seconds (open-loop fallback)."""
+    v_mm_s     = _MAX_VEL_MM_S * abs(speed_pct) / 100.0
+    deg_per_s  = math.degrees(2.0 * v_mm_s / _WHEEL_BASE_MM)
+    return abs(target_deg) / max(deg_per_s, 1.0)
+
+
 # ── Test routines ─────────────────────────────────────────────────────────────
 
-def test_imu_live(imu: IMUMonitor, duration: float = 10.0) -> None:
+def test_imu_live(port: AtlasPort, duration: float = 60.0) -> None:
     """Print live IMU readings for `duration` seconds."""
-    print(f"\n{'─'*60}")
-    print(f"  Live IMU  ({duration:.0f} s)   Ctrl-C to stop early")
-    print(f"{'─'*60}")
-    print(f"  {'Time':>6}  {'Heading':>8}  {'Pitch':>7}  {'Roll':>7}  {'GyroZ':>8}")
-    print(f"{'─'*60}")
+    print(f"\n{'─'*72}")
+    print(f"  Live IMU monitor  ({duration:.0f} s)   Ctrl-C to stop early")
+    print(f"{'─'*72}")
+    print(f"  {'Time':>6}  {'Heading':>8}  {'Pitch':>7}  {'Roll':>7}  "
+          f"{'GyroZ':>8}  {'Volt':>5}  {'Temp':>5}")
+    print(f"{'─'*72}")
     t0 = time.time()
     try:
         while time.time() - t0 < duration:
-            r = imu.latest()
+            r = port.latest_imu()
             if r.valid:
                 print(f"\r  {time.time()-t0:6.1f}s  "
-                      f"{r.heading:7.2f}°  "
-                      f"{r.pitch:+6.2f}°  "
-                      f"{r.roll:+6.2f}°  "
-                      f"{r.gyro_z:+7.2f}°/s",
+                      f"{r.heading_deg:7.2f}°  "
+                      f"{r.pitch_deg:+6.2f}°  "
+                      f"{r.roll_deg:+6.2f}°  "
+                      f"{r.gz:+7.4f}r/s  "
+                      f"{r.voltage:4.1f}V  "
+                      f"{r.temp_c:4.1f}°C",
                       end="", flush=True)
             time.sleep(0.1)
     except KeyboardInterrupt:
@@ -365,115 +358,121 @@ def test_imu_live(imu: IMUMonitor, duration: float = 10.0) -> None:
     print()
 
 
-def test_turn(atlas: AtlasDriver, imu: IMUMonitor,
+def test_turn(port: AtlasPort,
               target_deg: float = 90.0,
-              speed_pct: int = 40,
-              settle_s: float = 0.5) -> dict:
+              speed_pct: int   = 40,
+              settle_s: float  = 0.5,
+              imu_settle_s: float = 0.3) -> dict:
     """
-    Command a turn and measure the actual heading change via IMU.
+    Spin the rover and measure the actual heading change from the IMU.
 
-    Returns a result dict with commanded vs measured angle.
+    Returns a dict with commanded / measured / error values.
     """
     direction = "right" if target_deg > 0 else "left"
+    est_dur   = _estimated_turn_duration(target_deg, speed_pct)
+
     print(f"\n{'─'*60}")
-    print(f"  Turn test: {target_deg:+.0f}° ({direction})  speed={speed_pct}%")
+    print(f"  Turn test: {target_deg:+.0f}° ({direction})  "
+          f"speed={speed_pct}%  est. {est_dur:.2f} s")
     print(f"{'─'*60}")
 
-    # Settle before measuring
+    # Settle, then record start heading
     time.sleep(settle_s)
-    h_before = imu.latest().heading
-    print(f"  Heading before : {h_before:.2f}°")
+    h_before = port.latest_imu().heading_deg
+    print(f"  Heading before : {h_before:.3f}°")
 
-    # Estimate duration from wheel geometry
-    # angular_rate (deg/s) = 2 * v_tangential / wheelbase
-    v_tangential_mm_s  = AtlasDriver.MAX_VEL_REF_MM_S * speed_pct / 100
-    deg_per_s          = math.degrees(2 * v_tangential_mm_s / AtlasDriver.WHEEL_BASE_MM)
-    duration           = abs(target_deg) / deg_per_s
-    print(f"  Estimated rate : {deg_per_s:.1f} °/s  →  {duration:.2f} s")
+    port.clear_history()
 
-    imu.clear_history()
-
-    # Execute
+    # ── Execute turn ──
     if target_deg > 0:
-        atlas.spin_right(speed_pct)
+        port.spin_right(speed_pct)
     else:
-        atlas.spin_left(speed_pct)
-    time.sleep(duration)
-    atlas.stop()
-    time.sleep(settle_s)
+        port.spin_left(speed_pct)
 
-    h_after  = imu.latest().heading
+    time.sleep(est_dur)
+    port.stop()
+
+    # Let the rover settle before measuring final heading
+    time.sleep(imu_settle_s)
+
+    h_after  = port.latest_imu().heading_deg
     measured = _heading_diff(h_before, h_after)
     error    = measured - target_deg
 
-    print(f"  Heading after  : {h_after:.2f}°")
+    print(f"  Heading after  : {h_after:.3f}°")
     print(f"  Commanded      : {target_deg:+.2f}°")
     print(f"  Measured       : {measured:+.2f}°")
-    print(f"  Error          : {error:+.2f}°  ({abs(error)/abs(target_deg)*100:.1f}%)")
+    print(f"  Error          : {error:+.2f}°  ({abs(error)/max(abs(target_deg),1)*100:.1f}%)")
 
-    result = {
-        "test":      "turn",
-        "target_deg": target_deg,
-        "measured_deg": measured,
-        "error_deg":  error,
-        "speed_pct":  speed_pct,
-        "duration_s": duration,
-    }
-    return result
+    if abs(error) < 5:
+        print("  ✓  PASS (< ±5°)")
+    elif abs(error) < 15:
+        print("  ⚠  MARGINAL (5–15°) — adjust deg_per_s in atlas_controller.py")
+    else:
+        print("  ✗  FAIL (> 15°) — check battery, wheel grip, surface")
+
+    return dict(test="turn",
+                target_deg=target_deg,
+                measured_deg=measured,
+                error_deg=error,
+                speed_pct=speed_pct,
+                est_duration_s=est_dur)
 
 
-def test_straight(atlas: AtlasDriver, imu: IMUMonitor,
+def test_straight(port: AtlasPort,
                   duration: float = 2.0,
-                  speed_pct: int = 40,
+                  speed_pct: int  = 40,
                   settle_s: float = 0.5) -> dict:
     """
     Drive straight and measure heading drift.
 
-    A well-aligned rover should drift < 5° over 2 seconds.
+    Good rover: < 3° over 2 s.
     """
     print(f"\n{'─'*60}")
     print(f"  Straight-line test: {duration:.1f} s  speed={speed_pct}%")
     print(f"{'─'*60}")
 
     time.sleep(settle_s)
-    h_before = imu.latest().heading
-    print(f"  Heading before : {h_before:.2f}°")
+    h_before = port.latest_imu().heading_deg
+    print(f"  Heading before : {h_before:.3f}°")
 
-    imu.clear_history()
-    atlas.drive_straight(speed_pct)
+    port.clear_history()
+    port.drive_straight(speed_pct)
     time.sleep(duration)
-    atlas.stop()
+    port.stop()
     time.sleep(settle_s)
 
-    h_after = imu.latest().heading
+    h_after = port.latest_imu().heading_deg
     drift   = _heading_diff(h_before, h_after)
-    history = imu.snapshot_history()
+    history = port.snapshot_history()
+
     max_drift = 0.0
     if history:
-        headings = [_heading_diff(h_before, r.heading) for r in history]
-        max_drift = max(abs(h) for h in headings)
+        diffs     = [_heading_diff(h_before, r.heading_deg) for r in history]
+        max_drift = max(abs(d) for d in diffs)
 
-    print(f"  Heading after  : {h_after:.2f}°")
+    print(f"  Heading after  : {h_after:.3f}°")
     print(f"  Final drift    : {drift:+.2f}°")
-    print(f"  Max drift      : {max_drift:.2f}°")
+    print(f"  Peak drift     : {max_drift:.2f}°")
+    print(f"  Samples        : {len(history)}")
+
     if abs(drift) < 3.0:
         print("  ✓  PASS — drift < 3°")
     elif abs(drift) < 8.0:
-        print("  ⚠  MARGINAL — drift 3–8°, consider motor trim")
+        print("  ⚠  MARGINAL — drift 3–8°; trim motor L/R balance")
     else:
-        print("  ✗  FAIL — drift > 8°, check wheel alignment or motor balance")
+        print("  ✗  FAIL — drift > 8°; check alignment / motor mismatch")
 
-    return {
-        "test":        "straight",
-        "duration_s":  duration,
-        "drift_deg":   drift,
-        "max_drift_deg": max_drift,
-        "speed_pct":   speed_pct,
-    }
+    return dict(test="straight",
+                duration_s=duration,
+                drift_deg=drift,
+                max_drift_deg=max_drift,
+                speed_pct=speed_pct,
+                samples=len(history))
 
 
-def test_full(atlas: AtlasDriver, imu: IMUMonitor, speed_pct: int = 40) -> None:
-    """Run the full calibration sequence."""
+def test_full(port: AtlasPort, speed_pct: int = 40) -> None:
+    """Run the full calibration sequence and print a summary table."""
     results = []
 
     print("\n" + "═"*60)
@@ -481,38 +480,37 @@ def test_full(atlas: AtlasDriver, imu: IMUMonitor, speed_pct: int = 40) -> None:
     print("═"*60)
     input("  Press Enter to start (rover will move)…")
 
-    # 1. Straight
-    results.append(test_straight(atlas, imu, duration=2.0, speed_pct=speed_pct))
+    results.append(test_straight(port, duration=2.0,  speed_pct=speed_pct))
     time.sleep(1.0)
 
-    # 2. Turn right 90°
-    results.append(test_turn(atlas, imu, target_deg=+90, speed_pct=speed_pct))
+    results.append(test_turn(port, target_deg=+90,  speed_pct=speed_pct))
     time.sleep(1.0)
 
-    # 3. Turn left 90° (back to start)
-    results.append(test_turn(atlas, imu, target_deg=-90, speed_pct=speed_pct))
+    results.append(test_turn(port, target_deg=-90,  speed_pct=speed_pct))
     time.sleep(1.0)
 
-    # 4. Turn right 180°
-    results.append(test_turn(atlas, imu, target_deg=+180, speed_pct=speed_pct))
+    results.append(test_turn(port, target_deg=+180, speed_pct=speed_pct))
     time.sleep(1.0)
 
-    # 5. Turn left 180° (back to start)
-    results.append(test_turn(atlas, imu, target_deg=-180, speed_pct=speed_pct))
+    results.append(test_turn(port, target_deg=-180, speed_pct=speed_pct))
 
-    # Summary
+    # ── Summary ──────────────────────────────────────────────────────────────
     print("\n" + "═"*60)
     print("  SUMMARY")
     print("═"*60)
     for r in results:
         if r["test"] == "turn":
-            print(f"  Turn {r['target_deg']:+.0f}°  →  "
-                  f"measured {r['measured_deg']:+.1f}°  "
-                  f"error {r['error_deg']:+.1f}°")
+            status = ("✓" if abs(r["error_deg"]) < 5 else
+                      "⚠" if abs(r["error_deg"]) < 15 else "✗")
+            print(f"  {status} Turn {r['target_deg']:+5.0f}°  →  "
+                  f"measured {r['measured_deg']:+6.1f}°  "
+                  f"error {r['error_deg']:+5.1f}°")
         elif r["test"] == "straight":
-            print(f"  Straight {r['duration_s']:.1f}s  →  "
-                  f"drift {r['drift_deg']:+.1f}°  "
-                  f"max {r['max_drift_deg']:.1f}°")
+            status = ("✓" if abs(r["drift_deg"]) < 3 else
+                      "⚠" if abs(r["drift_deg"]) < 8 else "✗")
+            print(f"  {status} Straight {r['duration_s']:.1f}s  →  "
+                  f"drift {r['drift_deg']:+5.1f}°  "
+                  f"peak {r['max_drift_deg']:4.1f}°")
     print("═"*60)
 
 
@@ -526,106 +524,73 @@ def main() -> None:
     )
 
     parser = argparse.ArgumentParser(
-        description="Rover calibration — send motion commands and read IMU",
+        description="Rover calibration using Atlas STM32 built-in IMU",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
     )
-
-    # IMU
-    parser.add_argument("--imu", choices=["bno055", "mpu6050"], default="bno055",
-                        help="IMU model (default: bno055)")
-    parser.add_argument("--i2c-bus",     type=int, default=1,
-                        help="I2C bus number (default: 1)")
-    parser.add_argument("--i2c-address", type=lambda x: int(x, 0), default=None,
-                        help="I2C address override, e.g. 0x29 (default: auto)")
-
-    # Atlas
-    parser.add_argument("--atlas-port", default="/dev/ttyACM0",
+    parser.add_argument("--port",  default="/dev/ttyACM0",
                         help="Atlas serial port (default: /dev/ttyACM0)")
-    parser.add_argument("--atlas-baud", type=int, default=115200)
-    parser.add_argument("--speed",      type=int, default=40,
+    parser.add_argument("--baud",  type=int, default=115200)
+    parser.add_argument("--speed", type=int, default=40,
                         help="Motor power %% for tests (default: 40)")
-    parser.add_argument("--dry-run",    action="store_true",
-                        help="Print commands, do not open serial port")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Print commands only, do not open serial port")
 
-    # Test selection
     parser.add_argument("--test",
                         choices=["imu", "turn", "straight", "full"],
                         default="imu",
                         help="Which test to run (default: imu — live monitor)")
     parser.add_argument("--angle",    type=float, default=90.0,
-                        help="Target angle for turn test in degrees (default: 90)")
+                        help="Target angle for turn test (degrees, default 90)")
     parser.add_argument("--duration", type=float, default=2.0,
-                        help="Duration for straight test in seconds (default: 2.0)")
+                        help="Duration for straight test (seconds, default 2.0)")
+    parser.add_argument("--monitor-time", type=float, default=60.0,
+                        help="Seconds to run live IMU monitor (default 60)")
 
     args = parser.parse_args()
 
-    # ── Build IMU reader ──────────────────────────────────────────────────────
-    if args.imu == "bno055":
-        addr = args.i2c_address if args.i2c_address is not None else 0x28
-        reader = BNO055Reader(i2c_bus=args.i2c_bus, address=addr)
-    else:
-        addr = args.i2c_address if args.i2c_address is not None else 0x68
-        reader = MPU6050Reader(i2c_bus=args.i2c_bus, address=addr)
+    # ── Open port ─────────────────────────────────────────────────────────────
+    port = AtlasPort(port=args.port, baud=args.baud, dry_run=args.dry_run)
 
-    imu = IMUMonitor(reader)
-
-    # ── Build Atlas driver ────────────────────────────────────────────────────
-    atlas = AtlasDriver(
-        port    = args.atlas_port,
-        baud    = args.atlas_baud,
-        dry_run = args.dry_run,
-    )
-
-    # ── Connect ───────────────────────────────────────────────────────────────
-    print(f"\nConnecting IMU ({args.imu} @ I2C bus {args.i2c_bus} addr 0x{addr:02X})…")
+    print(f"\nOpening Atlas port: {args.port}  (dry-run={args.dry_run})")
     try:
-        imu.start()
+        port.open()
     except Exception as e:
         print(f"  ERROR: {e}")
         sys.exit(1)
 
-    print("Connecting Atlas…")
-    try:
-        atlas.connect()
-    except Exception as e:
-        print(f"  ERROR: {e}")
-        imu.stop()
-        sys.exit(1)
+    # Wait for first IMU reading (unless dry-run)
+    if not args.dry_run:
+        print("  Waiting for IMU data…", end="", flush=True)
+        ok = port.wait_for_imu(timeout=5.0)
+        if ok:
+            r = port.latest_imu()
+            print(f"\n  IMU OK — heading={r.heading_deg:.1f}°  "
+                  f"pitch={r.pitch_deg:.1f}°  roll={r.roll_deg:.1f}°  "
+                  f"volt={r.voltage:.1f}V  temp={r.temp_c:.1f}°C")
+        else:
+            print("\n  WARNING: no IMU data in 5 s — check serial port / cable")
 
-    # Brief settle
-    time.sleep(0.5)
-    r = imu.latest()
-    if r.valid:
-        print(f"  IMU OK — heading={r.heading:.1f}°  pitch={r.pitch:.1f}°  roll={r.roll:.1f}°")
-    else:
-        print("  IMU: no valid reading yet — check wiring")
-
-    # ── Run selected test ─────────────────────────────────────────────────────
+    # ── Run test ──────────────────────────────────────────────────────────────
     try:
         if args.test == "imu":
-            test_imu_live(imu, duration=60.0)
+            test_imu_live(port, duration=args.monitor_time)
 
         elif args.test == "turn":
-            result = test_turn(atlas, imu,
-                               target_deg=args.angle,
-                               speed_pct=args.speed)
-            print(f"\nResult: {result}")
+            result = test_turn(port, target_deg=args.angle, speed_pct=args.speed)
+            print(f"\nResult dict: {result}")
 
         elif args.test == "straight":
-            result = test_straight(atlas, imu,
-                                   duration=args.duration,
-                                   speed_pct=args.speed)
-            print(f"\nResult: {result}")
+            result = test_straight(port, duration=args.duration, speed_pct=args.speed)
+            print(f"\nResult dict: {result}")
 
         elif args.test == "full":
-            test_full(atlas, imu, speed_pct=args.speed)
+            test_full(port, speed_pct=args.speed)
 
     except KeyboardInterrupt:
         print("\nInterrupted.")
     finally:
-        atlas.stop()
-        atlas.disconnect()
-        imu.stop()
+        port.close()
         print("Done.")
 
 
