@@ -321,6 +321,21 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
             max_lin_mm_s=args.omnivla_velocity,
             icr_offset_m=_geo["icr_offset_mm"] / 1000.0,
         )
+    if name == "crop_guard":
+        from crop_guard_strategy import CropGuardStrategy
+        from omnivla_strategy import load_camera_calibration
+        _geo = load_geometry(getattr(args, "rover_geometry", None))
+        return CropGuardStrategy(
+            server_url          = args.cloud_server,
+            goal                = args.goal,
+            left_device         = args.left_cam,
+            right_device        = args.right_cam,
+            max_lin_mm_s        = args.omnivla_velocity,
+            icr_offset_m        = _geo["icr_offset_mm"] / 1000.0,
+            exg_threshold       = args.exg_threshold,
+            exg_min_area        = args.exg_min_area,
+            camera_calibration  = load_camera_calibration(args.camera_calibration),
+        )
     if name == "omnivla_full":
         from omnivla_full_strategy import OmniVLAFullStrategy
         _geo = load_geometry(getattr(args, "rover_geometry", None))
@@ -371,8 +386,20 @@ def main():
     parser.add_argument("--strategy",    type=str,   default="omnivla_full",
                         choices=["omnivla_full", "cloud_omnivla", "bev_omnivla",
                                  "omnivla", "line_follow", "plant_center",
-                                 "boundary_guard", "teleop"],
+                                 "boundary_guard", "teleop", "crop_guard"],
                         help="Navigation strategy (default: omnivla_full)")
+    parser.add_argument("--left-cam",   type=int,   default=1,
+                        metavar="N",
+                        help="Left wheel camera device index (crop_guard, default 1)")
+    parser.add_argument("--right-cam",  type=int,   default=2,
+                        metavar="N",
+                        help="Right wheel camera device index (crop_guard, default 2)")
+    parser.add_argument("--exg-threshold", type=int, default=20,
+                        metavar="N",
+                        help="ExG vegetation threshold for wheel cameras (default 20)")
+    parser.add_argument("--exg-min-area",  type=int, default=500,
+                        metavar="PX",
+                        help="Min vegetation blob area in pixels (default 500)")
     parser.add_argument("--cloud-server", type=str,  default="ws://localhost:8765",
                         metavar="URL",
                         help="WebSocket URL of omnivla_cloud_server.py "
