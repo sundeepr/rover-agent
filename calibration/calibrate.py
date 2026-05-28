@@ -396,19 +396,30 @@ def test_turn(port: AtlasPort,
 
     port.clear_history()
 
-    # ── Start spinning ─────────────────────────────────────────────────────
-    if target_deg > 0:
-        port.spin_right(speed_pct)
-    else:
-        port.spin_left(speed_pct)
+    # ── Closed-loop spin with watchdog keepalive ───────────────────────────
+    # The Atlas STM32 has a command-timeout watchdog (~200–500 ms).
+    # If no $CMD packet arrives it zeroes all motors as a safety failsafe.
+    # We must re-send the motor command every _CMD_INTERVAL_S seconds.
+    _CMD_INTERVAL_S = 0.10    # 10 Hz keepalive — well within watchdog window
 
-    # ── Poll IMU until target reached or timeout ───────────────────────────
-    t0       = time.time()
-    timed_out = False
+    L = speed_pct if target_deg > 0 else -speed_pct
+    R = -speed_pct if target_deg > 0 else speed_pct
+
+    t0          = time.time()
+    last_cmd_t  = -1.0
+    timed_out   = False
+
     while True:
-        elapsed = time.time() - t0
-        h_now   = port.latest_imu().heading_deg
-        done    = _heading_diff(h_before, h_now)
+        now     = time.time()
+        elapsed = now - t0
+
+        # Re-send command every 100 ms to keep watchdog alive
+        if now - last_cmd_t >= _CMD_INTERVAL_S:
+            port.send(L, R)
+            last_cmd_t = now
+
+        h_now = port.latest_imu().heading_deg
+        done  = _heading_diff(h_before, h_now)
 
         # Progress tick
         print(f"\r  Spinning… {done:+.1f}° / {target_deg:+.1f}°  "
@@ -478,8 +489,18 @@ def test_straight(port: AtlasPort,
     print(f"  Heading before : {h_before:.3f}°")
 
     port.clear_history()
-    port.drive_straight(speed_pct)
-    time.sleep(duration)
+
+    # Drive straight with watchdog keepalive (re-send every 100 ms)
+    _CMD_INTERVAL_S = 0.10
+    t0         = time.time()
+    last_cmd_t = -1.0
+    while time.time() - t0 < duration:
+        now = time.time()
+        if now - last_cmd_t >= _CMD_INTERVAL_S:
+            port.drive_straight(speed_pct)
+            last_cmd_t = now
+        time.sleep(0.02)
+
     port.stop()
     time.sleep(settle_s)
 
