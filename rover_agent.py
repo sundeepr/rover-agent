@@ -94,7 +94,7 @@ _GEOMETRY_DEFAULTS = {
     "rover_polygon_px":       [[120, 180], [520, 180], [520, 380], [120, 380]],
     "lookahead_s":            1.0,
     "arc_steps":              10,
-    "exg_threshold":          20,
+    "exg_threshold":          40,
     "exg_min_area":           500,
     "correction_goal_suffix": "steer slightly {direction} to avoid vegetation",
 }
@@ -428,9 +428,9 @@ def main():
     parser.add_argument("--right-cam",  type=int,   default=2,
                         metavar="N",
                         help="Right wheel camera device index (crop_guard, default 2)")
-    parser.add_argument("--exg-threshold", type=int, default=20,
+    parser.add_argument("--exg-threshold", type=int, default=40,
                         metavar="N",
-                        help="ExG vegetation threshold for wheel cameras (default 20)")
+                        help="ExG vegetation threshold for wheel cameras (default 40)")
     parser.add_argument("--exg-min-area",  type=int, default=500,
                         metavar="PX",
                         help="Min vegetation blob area in pixels (default 500)")

@@ -175,7 +175,7 @@ class CropGuardStrategy(NavigationStrategy):
                  right_device:       int  = 2,
                  max_lin_mm_s:       int  = 150,
                  icr_offset_m:       float = 0.480,
-                 exg_threshold:      int  = 20,
+                 exg_threshold:      int  = 40,
                  exg_min_area:       int  = 500,
                  cloud_interval_s:   float = _CLOUD_INTERVAL_S,
                  camera_calibration: dict | None = None):
@@ -501,14 +501,33 @@ class CropGuardStrategy(NavigationStrategy):
 
     @staticmethod
     def _open_cam(device: int, label: str):
-        cap = cv2.VideoCapture(device)
-        if cap.isOpened():
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-            log.info("%s wheel camera opened on device %d", label, device)
-        else:
+        """Open a wheel camera with V4L2 backend and warmup reads."""
+        cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
+        if not cap.isOpened():
+            cap = cv2.VideoCapture(device)   # fallback to default backend
+        if not cap.isOpened():
             log.warning("%s wheel camera NOT FOUND on device %d", label, device)
-        return cap
+            return None
+
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+        # Warmup — same Jetson dual-node issue as the main camera
+        for _ in range(30):
+            ret, _ = cap.read()
+            if ret:
+                log.info("%s wheel camera ready on device %d  (%dx%d)",
+                         label, device,
+                         int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                         int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+                return cap
+            time.sleep(0.05)
+
+        log.warning("%s wheel camera device %d opened but delivers no frames "
+                    "— try device %d or %d",
+                    label, device, device + 2, max(0, device - 2))
+        cap.release()
+        return None
 
     @staticmethod
     def _grab(cap) -> np.ndarray | None:
