@@ -149,7 +149,14 @@ def agent_loop(
     lifecycle is managed by main() so the stop command is guaranteed to
     run on shutdown even when the program is killed.
     """
-    cap = cv2.VideoCapture(device)
+    # On Jetson, each USB camera creates two /dev/videoN nodes (capture +
+    # metadata).  The metadata node opens successfully but cap.read() always
+    # returns False.  We try the V4L2 backend explicitly and use warmup reads
+    # to let the driver stabilise before entering the main loop.
+    cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
+    if not cap.isOpened():
+        log.error("Could not open camera at device %d — trying default backend", device)
+        cap = cv2.VideoCapture(device)
     if not cap.isOpened():
         log.error("Could not open camera at device %d", device)
         return
@@ -160,12 +167,32 @@ def agent_loop(
              int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
              int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
 
+    # Warmup — Jetson USB cameras often need several reads before the first
+    # valid frame arrives.  Discard up to 30 frames silently.
+    log.info("Camera warmup (device %d)…", device)
+    for _w in range(30):
+        ret, _ = cap.read()
+        if ret:
+            break
+        time.sleep(0.05)
+    else:
+        log.warning(
+            "Camera device %d: no frame after 30 warmup reads.\n"
+            "  On Jetson, even-numbered /dev/videoN nodes are capture nodes;\n"
+            "  odd-numbered ones are metadata-only and never produce frames.\n"
+            "  Try --device %d or --device %d instead.",
+            device, device + 2, max(0, device - 2),
+        )
+        cap.release()
+        return
+
     captures_dir = Path("captures")
     captures_dir.mkdir(exist_ok=True)
     log.info("Saving LLM frames to: %s", captures_dir.resolve())
 
-    last_query_time    = 0.0
-    _logged_in_flight  = False
+    last_query_time       = 0.0
+    _logged_in_flight     = False
+    _consecutive_failures = 0
 
     # Prefer the strategy's own cycle_interval over the CLI --interval flag.
     # Pure-vision strategies (plant_center, boundary_guard) set this to ~0.1 s
@@ -178,8 +205,15 @@ def agent_loop(
     while True:
         ret, frame = cap.read()
         if not ret:
-            log.error("Failed to grab frame")
-            break
+            _consecutive_failures += 1
+            if _consecutive_failures == 1:
+                log.warning("Camera device %d: failed to grab frame (will retry)", device)
+            if _consecutive_failures >= 30:
+                log.error("Camera device %d: 30 consecutive failures — giving up", device)
+                break
+            time.sleep(0.033)
+            continue
+        _consecutive_failures = 0
 
         # Always push raw frame — never blocked by queries
         with state.raw_lock:
