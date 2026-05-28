@@ -103,13 +103,17 @@ _HTML = """<!DOCTYPE html>
     .content-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 
     /* Videos side by side */
-    .videos-row { flex: 1; display: flex; flex-direction: row; background: #000;
-                  gap: 2px; overflow: hidden; min-height: 0; }
-    .video-box { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+    .videos-row { display: flex; flex-direction: row; background: #000;
+                  gap: 2px; overflow: hidden; justify-content: center; align-items: flex-start;
+                  flex-shrink: 0; }
+    /* Each box takes 1/3 of the row width; height = label + img (4:3) */
+    .video-box { flex: 0 1 calc(33.333% - 2px);
+                 display: flex; flex-direction: column; overflow: hidden; }
     .video-box .label { background: #111; color: #555; font-size: 0.68em;
                         text-transform: uppercase; letter-spacing: 0.1em;
                         padding: 4px 10px; flex-shrink: 0; }
-    .video-box img { flex: 1; width: 100%; object-fit: contain; display: block; min-height: 0; }
+    /* img is exactly 4:3 — no letterbox bars, no distortion */
+    .video-box img { width: 100%; aspect-ratio: 4/3; object-fit: fill; display: block; }
 
     /* Bottom bar */
     .bottom-bar { height: 190px; display: flex; flex-direction: row; flex-shrink: 0;
@@ -372,26 +376,18 @@ _HTML = """<!DOCTYPE html>
      * browsers and layout modes (flex, absolute, etc.) unlike offsetTop
      * which is ambiguous inside flex containers.
      *
-     * Accounts for object-fit:contain letterboxing inside the <img>.
+     * The img uses aspect-ratio:4/3 + object-fit:fill so the video content
+     * fills the entire img element — no letterbox bars. The content rect
+     * is therefore the same as the img bounding rect.
      */
     function _imgContentRect(img, canvas) {
       const cr = canvas.getBoundingClientRect();
       const ir = img.getBoundingClientRect();
-      const iw = ir.width;
-      const ih = ir.height;
-      const nw = img.naturalWidth  || 640;
-      const nh = img.naturalHeight || 480;
-      // img top-left in canvas pixel coordinates
-      const ox = ir.left - cr.left;
-      const oy = ir.top  - cr.top;
-      if (!nw || !nh || !iw || !ih) return {x: ox, y: oy, w: iw, h: ih};
-      const scale = Math.min(iw / nw, ih / nh);
-      const w = nw * scale;
-      const h = nh * scale;
       return {
-        x: ox + (iw - w) / 2,
-        y: oy + (ih - h) / 2,
-        w, h,
+        x: ir.left - cr.left,
+        y: ir.top  - cr.top,
+        w: ir.width,
+        h: ir.height,
       };
     }
 
