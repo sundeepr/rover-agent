@@ -1,0 +1,15 @@
+{
+  "fx": 67.0,
+  "fy": 67.0,
+  "cx": 320.0,
+  "cy": 240.0,
+  "vy_horizon": 282.2,
+  "camera_height_m": 0.82,
+  "image_w": 640,
+  "image_h": 480,
+  "dot_spacing_mm": 100,
+  "method": "forward_axis",
+  "n_dots": 10,
+  "rmse_px": 11.61,
+  "_note": "Fisheye lens — pinhole model is approximate. RMSE 11.6px is expected. For tighter accuracy use OpenCV fisheye calibration with a checkerboard."
+}
