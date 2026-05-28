@@ -104,13 +104,18 @@ class IMUReading:
 
     @property
     def heading_deg(self) -> float:
-        """Yaw angle derived from quaternion, degrees, −180 to +180."""
-        # Standard quaternion → yaw formula
+        """
+        Yaw angle in compass convention: clockwise = positive, range −180 to +180.
+
+        The quaternion formula gives CCW-positive (standard math convention).
+        We negate it so that a right (CW) turn produces a positive heading
+        change, matching the intuitive convention used by test_turn.
+        """
         yaw = math.atan2(
             2.0 * (self.qw * self.qz + self.qx * self.qy),
             1.0 - 2.0 * (self.qy ** 2 + self.qz ** 2),
         )
-        return math.degrees(yaw)
+        return -math.degrees(yaw)   # negate: CW = positive
 
     @property
     def pitch_deg(self) -> float:
@@ -359,55 +364,90 @@ def test_imu_live(port: AtlasPort, duration: float = 60.0) -> None:
 
 
 def test_turn(port: AtlasPort,
-              target_deg: float = 90.0,
-              speed_pct: int   = 40,
-              settle_s: float  = 0.5,
-              imu_settle_s: float = 0.3) -> dict:
+              target_deg: float    = 90.0,
+              speed_pct: int       = 40,
+              settle_s: float      = 0.5,
+              imu_settle_s: float  = 0.4,
+              timeout_factor: float = 3.0) -> dict:
     """
-    Spin the rover and measure the actual heading change from the IMU.
+    Spin the rover and stop as soon as the IMU reports the target heading
+    change (closed-loop).  Falls back to a time-out if the IMU never reaches
+    the target (e.g. wheel slip, very low speed).
+
+    heading_deg uses compass convention (CW = positive) so a right turn
+    gives a positive measured value.
 
     Returns a dict with commanded / measured / error values.
     """
     direction = "right" if target_deg > 0 else "left"
     est_dur   = _estimated_turn_duration(target_deg, speed_pct)
+    timeout   = est_dur * timeout_factor          # safety net
 
     print(f"\n{'─'*60}")
     print(f"  Turn test: {target_deg:+.0f}° ({direction})  "
-          f"speed={speed_pct}%  est. {est_dur:.2f} s")
+          f"speed={speed_pct}%  timeout={timeout:.1f} s")
     print(f"{'─'*60}")
 
-    # Settle, then record start heading
+    # Settle, then snapshot start heading
     time.sleep(settle_s)
     h_before = port.latest_imu().heading_deg
     print(f"  Heading before : {h_before:.3f}°")
+    print(f"  Spinning…", end="", flush=True)
 
     port.clear_history()
 
-    # ── Execute turn ──
+    # ── Start spinning ─────────────────────────────────────────────────────
     if target_deg > 0:
         port.spin_right(speed_pct)
     else:
         port.spin_left(speed_pct)
 
-    time.sleep(est_dur)
+    # ── Poll IMU until target reached or timeout ───────────────────────────
+    t0       = time.time()
+    timed_out = False
+    while True:
+        elapsed = time.time() - t0
+        h_now   = port.latest_imu().heading_deg
+        done    = _heading_diff(h_before, h_now)
+
+        # Progress tick
+        print(f"\r  Spinning… {done:+.1f}° / {target_deg:+.1f}°  "
+              f"({elapsed:.1f}s)   ", end="", flush=True)
+
+        if target_deg > 0 and done >= target_deg:
+            break
+        if target_deg < 0 and done <= target_deg:
+            break
+        if elapsed >= timeout:
+            timed_out = True
+            break
+
+        time.sleep(0.02)   # 50 Hz poll
+
     port.stop()
+    elapsed_stop = time.time() - t0
+    print()   # newline after progress line
 
-    # Let the rover settle before measuring final heading
+    if timed_out:
+        print(f"  ⚠  Timed out after {timeout:.1f} s — IMU target not reached")
+
+    # Settle and take final reading
     time.sleep(imu_settle_s)
-
     h_after  = port.latest_imu().heading_deg
     measured = _heading_diff(h_before, h_after)
     error    = measured - target_deg
+    actual_s = elapsed_stop
 
     print(f"  Heading after  : {h_after:.3f}°")
     print(f"  Commanded      : {target_deg:+.2f}°")
     print(f"  Measured       : {measured:+.2f}°")
     print(f"  Error          : {error:+.2f}°  ({abs(error)/max(abs(target_deg),1)*100:.1f}%)")
+    print(f"  Actual time    : {actual_s:.2f} s")
 
     if abs(error) < 5:
         print("  ✓  PASS (< ±5°)")
     elif abs(error) < 15:
-        print("  ⚠  MARGINAL (5–15°) — adjust deg_per_s in atlas_controller.py")
+        print("  ⚠  MARGINAL (5–15°) — check for settling overshoot")
     else:
         print("  ✗  FAIL (> 15°) — check battery, wheel grip, surface")
 
@@ -416,7 +456,8 @@ def test_turn(port: AtlasPort,
                 measured_deg=measured,
                 error_deg=error,
                 speed_pct=speed_pct,
-                est_duration_s=est_dur)
+                actual_duration_s=actual_s,
+                timed_out=timed_out)
 
 
 def test_straight(port: AtlasPort,
