@@ -26,6 +26,7 @@ Dependencies (beyond requirements.txt):
 """
 
 import collections
+import json
 import logging
 import math
 import threading
@@ -38,6 +39,62 @@ import numpy as np
 from navigation_strategy import AgentState, NavigationStrategy
 
 log = logging.getLogger("rover.omnivla_strategy")
+
+
+# ── Camera calibration for waypoint projection ────────────────────────────────
+
+_DEFAULT_CALIB: dict = {}   # empty = use legacy adaptive-scale fallback
+
+
+def load_camera_calibration(path: str | None) -> dict:
+    """
+    Load camera_calibration.json produced by calibration/camera_calibrate.py.
+    Returns an empty dict if path is None or file is missing (triggers fallback).
+    """
+    if not path:
+        return {}
+    try:
+        with open(path) as f:
+            calib = json.load(f)
+        log.info("Camera calibration loaded: fx=%.1f  h=%.0f mm  horizon=%.0f px",
+                 calib["fx"], calib["camera_height_m"] * 1000, calib["vy_horizon"])
+        return calib
+    except Exception as e:
+        log.warning("Could not load camera calibration %s: %s — using fallback", path, e)
+        return {}
+
+
+def bev_to_pixel(x_m: float, y_m: float, calib: dict,
+                 frame_w: int, frame_h: int) -> tuple[int, int] | None:
+    """
+    Project a BEV ground-plane point to image pixel coordinates.
+
+      x_m    – lateral offset in metres (positive = right)
+      y_m    – forward distance in metres (positive = ahead)
+      calib  – dict from load_camera_calibration(); empty = legacy fallback
+
+    Returns (u, v) pixel tuple clamped to frame, or None if behind camera.
+    """
+    if y_m < 0.05:
+        return None
+
+    if calib:
+        fx  = calib["fx"]
+        fy  = calib["fy"]
+        cx  = calib["cx"]
+        vy  = calib["vy_horizon"]
+        h   = calib["camera_height_m"]
+        u   = cx + (x_m / y_m) * fx
+        v   = vy + (h   / y_m) * fy
+    else:
+        # Legacy: adaptive linear scale — no perspective foreshortening
+        scale = min(frame_h, frame_w) * 0.3
+        u = frame_w / 2.0 - x_m * scale
+        v = frame_h        - y_m * scale
+
+    u = int(round(max(0, min(frame_w - 1, u))))
+    v = int(round(max(0, min(frame_h - 1, v))))
+    return u, v
 
 # ── Constants (mirror run_rover.py) ───────────────────────────────────────────
 
@@ -137,35 +194,33 @@ def _waypoint_to_drive(waypoints: np.ndarray,
 
 
 def _annotate(frame: np.ndarray, waypoints: np.ndarray,
-              vel: int, radius: int, goal: str) -> np.ndarray:
-    """Draw predicted trajectory dots and HUD text onto a copy of frame."""
+              vel: int, radius: int, goal: str,
+              calib: dict | None = None) -> np.ndarray:
+    """Draw predicted trajectory dots and HUD text onto a copy of frame.
+
+    Uses calibrated perspective projection if calib is provided,
+    otherwise falls back to the legacy adaptive linear scale.
+    """
     out = frame.copy()
     h, w = out.shape[:2]
-    cx, cy = w // 2, h
+    calib = calib or {}
 
-    # Adaptive scale: stretch the furthest waypoint to ~15% from the top.
-    # Falls back to a fixed scale if all waypoints are zero.
-    max_dx = max((float(wp[0]) * METRIC_SPACING for wp in waypoints), default=0.0)
-    if max_dx > 1e-3:
-        scale = (h * 0.85) / max_dx   # furthest wp lands at ~15% from top
-    else:
-        scale = min(h, w) * 0.3       # fallback (stationary / no prediction)
-
-    dot_r = max(6, w // 80)   # scale dot size to frame resolution
-    prev_pt = None
+    dot_r    = max(6, w // 80)
+    prev_pt  = None
     for i, wp in enumerate(waypoints):
-        dx = float(wp[0]) * METRIC_SPACING
-        dy = float(wp[1]) * METRIC_SPACING
-        px = int(cx + dy * scale)   # positive lat = rightward in image
-        py = int(cy - dx * scale)
-        px = max(0, min(w - 1, px))
-        py = max(0, min(h - 1, py))
+        x_m = float(wp[1]) * METRIC_SPACING   # lateral (positive = right)
+        y_m = float(wp[0]) * METRIC_SPACING   # forward
+
+        pt = bev_to_pixel(x_m, y_m, calib, w, h)
+        if pt is None:
+            continue
+
         color = (0, 255, 100) if i == WAYPOINT_IDX else (0, 180, 60)
-        r = dot_r * 2 if i == WAYPOINT_IDX else dot_r
-        cv2.circle(out, (px, py), r, color, -1)
+        r     = dot_r * 2 if i == WAYPOINT_IDX else dot_r
+        cv2.circle(out, pt, r, color, -1)
         if prev_pt is not None:
-            cv2.line(out, prev_pt, (px, py), (0, 160, 50), 2)
-        prev_pt = (px, py)
+            cv2.line(out, prev_pt, pt, (0, 160, 50), 2)
+        prev_pt = pt
 
     r_str = "straight" if radius == 0x8000 else f"r={radius}mm"
     cv2.putText(out, f"vel {vel} mm/s  {r_str}", (10, 24),
@@ -208,10 +263,12 @@ class OmniVLAStrategy(NavigationStrategy):
 
     def __init__(self, goal: str = "navigate forward",
                  goal_image_path: str | None = None,
-                 server_addr: str | None = None):
+                 server_addr: str | None = None,
+                 camera_calibration: dict | None = None):
         self._goal            = goal
         self._goal_image_path = goal_image_path
         self._server_addr     = server_addr
+        self._calib           = camera_calibration or {}
 
         # Context deque — PIL images in local mode, JPEG bytes in server mode
         self._context: collections.deque = collections.deque(maxlen=CONTEXT_SIZE + 1)
@@ -434,24 +491,26 @@ class OmniVLAStrategy(NavigationStrategy):
                  "straight" if radius == 0x8000 else f"r={radius}mm",
                  elapsed)
 
-        # Annotate frame for web display
-        annotated = _annotate(frame, waypoints, vel, radius, self._goal)
+        # Annotate frame for web display (uses calibrated projection if available)
+        annotated = _annotate(frame, waypoints, vel, radius, self._goal,
+                              calib=self._calib)
         with state.llm_lock:
             state.llm_frame = annotated.copy()
 
         # Build result dict in the shape the web UI expects
         h, w = frame.shape[:2]
-        cx, cy = w // 2, h
-        scale = min(h, w) * 0.3
         ui_waypoints = []
         for i, wp_i in enumerate(waypoints[:3]):
-            px = int(cx - float(wp_i[1]) * METRIC_SPACING * scale)
-            py = int(cy - float(wp_i[0]) * METRIC_SPACING * scale)
+            x_m = float(wp_i[1]) * METRIC_SPACING   # lateral
+            y_m = float(wp_i[0]) * METRIC_SPACING   # forward
+            pt  = bev_to_pixel(x_m, y_m, self._calib, w, h)
+            if pt is None:
+                continue
             ui_waypoints.append({
-                "rank": i + 1,
-                "x":    max(0, min(w - 1, px)),
-                "y":    max(0, min(h - 1, py)),
-                "description": f"wp[{i}] +{wp_i[0]*METRIC_SPACING:.2f}m",
+                "rank":        i + 1,
+                "x":           pt[0],
+                "y":           pt[1],
+                "description": f"wp[{i}] +{y_m:.2f}m",
                 "probability": round(1.0 - i * 0.1, 1),
             })
 

@@ -293,9 +293,11 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
     are only loaded when actually needed.
     """
     if name == "omnivla":
-        from omnivla_strategy import OmniVLAStrategy
+        from omnivla_strategy import OmniVLAStrategy, load_camera_calibration
         return OmniVLAStrategy(goal=args.goal, goal_image_path=args.goal_image,
-                               server_addr=args.omnivla_server)
+                               server_addr=args.omnivla_server,
+                               camera_calibration=load_camera_calibration(
+                                   args.camera_calibration))
     if name == "bev_omnivla":
         from bev_omnivla_strategy import BevOmniVLAStrategy
         return BevOmniVLAStrategy(
@@ -388,6 +390,11 @@ def main():
                         metavar="HOST:PORT",
                         help="Address of a running omnivla_server.py "
                              "(e.g. localhost:5100)")
+    parser.add_argument("--camera-calibration", type=str, default=None,
+                        metavar="FILE",
+                        help="Path to camera_calibration.json produced by "
+                             "calibration/camera_calibrate.py. Enables perspective "
+                             "projection of OmniVLA waypoints onto the camera feed.")
     parser.add_argument("--rover-geometry", type=str, default="rover_geometry.json",
                         metavar="FILE",
                         help="Path to rover_geometry.json for tunable measurements "
