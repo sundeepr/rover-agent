@@ -182,7 +182,7 @@ class CropGuardStrategy(NavigationStrategy):
 
         self._server_url        = server_url
         self._goal              = goal
-        self._left_device       = left_device
+        self._left_device       = left_device   # stored for lazy open in _wheel_thread
         self._right_device      = right_device
         self._max_lin_mm_s      = max_lin_mm_s
         self._icr_offset_m      = icr_offset_m
@@ -216,9 +216,13 @@ class CropGuardStrategy(NavigationStrategy):
         self._right_vis: np.ndarray | None  = None
         self._wheel_vis_lock = threading.Lock()
 
-        # Open wheel cameras
-        self._left_cap  = self._open_cam(left_device,  "left")
-        self._right_cap = self._open_cam(right_device, "right")
+        # Wheel cameras are opened lazily inside _wheel_thread after a short
+        # startup delay.  Opening them immediately in __init__ races with the
+        # main camera (device 0) initialisation — on Jetson all USB cameras
+        # share one controller, and grabbing frames on 2+4 before 0 is ready
+        # starves device 0's warmup reads.
+        self._left_cap  = None
+        self._right_cap = None
 
         # Background wheel-capture thread (10 Hz independent of OmniVLA timing)
         self._running = True
@@ -450,6 +454,17 @@ class CropGuardStrategy(NavigationStrategy):
     # ── Background wheel-camera thread (10 Hz) ────────────────────────────────
 
     def _wheel_thread(self) -> None:
+        # Wait for the main front camera (device 0) to finish its warmup
+        # before opening wheel cameras.  Without this delay, all three USB
+        # cameras try to initialise simultaneously on the same controller and
+        # the main camera's warmup reads starve.
+        _STARTUP_DELAY_S = 4.0
+        log.info("Wheel cameras: waiting %.0fs for main camera to initialise…",
+                 _STARTUP_DELAY_S)
+        time.sleep(_STARTUP_DELAY_S)
+        self._left_cap  = self._open_cam(self._left_device,  "left")
+        self._right_cap = self._open_cam(self._right_device, "right")
+
         while self._running:
             try:
                 lf = self._grab(self._left_cap)
