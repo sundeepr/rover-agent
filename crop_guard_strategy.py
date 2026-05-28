@@ -463,6 +463,7 @@ class CropGuardStrategy(NavigationStrategy):
                  _STARTUP_DELAY_S)
         time.sleep(_STARTUP_DELAY_S)
         self._left_cap  = self._open_cam(self._left_device,  "left")
+        time.sleep(2.0)   # stagger: let left cam stabilise before opening right
         self._right_cap = self._open_cam(self._right_device, "right")
 
         while self._running:
