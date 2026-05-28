@@ -365,32 +365,8 @@ class CropGuardStrategy(NavigationStrategy):
         with state.llm_lock:
             state.llm_frame = display
 
-        # Stitched wheel camera view → down stream
-        with self._wheel_vis_lock:
-            left_vis  = self._left_vis
-            right_vis = self._right_vis
-        if left_vis is not None and right_vis is not None:
-            # Both are rotation-corrected; resize to same height then stitch
-            th = 240
-            def _resize_h(img):
-                h, w = img.shape[:2]
-                tw   = int(w * th / h)
-                return cv2.resize(img, (tw, th))
-            lv = _resize_h(left_vis)
-            rv = _resize_h(right_vis)
-            # Pad to same width if they differ (shouldn't for identical cameras)
-            if lv.shape[1] != rv.shape[1]:
-                mw = max(lv.shape[1], rv.shape[1])
-                lv = cv2.copyMakeBorder(lv, 0, 0, 0, mw - lv.shape[1],
-                                        cv2.BORDER_CONSTANT, value=0)
-                rv = cv2.copyMakeBorder(rv, 0, 0, 0, mw - rv.shape[1],
-                                        cv2.BORDER_CONSTANT, value=0)
-            stitched = np.concatenate([lv, rv], axis=1)
-            with state.down_lock if hasattr(state, "down_lock") else _noop_ctx():
-                try:
-                    state.down_frame = stitched
-                except AttributeError:
-                    pass
+        # Wheel camera stitched view is served via _get_down_frame() below.
+        # (agent_publisher reads that method — no state.down_frame needed)
 
         # ── 5. Write result dict ──────────────────────────────────────────────
         h, w   = frame.shape[:2]
@@ -577,9 +553,45 @@ class CropGuardStrategy(NavigationStrategy):
                 "goal":  goal,
             }))
 
+    # ── Down-camera feed for agent_publisher ──────────────────────────────────
+    # agent_publisher checks hasattr(strategy, "_get_down_frame") and calls it
+    # to get the frame to push to /video/down every publish cycle.
 
-# ── Context manager no-op (for state.down_lock guard) ────────────────────────
+    def _get_down_frame(self) -> np.ndarray | None:
+        """
+        Return the stitched left+right wheel camera view for the browser.
 
-class _noop_ctx:
-    def __enter__(self): return self
-    def __exit__(self, *_): pass
+        Layout: [LEFT wheel | RIGHT wheel] side by side.
+        Both images are rotation-corrected; ExG vegetation is highlighted.
+        Red border = trampling detected, green border = clear.
+        """
+        with self._wheel_vis_lock:
+            lv = self._left_vis
+            rv = self._right_vis
+
+        if lv is None and rv is None:
+            return None
+
+        # Fallback if one cam is missing
+        if lv is None:
+            lv = self._blank_vis("LEFT CAM MISSING")
+        if rv is None:
+            rv = self._blank_vis("RIGHT CAM MISSING")
+
+        # Resize both to the same height (480px), keeping aspect ratio
+        target_h = 480
+
+        def _resize_h(img: np.ndarray) -> np.ndarray:
+            h, w = img.shape[:2]
+            new_w = max(1, int(w * target_h / h))
+            return cv2.resize(img, (new_w, target_h))
+
+        lv = _resize_h(lv)
+        rv = _resize_h(rv)
+
+        # Divider line between the two cams
+        divider = np.zeros((target_h, 4, 3), dtype=np.uint8)
+        divider[:] = (60, 60, 60)
+
+        stitched = np.concatenate([lv, divider, rv], axis=1)
+        return stitched

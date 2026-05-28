@@ -214,7 +214,7 @@ _HTML = """<!DOCTYPE html>
           <canvas id="llm-canvas" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></canvas>
         </div>
         <div class="video-box" id="down-cam-box" style="position:relative;">
-          <div class="label">&#x1F4F7; Down camera — row centering</div>
+          <div class="label" id="down-cam-label">&#x1F4F7; Down / Wheel cameras</div>
           <img id="down-img" src="/video/down" style="width:100%;display:block;background:#000;">
           <canvas id="down-canvas" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></canvas>
         </div>
