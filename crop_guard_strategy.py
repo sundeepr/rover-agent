@@ -129,11 +129,13 @@ def _process_wheel_frame(raw: np.ndarray,
     """
     h, w = raw.shape[:2]
 
-    # ── Detection zone: crop-row half of raw image ────────────────────────────
+    # ── Detection zone: WHEEL half of raw image ──────────────────────────────
+    # Trampling = crops detected where the wheel is.
+    # Crops in the non-wheel half are fine (rover is just alongside the row).
     if side == "left":
-        ahead_zone = raw[:h // 2, :]     # top half    = crop row for left cam  (wheel is bottom)
+        ahead_zone = raw[h // 2:, :]     # bottom half = wheel zone for left cam
     else:
-        ahead_zone = raw[h // 2:, :]     # bottom half = crop row for right cam (wheel is top)
+        ahead_zone = raw[:h // 2, :]     # top half    = wheel zone for right cam
 
     # ── ExG stats for tuning ─────────────────────────────────────────────────
     b, g, r     = cv2.split(ahead_zone.astype(np.int16))
@@ -179,7 +181,7 @@ def _process_wheel_frame(raw: np.ndarray,
     border_w    = 6
     cv2.rectangle(display, (0, 0), (dw - 1, dh - 1), border_col, border_w)
 
-    label = f"{'⚠ TRAMPLE' if trampling else 'CLEAR'}  area={veg_area}"
+    label = f"{'!! TRAMPLE' if trampling else 'CLEAR'}  area={veg_area}"
     cv2.putText(display, f"{side.upper()} WHEEL  {label}",
                 (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
                 (0, 0, 220) if trampling else (0, 220, 80), 2)
