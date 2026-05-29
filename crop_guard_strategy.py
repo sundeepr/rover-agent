@@ -501,7 +501,11 @@ class CropGuardStrategy(NavigationStrategy):
 
     @staticmethod
     def _open_cam(device: int, label: str):
-        """Open a wheel camera with V4L2 backend and warmup reads."""
+        """Open a wheel camera with V4L2 backend, MJPEG@10fps, and warmup reads.
+
+        Wheel cameras run at 10 fps (vs 30 fps for the front camera) to keep
+        USB bandwidth low enough for all three cameras on a shared controller.
+        """
         cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
         if not cap.isOpened():
             cap = cv2.VideoCapture(device)   # fallback to default backend
@@ -509,12 +513,13 @@ class CropGuardStrategy(NavigationStrategy):
             log.warning("%s wheel camera NOT FOUND on device %d", label, device)
             return None
 
-        # Force MJPEG first — reduces USB bandwidth ~10-20x vs default YUYV.
+        # Force MJPEG + 10 fps — reduces USB bandwidth so all three cameras
+        # can share the same controller without starving each other.
         # FOURCC must be set before resolution/fps.
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        cap.set(cv2.CAP_PROP_FPS, 30)
+        cap.set(cv2.CAP_PROP_FPS, 10)
 
         actual_fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
         fourcc_str = "".join(chr((actual_fourcc >> (8 * i)) & 0xFF) for i in range(4))
