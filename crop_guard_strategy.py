@@ -633,7 +633,7 @@ class CropGuardStrategy(NavigationStrategy):
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        cap.set(cv2.CAP_PROP_FPS, 25)
+        cap.set(cv2.CAP_PROP_FPS, 30)
 
         # Reduce gain and backlight_compensation to prevent sun-glint washing
         # out the image outdoors.  These cameras have no exposure control —
@@ -663,7 +663,7 @@ class CropGuardStrategy(NavigationStrategy):
                      label, path, fourcc_str)
 
         # Warmup reads — driver needs a few frames to stabilise
-        for _ in range(30):
+        for _ in range(60):
             ret, _ = cap.read()
             if ret:
                 log.info("%s wheel camera ready at %s  (%dx%d)  fourcc=%s  fps=%.0f",
