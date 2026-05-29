@@ -237,7 +237,7 @@ class CropGuardStrategy(NavigationStrategy):
                  left_device:        int  = 1,
                  right_device:       int  = 2,
                  max_lin_mm_s:       int  = 150,
-                 crop_guard_vel:     int  = 25,
+                 crop_guard_vel:     int  = 35,
                  icr_offset_m:       float = 0.480,
                  exg_threshold:      int  = 60,
                  exg_min_area:       int  = 500,
@@ -407,14 +407,10 @@ class CropGuardStrategy(NavigationStrategy):
             else:
                 # No trampling — apply cloud navigation at capped speed
                 if cloud_st == _CloudState.NAVIGATING and nav_vel > 0:
-                    # Cap at crop_guard_vel; halve further if crops are approaching
+                    # Always cap at crop_guard_vel — do NOT halve on look-ahead warning
+                    # because crops are always visible beside the wheels in a crop row
+                    # and halving drops below motor stall torque.
                     safe_vel = self._crop_guard_vel
-                    if warn_l or warn_r:
-                        safe_vel = max(10, safe_vel // 2)
-                        log.info("Step %d | crops approaching (%s%s) — speed capped to %d mm/s",
-                                 step,
-                                 "L" if warn_l else "", "R" if warn_r else "",
-                                 safe_vel)
                     rover_ctrl.drive_raw(safe_vel, nav_radius)
                 goal_override = None
         else:
