@@ -525,7 +525,8 @@ class CropGuardStrategy(NavigationStrategy):
                 log.warning("Cloud query: empty response")
                 return
             if resp.get("type") != "waypoints":
-                log.warning("Cloud query: unexpected response type=%s", resp.get("type"))
+                log.warning("Cloud query: unexpected response type=%s  full=%s",
+                            resp.get("type"), resp)
                 return
 
             wps = np.array(resp["waypoints"])   # [8, 4]
