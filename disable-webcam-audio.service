@@ -1,0 +1,19 @@
+[Unit]
+Description=Disable audio on HD wheel cameras (prevents Tegra xHCI buffer overruns)
+After=systemd-udev-settle.service
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c '\
+  for iface in 1-1.1:1.2 1-1.1:1.3 1-2.4:1.2 1-2.4:1.3; do \
+    if [ -e /sys/bus/usb/drivers/snd-usb-audio/$iface ]; then \
+      echo $iface > /sys/bus/usb/drivers/snd-usb-audio/unbind && \
+        echo "Unbound audio: $iface" || \
+        echo "Failed to unbind: $iface"; \
+    fi; \
+  done'
+
+[Install]
+WantedBy=multi-user.target
