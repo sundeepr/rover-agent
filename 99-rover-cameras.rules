@@ -1,36 +1,55 @@
 # /etc/udev/rules.d/99-rover-cameras.rules
 #
-# Stable /dev/cam-* symlinks for rover cameras, matched by physical USB port.
-# Both HD wheel cameras share the same VID:PID:serial so we MUST use the
-# port path (KERNELS) to tell them apart — serial-based matching won't work.
+# Two things:
+# 1. Stable /dev/cam-* symlinks matched by physical USB port (not serial,
+#    since both HD cameras share VID:PID:serial 349c:2317:20181212000000).
+# 2. Unbind snd-usb-audio from the HD wheel cameras.
 #
-# Physical layout:
-#   usb1/1-1/1-1.1   →  /dev/video4  →  left  wheel camera (HD, hub 1-1 port 1)
-#   usb1/1-2/1-2.4   →  /dev/video2  →  right wheel camera (HD, hub 1-2 port 4)
+#    These cameras are USB video+audio composite devices.  When two are
+#    connected simultaneously, the combined isochronous bandwidth of
+#    2x video + 2x audio overwhelms the Tegra xHCI buffer:
+#      "buffer overrun event for slot N ep 4 on endpoint"
+#    Unbinding the audio interface leaves only video isochronous transfers
+#    running and stops the overruns.
+#
+# Physical layout (update KERNELS if you replug to different ports):
+#   usb1/1-1/1-1.1   →  /dev/video4  →  left  wheel camera (HD)
+#   usb1/1-2/1-2.4   →  /dev/video2  →  right wheel camera (HD)
 #   usb2/.../2.3     →  /dev/video0  →  front camera (5MP, unique VID:PID)
-#
-# ATTR{index}=="0" selects the capture node only (index 1 is metadata-only).
 #
 # Install:
 #   sudo cp 99-rover-cameras.rules /etc/udev/rules.d/
 #   sudo udevadm control --reload-rules && sudo udevadm trigger
 #
-# Verify:
+# Verify symlinks:
 #   ls -la /dev/cam-*
+#
+# Verify audio unbound (should show nothing):
+#   ls /sys/bus/usb/drivers/snd-usb-audio/ | grep "1-1.1\|1-2.4"
 
-# ── Left wheel camera (HD, USB port 1-1.1) ───────────────────────────────────
+# ── Unbind audio from left wheel camera (HD, port 1-1.1, interface 1.1) ──────
+SUBSYSTEM=="usb", KERNELS=="1-1.1", ATTRS{idVendor}=="349c", ATTRS{idProduct}=="2317", \
+  ACTION=="add", \
+  RUN+="/bin/sh -c 'echo 1-1.1:1.1 > /sys/bus/usb/drivers/snd-usb-audio/unbind 2>/dev/null || true'"
+
+# ── Unbind audio from right wheel camera (HD, port 1-2.4, interface 1.1) ─────
+SUBSYSTEM=="usb", KERNELS=="1-2.4", ATTRS{idVendor}=="349c", ATTRS{idProduct}=="2317", \
+  ACTION=="add", \
+  RUN+="/bin/sh -c 'echo 1-2.4:1.1 > /sys/bus/usb/drivers/snd-usb-audio/unbind 2>/dev/null || true'"
+
+# ── Left wheel camera symlink (capture node only, index 0) ───────────────────
 SUBSYSTEM=="video4linux", \
   KERNELS=="1-1.1:1.0", \
   ATTR{index}=="0", \
   SYMLINK+="cam-left", MODE="0666", TAG+="systemd"
 
-# ── Right wheel camera (HD, USB port 1-2.4) ──────────────────────────────────
+# ── Right wheel camera symlink (capture node only, index 0) ──────────────────
 SUBSYSTEM=="video4linux", \
   KERNELS=="1-2.4:1.0", \
   ATTR{index}=="0", \
   SYMLINK+="cam-right", MODE="0666", TAG+="systemd"
 
-# ── Front camera (5MP USB Camera, unique VID:PID — port match not needed) ────
+# ── Front camera (5MP, unique VID:PID — port match not needed) ───────────────
 SUBSYSTEM=="video4linux", \
   ATTRS{idVendor}=="32e4", ATTRS{idProduct}=="0335", \
   ATTR{index}=="0", \
