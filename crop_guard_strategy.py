@@ -118,8 +118,8 @@ def _process_wheel_frame(raw: np.ndarray,
     Analyse one wheel camera frame. No rotation applied — images shown as-is.
 
     Detection zones (in raw frame):
-      Left  cam: bottom half  (raw[h//2:, :])
-      Right cam: top half     (raw[:h//2, :])
+      Left  cam: top half     (raw[:h//2, :])   — wheel is in top half
+      Right cam: bottom half  (raw[h//2:, :])   — wheel is in bottom half
 
     Trampling is declared only when BOTH conditions are true:
       1. veg_area  > exg_min_area         (a connected blob of vegetation exists)
@@ -132,9 +132,9 @@ def _process_wheel_frame(raw: np.ndarray,
 
     # ── Detection zone ────────────────────────────────────────────────────────
     if side == "left":
-        wheel_zone = raw[h // 2:, :]    # bottom half
+        wheel_zone = raw[:h // 2, :]    # top half  — wheel sits in top half
     else:
-        wheel_zone = raw[:h // 2, :]    # top half
+        wheel_zone = raw[h // 2:, :]    # bottom half — wheel sits in bottom half
 
     # ── ExG stats ─────────────────────────────────────────────────────────────
     b, g, r   = cv2.split(wheel_zone.astype(np.int16))
@@ -173,16 +173,16 @@ def _process_wheel_frame(raw: np.ndarray,
     outside_color[:, :] = (180, 180, 0)   # cyan-ish (BGR)
     alpha_outside = (exg_full.astype(np.float32) / 255.0 * 0.35)[..., np.newaxis]
     if side == "left":
-        # outside zone = top half
-        display[:h // 2, :] = np.clip(
-            display[:h // 2, :] * (1 - alpha_outside[:h // 2]) +
-            outside_color[:h // 2, :] * alpha_outside[:h // 2], 0, 255
-        ).astype(np.uint8)
-    else:
-        # outside zone = bottom half
+        # outside zone = bottom half (plants, not the wheel)
         display[h // 2:, :] = np.clip(
             display[h // 2:, :] * (1 - alpha_outside[h // 2:]) +
             outside_color[h // 2:, :] * alpha_outside[h // 2:], 0, 255
+        ).astype(np.uint8)
+    else:
+        # outside zone = top half (plants, not the wheel)
+        display[:h // 2, :] = np.clip(
+            display[:h // 2, :] * (1 - alpha_outside[:h // 2]) +
+            outside_color[:h // 2, :] * alpha_outside[:h // 2], 0, 255
         ).astype(np.uint8)
 
     # Bright lime-green mask inside the wheel zone — pixels above threshold
@@ -192,16 +192,17 @@ def _process_wheel_frame(raw: np.ndarray,
     zone_overlay[veg_mask_zone > 0] = (0, 255, 60)   # bright lime green
     blended_zone = cv2.addWeighted(wheel_zone, 0.4, zone_overlay, 0.6, 0)
     if side == "left":
-        display[h // 2:, :] = blended_zone
+        display[:h // 2, :] = blended_zone   # wheel zone = top half
     else:
-        display[:h // 2, :] = blended_zone
+        display[h // 2:, :] = blended_zone   # wheel zone = bottom half
 
     # Cyan zone-boundary line (2 px, easy to see)
     mid_y = h // 2
     cv2.line(display, (0, mid_y), (w, mid_y), (0, 220, 220), 2)
-    zone_y = mid_y + 16 if side == "left" else mid_y - 5
-    cv2.putText(display, "WHEEL ZONE v", (8, zone_y),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 220, 220), 1)
+    # Label arrow points INTO the wheel zone
+    zone_y = mid_y - 5 if side == "left" else mid_y + 16
+    cv2.putText(display, "WHEEL ZONE ^" if side == "left" else "WHEEL ZONE v",
+                (8, zone_y), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 220, 220), 1)
 
     # ExG stats at bottom
     density_str = f"dens={pct_above:.1f}%>={exg_density_pct:.0f}%"
