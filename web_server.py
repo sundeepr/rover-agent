@@ -102,17 +102,17 @@ _HTML = """<!DOCTYPE html>
     /* Content area */
     .content-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 
-    /* 2×2 video grid */
+    /* 2×2 video grid — each cell fixed at 320×240 */
     .videos-grid { display: grid;
-                   grid-template-columns: 1fr 1fr;
+                   grid-template-columns: 320px 320px;
                    grid-template-rows: auto auto;
                    gap: 2px; background: #000; flex-shrink: 0; }
-    .video-box { display: flex; flex-direction: column; overflow: hidden; }
+    .video-box { display: flex; flex-direction: column; overflow: hidden; width: 320px; }
     .video-box .label { background: #111; color: #555; font-size: 0.68em;
                         text-transform: uppercase; letter-spacing: 0.1em;
                         padding: 4px 10px; flex-shrink: 0; }
-    /* img is exactly 4:3 — no letterbox bars, no distortion */
-    .video-box img { width: 100%; aspect-ratio: 4/3; object-fit: fill; display: block; }
+    /* Fixed 320×240 — no letterbox bars, no distortion */
+    .video-box img { width: 320px; height: 240px; object-fit: fill; display: block; }
 
     /* Bottom bar */
     .bottom-bar { height: 190px; display: flex; flex-direction: row; flex-shrink: 0;
