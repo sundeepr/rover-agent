@@ -135,9 +135,23 @@ def _process_wheel_frame(raw: np.ndarray,
     else:
         ahead_zone = raw[h // 2:, :]     # bottom half = crop row for right cam (wheel is top)
 
+    # ── ExG stats for tuning ─────────────────────────────────────────────────
+    b, g, r     = cv2.split(ahead_zone.astype(np.int16))
+    exg_raw     = (2 * g - r - b)
+    exg_mean    = float(exg_raw.mean())
+    exg_max     = int(exg_raw.max())
+    exg_p90     = float(np.percentile(exg_raw, 90))
+    pct_above   = float((exg_raw > exg_threshold).mean() * 100)
+
     veg_mask    = _exg_mask(ahead_zone, exg_threshold)
     veg_area    = _vegetation_area(veg_mask, exg_min_area)
     trampling   = veg_area > 0
+
+    # Log ExG diagnostics every frame so threshold can be tuned
+    log.info("%s ExG | mean=%.1f  max=%d  p90=%.1f  above_thresh(>%d)=%.1f%%  "
+             "veg_area=%d  trampling=%s",
+             side.upper(), exg_mean, exg_max, exg_p90,
+             exg_threshold, pct_above, veg_area, trampling)
 
     # ── Rotation-corrected display image ─────────────────────────────────────
     if side == "left":
@@ -153,6 +167,12 @@ def _process_wheel_frame(raw: np.ndarray,
     green_overlay = corrected.copy()
     green_overlay[veg_mask_full > 0] = (0, 180, 60)
     display = cv2.addWeighted(corrected, 0.7, green_overlay, 0.3, 0)
+
+    # Annotate with ExG stats so values are visible in the web view
+    stats_line = (f"ExG mean={exg_mean:.0f} p90={exg_p90:.0f} "
+                  f"area={veg_area} thr={exg_threshold}")
+    cv2.putText(display, stats_line,
+                (8, dh - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200, 200, 0), 1)
 
     # Border colour: red = trampling, green = clear
     border_col  = (0, 0, 220) if trampling else (0, 200, 50)
