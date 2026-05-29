@@ -27,15 +27,21 @@
 # Verify audio unbound (should show nothing):
 #   ls /sys/bus/usb/drivers/snd-usb-audio/ | grep "1-1.1\|1-2.4"
 
-# ── Unbind audio from left wheel camera (HD, port 1-1.1, interfaces 1.2 + 1.3) ──
-SUBSYSTEM=="usb", KERNELS=="1-1.1", ATTRS{idVendor}=="349c", ATTRS{idProduct}=="2317", \
-  ACTION=="add", \
-  RUN+="/bin/sh -c 'echo 1-1.1:1.2 > /sys/bus/usb/drivers/snd-usb-audio/unbind 2>/dev/null; echo 1-1.1:1.3 > /sys/bus/usb/drivers/snd-usb-audio/unbind 2>/dev/null || true'"
+# ── Disable audio on both HD wheel cameras ────────────────────────────────────
+# These cameras are USB video+audio composites. Two simultaneous audio
+# isochronous streams cause xHCI buffer overruns on the Tegra controller:
+#   "buffer overrun event for slot N ep 4 on endpoint"
+# We unbind snd-usb-audio as soon as it binds to each audio interface.
+# ACTION=="bind" fires after the driver is already attached, so there is
+# no race condition — %k is the interface name (e.g. 1-1.1:1.2).
 
-# ── Unbind audio from right wheel camera (HD, port 1-2.4, interfaces 1.2 + 1.3) ─
-SUBSYSTEM=="usb", KERNELS=="1-2.4", ATTRS{idVendor}=="349c", ATTRS{idProduct}=="2317", \
-  ACTION=="add", \
-  RUN+="/bin/sh -c 'echo 1-2.4:1.2 > /sys/bus/usb/drivers/snd-usb-audio/unbind 2>/dev/null; echo 1-2.4:1.3 > /sys/bus/usb/drivers/snd-usb-audio/unbind 2>/dev/null || true'"
+ACTION=="bind", SUBSYSTEM=="usb", DRIVER=="snd-usb-audio", \
+  KERNELS=="1-1.1", \
+  RUN+="/bin/sh -c 'echo %k > /sys/bus/usb/drivers/snd-usb-audio/unbind 2>/dev/null || true'"
+
+ACTION=="bind", SUBSYSTEM=="usb", DRIVER=="snd-usb-audio", \
+  KERNELS=="1-2.4", \
+  RUN+="/bin/sh -c 'echo %k > /sys/bus/usb/drivers/snd-usb-audio/unbind 2>/dev/null || true'"
 
 # ── Left wheel camera symlink (capture node only, index 0) ───────────────────
 SUBSYSTEM=="video4linux", \
