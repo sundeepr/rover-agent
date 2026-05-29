@@ -509,17 +509,25 @@ class CropGuardStrategy(NavigationStrategy):
             log.warning("%s wheel camera NOT FOUND on device %d", label, device)
             return None
 
+        # Force MJPEG first — reduces USB bandwidth ~10-20x vs default YUYV.
+        # FOURCC must be set before resolution/fps.
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        cap.set(cv2.CAP_PROP_FPS, 30)
+
+        actual_fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
+        fourcc_str = "".join(chr((actual_fourcc >> (8 * i)) & 0xFF) for i in range(4))
 
         # Warmup — same Jetson dual-node issue as the main camera
         for _ in range(30):
             ret, _ = cap.read()
             if ret:
-                log.info("%s wheel camera ready on device %d  (%dx%d)",
+                log.info("%s wheel camera ready on device %d  (%dx%d)  fourcc=%s",
                          label, device,
                          int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-                         int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+                         int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+                         fourcc_str)
                 return cap
             time.sleep(0.05)
 

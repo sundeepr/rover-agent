@@ -161,11 +161,19 @@ def agent_loop(
         log.error("Could not open camera at device %d", device)
         return
 
+    # Force MJPEG so the camera compresses on-chip — dramatically reduces USB
+    # bandwidth vs the default YUYV (uncompressed), which matters when 3 cameras
+    # share the same USB controller on Jetson.  FOURCC must be set first.
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    log.info("Camera opened: %dx%d (max)",
+    cap.set(cv2.CAP_PROP_FPS, 30)
+    actual_fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
+    fourcc_str = "".join(chr((actual_fourcc >> (8 * i)) & 0xFF) for i in range(4))
+    log.info("Camera opened: %dx%d  fourcc=%s",
              int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-             int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+             int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+             fourcc_str)
 
     # Warmup — Jetson USB cameras often need several reads before the first
     # valid frame arrives.  Discard up to 30 frames silently.
