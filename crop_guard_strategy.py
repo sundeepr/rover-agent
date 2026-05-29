@@ -721,9 +721,9 @@ class CropGuardStrategy(NavigationStrategy):
     async def _ws_send_infer(self, frame_b64: str, goal: str) -> None:
         if self._ws:
             await self._ws.send(json.dumps({
-                "type":  "infer",
-                "frame": frame_b64,
-                "goal":  goal,
+                "type":      "infer",
+                "frame_b64": frame_b64,
+                "goal":      goal,
             }))
 
     # ── Down-camera feed for agent_publisher ──────────────────────────────────
