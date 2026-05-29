@@ -521,8 +521,8 @@ class CropGuardStrategy(NavigationStrategy):
         # Try MJPEG first; if the camera doesn't support it the driver will
         # silently stay on YUYV — we check below and warn.
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  320)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
         cap.set(cv2.CAP_PROP_FPS, 10)
 
         actual_fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
