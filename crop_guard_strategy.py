@@ -159,26 +159,56 @@ def _process_wheel_frame(raw: np.ndarray,
     # ── Display: raw frame with overlays ─────────────────────────────────────
     display = raw.copy()
 
-    # Green ExG overlay inside detection zone only
-    veg_mask_zone = _exg_mask(wheel_zone, exg_threshold)
-    green_overlay = wheel_zone.copy()
-    green_overlay[veg_mask_zone > 0] = (0, 180, 60)
-    if side == "left":
-        display[h // 2:, :] = cv2.addWeighted(wheel_zone, 0.7, green_overlay, 0.3, 0)
-    else:
-        display[:h // 2, :] = cv2.addWeighted(wheel_zone, 0.7, green_overlay, 0.3, 0)
+    # ── ExG heatmap across the FULL frame (faint blue tint outside zone) ─────
+    # ExG values clamped to [0,255] and used as an alpha channel so even
+    # low-ExG areas are visible.  Inside the wheel zone the mask is bright
+    # lime-green so it's easy to compare zone vs non-zone.
+    b_f = raw[:, :, 0].astype(np.int16)
+    g_f = raw[:, :, 1].astype(np.int16)
+    r_f = raw[:, :, 2].astype(np.int16)
+    exg_full = np.clip(2 * g_f - r_f - b_f, 0, 255).astype(np.uint8)
 
-    # Cyan line showing detection zone boundary
+    # Faint cyan tint outside the wheel zone — shows ExG signal everywhere
+    outside_color = np.zeros_like(display)
+    outside_color[:, :] = (180, 180, 0)   # cyan-ish (BGR)
+    alpha_outside = (exg_full.astype(np.float32) / 255.0 * 0.35)[..., np.newaxis]
+    if side == "left":
+        # outside zone = top half
+        display[:h // 2, :] = np.clip(
+            display[:h // 2, :] * (1 - alpha_outside[:h // 2]) +
+            outside_color[:h // 2, :] * alpha_outside[:h // 2], 0, 255
+        ).astype(np.uint8)
+    else:
+        # outside zone = bottom half
+        display[h // 2:, :] = np.clip(
+            display[h // 2:, :] * (1 - alpha_outside[h // 2:]) +
+            outside_color[h // 2:, :] * alpha_outside[h // 2:], 0, 255
+        ).astype(np.uint8)
+
+    # Bright lime-green mask inside the wheel zone — pixels above threshold
+    veg_mask_zone = _exg_mask(wheel_zone, exg_threshold)
+    # Semi-transparent green where ExG is above threshold (60% blend)
+    zone_overlay = wheel_zone.copy()
+    zone_overlay[veg_mask_zone > 0] = (0, 255, 60)   # bright lime green
+    blended_zone = cv2.addWeighted(wheel_zone, 0.4, zone_overlay, 0.6, 0)
+    if side == "left":
+        display[h // 2:, :] = blended_zone
+    else:
+        display[:h // 2, :] = blended_zone
+
+    # Cyan zone-boundary line (2 px, easy to see)
     mid_y = h // 2
-    cv2.line(display, (0, mid_y), (w, mid_y), (0, 200, 200), 1)
-    zone_y = mid_y + 14 if side == "left" else mid_y - 6
-    cv2.putText(display, "WHEEL ZONE", (8, zone_y),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 200, 200), 1)
+    cv2.line(display, (0, mid_y), (w, mid_y), (0, 220, 220), 2)
+    zone_y = mid_y + 16 if side == "left" else mid_y - 5
+    cv2.putText(display, "WHEEL ZONE v", (8, zone_y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 220, 220), 1)
 
     # ExG stats at bottom
+    density_str = f"dens={pct_above:.1f}%>={exg_density_pct:.0f}%"
     cv2.putText(display,
-                f"ExG mean={exg_mean:.0f} p90={exg_p90:.0f} area={veg_area} thr={exg_threshold}",
-                (8, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200, 200, 0), 1)
+                f"ExG mean={exg_mean:.0f} p90={exg_p90:.0f} area={veg_area} "
+                f"thr={exg_threshold} {density_str}",
+                (8, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.37, (220, 220, 0), 1)
 
     # Label + border
     label = f"{'!! TRAMPLE' if trampling else 'CLEAR'}  area={veg_area}"
