@@ -535,15 +535,24 @@ class CropGuardStrategy(NavigationStrategy):
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
         cap.set(cv2.CAP_PROP_FPS, 10)
 
-        # Disable auto-exposure and set a fixed exposure to prevent sun-glint
-        # washing out the image outdoors.  Value 1 = manual on most V4L2 drivers
-        # (3 = aperture-priority auto).  exposure_value is camera-specific —
-        # lower = darker; tune with:
-        #   v4l2-ctl --device <path> --list-ctrls | grep -i expo
-        #   v4l2-ctl --device <path> --set-ctrl=exposure_time_absolute=150
-        cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)          # 1 = manual
-        cap.set(cv2.CAP_PROP_EXPOSURE, -6)              # OpenCV log-scale; tune as needed
-        log.info("%s wheel camera %s: auto-exposure disabled (exposure=-6)", label, path)
+        # Reduce gain and backlight_compensation to prevent sun-glint washing
+        # out the image outdoors.  These cameras have no exposure control —
+        # gain and backlight_compensation are the effective levers.
+        # Defaults: gain=136, backlight_compensation=136, brightness=128.
+        # Tune live with:
+        #   v4l2-ctl --device <path> --set-ctrl=gain=64
+        #   v4l2-ctl --device <path> --set-ctrl=backlight_compensation=0
+        cap.set(cv2.CAP_PROP_GAIN,       64)   # default 136 — lower = darker
+        cap.set(cv2.CAP_PROP_BRIGHTNESS, 90)   # default 128 — slightly darker
+        # backlight_compensation has no OpenCV constant — set via v4l2-ctl after open
+        import subprocess, shlex
+        try:
+            subprocess.run(
+                shlex.split(f"v4l2-ctl --device {path} --set-ctrl=backlight_compensation=0"),
+                check=False, capture_output=True)
+        except Exception:
+            pass
+        log.info("%s wheel camera %s: gain=64 brightness=90 backlight_comp=0", label, path)
 
         actual_fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
         fourcc_str = "".join(chr((actual_fourcc >> (8 * i)) & 0xFF) for i in range(4))
