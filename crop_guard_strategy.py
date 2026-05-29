@@ -127,25 +127,35 @@ def _process_wheel_frame(raw: np.ndarray,
     Display frame is rotation-corrected (left→CW, right→CCW) so the crop row
     always appears on the inside (towards rover centre) in the browser view.
     """
-    h, w = raw.shape[:2]
-
-    # ── Detection zone: WHEEL half of raw image ──────────────────────────────
-    # Trampling = crops detected where the wheel is.
-    # Crops in the non-wheel half are fine (rover is just alongside the row).
+    # ── Rotation-corrected display image ─────────────────────────────────────
+    # Rotate FIRST so detection zones match exactly what the user sees in the
+    # browser — avoids confusing raw-vs-display coordinate transforms.
     if side == "left":
-        ahead_zone = raw[h // 2:, :]     # bottom half = wheel zone for left cam
+        corrected = cv2.rotate(raw, cv2.ROTATE_90_CLOCKWISE)
     else:
-        ahead_zone = raw[:h // 2, :]     # top half    = wheel zone for right cam
+        corrected = cv2.rotate(raw, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+    h, w = corrected.shape[:2]
+
+    # ── Detection zone: wheel half of the CORRECTED (display) image ──────────
+    # Trampling = crops detected where the wheel physically is.
+    # Crops in the non-wheel half are fine (rover driving alongside the row).
+    #   Left cam display:  wheel occupies the BOTTOM half  (y > h/2)
+    #   Right cam display: wheel occupies the TOP half     (y < h/2)
+    if side == "left":
+        wheel_zone = corrected[h // 2:, :]   # bottom half of display
+    else:
+        wheel_zone = corrected[:h // 2, :]   # top half of display
 
     # ── ExG stats for tuning ─────────────────────────────────────────────────
-    b, g, r     = cv2.split(ahead_zone.astype(np.int16))
+    b, g, r     = cv2.split(wheel_zone.astype(np.int16))
     exg_raw     = (2 * g - r - b)
     exg_mean    = float(exg_raw.mean())
     exg_max     = int(exg_raw.max())
     exg_p90     = float(np.percentile(exg_raw, 90))
     pct_above   = float((exg_raw > exg_threshold).mean() * 100)
 
-    veg_mask    = _exg_mask(ahead_zone, exg_threshold)
+    veg_mask    = _exg_mask(wheel_zone, exg_threshold)
     veg_area    = _vegetation_area(veg_mask, exg_min_area)
     trampling   = veg_area > 0
 
@@ -155,22 +165,30 @@ def _process_wheel_frame(raw: np.ndarray,
              side.upper(), exg_mean, exg_max, exg_p90,
              exg_threshold, pct_above, veg_area, trampling)
 
-    # ── Rotation-corrected display image ─────────────────────────────────────
-    if side == "left":
-        corrected = cv2.rotate(raw, cv2.ROTATE_90_CLOCKWISE)
-    else:
-        corrected = cv2.rotate(raw, cv2.ROTATE_90_COUNTERCLOCKWISE)
-
     dh, dw = corrected.shape[:2]
 
-    # Green ExG overlay on the corrected image (region mapping varies with
-    # rotation, so re-run ExG on full corrected image for display)
-    veg_mask_full = _exg_mask(corrected, exg_threshold)
-    green_overlay = corrected.copy()
-    green_overlay[veg_mask_full > 0] = (0, 180, 60)
-    display = cv2.addWeighted(corrected, 0.7, green_overlay, 0.3, 0)
+    # Green ExG overlay — only inside the wheel detection zone
+    display = corrected.copy()
+    veg_mask_zone = _exg_mask(wheel_zone, exg_threshold)
+    green_overlay = wheel_zone.copy()
+    green_overlay[veg_mask_zone > 0] = (0, 180, 60)
+    if side == "left":
+        display[dh // 2:, :] = cv2.addWeighted(
+            wheel_zone, 0.7, green_overlay, 0.3, 0)
+    else:
+        display[:dh // 2, :] = cv2.addWeighted(
+            wheel_zone, 0.7, green_overlay, 0.3, 0)
 
-    # Annotate with ExG stats so values are visible in the web view
+    # Draw detection zone boundary (yellow dashed line at midpoint)
+    mid_y = dh // 2
+    cv2.line(display, (0, mid_y), (dw, mid_y), (0, 200, 200), 1)
+    zone_label = "WHEEL ZONE" if (
+        (side == "left") or (side == "right")) else ""
+    cv2.putText(display, zone_label,
+                (8, mid_y - 6 if side == "right" else mid_y + 16),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 200, 200), 1)
+
+    # ExG stats overlay
     stats_line = (f"ExG mean={exg_mean:.0f} p90={exg_p90:.0f} "
                   f"area={veg_area} thr={exg_threshold}")
     cv2.putText(display, stats_line,
