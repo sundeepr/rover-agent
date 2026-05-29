@@ -500,17 +500,17 @@ class CropGuardStrategy(NavigationStrategy):
     # ── Camera helpers ────────────────────────────────────────────────────────
 
     @staticmethod
-    def _open_cam(device: int, label: str):
+    def _open_cam(device, label: str):
         """Open a wheel camera using an explicit /dev/videoN path.
 
-        Using the path string (not an integer index) guarantees OpenCV opens
-        exactly the requested node — integer indices with CAP_V4L2 can be
-        remapped by OpenCV's device enumeration and hit the wrong node.
+        `device` can be an int (2 → /dev/video2) or a path string
+        (/dev/cam-left).  Using a path bypasses OpenCV's index remapping
+        which can open the wrong node when multiple cameras share a VID:PID.
 
         HD USB cameras on this rover don't support MJPEG; we let the driver
         choose the format (YUYV) and just cap FPS at 10 to save USB bandwidth.
         """
-        path = f"/dev/video{device}"
+        path = device if isinstance(device, str) else f"/dev/video{device}"
         cap = cv2.VideoCapture(path, cv2.CAP_V4L2)
         if not cap.isOpened():
             cap = cv2.VideoCapture(path)        # fallback to default backend

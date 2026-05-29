@@ -407,10 +407,19 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
+def _device(value: str):
+    """Accept either an integer index (0, 2, 4) or a device path (/dev/cam-front)."""
+    try:
+        return int(value)
+    except ValueError:
+        return value   # pass the path string straight through to cv2.VideoCapture
+
+
 def main():
     parser = argparse.ArgumentParser(description="Rover navigation agent")
-    parser.add_argument("--device",      type=int,   default=0,
-                        help="Camera device index")
+    parser.add_argument("--device",      type=_device, default=0,
+                        metavar="INDEX|PATH",
+                        help="Camera device index or path (e.g. 0 or /dev/cam-front)")
     parser.add_argument("--interval",    type=float, default=3.0,
                         help="Seconds between LLM queries")
     parser.add_argument("--web-server",  type=str,   default="http://localhost:5001",
@@ -431,12 +440,12 @@ def main():
                                  "omnivla", "line_follow", "plant_center",
                                  "boundary_guard", "teleop", "crop_guard"],
                         help="Navigation strategy (default: omnivla_full)")
-    parser.add_argument("--left-cam",   type=int,   default=1,
-                        metavar="N",
-                        help="Left wheel camera device index (crop_guard, default 1)")
-    parser.add_argument("--right-cam",  type=int,   default=2,
-                        metavar="N",
-                        help="Right wheel camera device index (crop_guard, default 2)")
+    parser.add_argument("--left-cam",   type=_device, default=1,
+                        metavar="INDEX|PATH",
+                        help="Left wheel camera index or path (crop_guard, default 1)")
+    parser.add_argument("--right-cam",  type=_device, default=2,
+                        metavar="INDEX|PATH",
+                        help="Right wheel camera index or path (crop_guard, default 2)")
     parser.add_argument("--exg-threshold", type=int, default=40,
                         metavar="N",
                         help="ExG vegetation threshold for wheel cameras (default 40)")
@@ -495,9 +504,9 @@ def main():
                         help="Default navigation instruction for teleop episodes")
     parser.add_argument("--teleop-fps", type=int, default=10,
                         help="Frame recording rate for teleop strategy (default: 10)")
-    parser.add_argument("--down-device",     type=int,   default=None,
-                        metavar="INDEX",
-                        help="Camera device index for downward-facing camera. "
+    parser.add_argument("--down-device",     type=_device, default=None,
+                        metavar="INDEX|PATH",
+                        help="Camera device index or path for downward-facing camera. "
                              "Omit to disable the down camera entirely.")
     parser.add_argument("--control-port",  type=int, default=5002,
                         metavar="PORT",
