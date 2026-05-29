@@ -531,8 +531,8 @@ class CropGuardStrategy(NavigationStrategy):
         # Try MJPEG first; if the camera doesn't support it the driver will
         # silently stay on YUYV — we check below and warn.
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  320)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         cap.set(cv2.CAP_PROP_FPS, 10)
 
         # Reduce gain and backlight_compensation to prevent sun-glint washing
@@ -587,7 +587,7 @@ class CropGuardStrategy(NavigationStrategy):
 
     @staticmethod
     def _blank_vis(label: str) -> np.ndarray:
-        img = np.zeros((240, 320, 3), dtype=np.uint8)
+        img = np.zeros((480, 640, 3), dtype=np.uint8)
         cv2.putText(img, label, (10, 120),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (80, 80, 80), 1)
         return img
