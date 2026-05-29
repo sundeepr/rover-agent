@@ -365,6 +365,20 @@ class CropGuardStrategy(NavigationStrategy):
             nav_radius = self._nav_radius
             cloud_st   = self._cloud_state
 
+        # ── Periodic diagnostic (once per second) ────────────────────────────
+        if not hasattr(self, "_diag_t") or t0 - self._diag_t >= 1.0:
+            self._diag_t = t0
+            r_str = "straight" if nav_radius == 0x8000 else f"r={nav_radius}"
+            log.info(
+                "DIAG | cloud=%s  goal=%r  vel=%d %s  "
+                "tramp=L%s/R%s  in_flight=%s  ws=%s",
+                cloud_st.name, self._goal[:30] if self._goal else "",
+                nav_vel, r_str,
+                "Y" if tramp_l else "N", "Y" if tramp_r else "N",
+                "Y" if self._cloud_in_flight.is_set() else "N",
+                "connected" if self._ws else "DISCONNECTED",
+            )
+
         operator_active = (state.operator_control is not None
                            and state.operator_until > time.time())
         paused          = state.paused.is_set()
@@ -403,15 +417,25 @@ class CropGuardStrategy(NavigationStrategy):
 
         # ── 3. Fire cloud OmniVLA query if due ───────────────────────────────
         now = time.time()
-        if (cloud_st != _CloudState.CONNECTING
-                and self._goal
-                and not self._cloud_in_flight.is_set()
-                and now - self._last_cloud_query >= self._cloud_interval_s):
+        since_last = now - self._last_cloud_query
+        can_query  = (cloud_st != _CloudState.CONNECTING
+                      and self._goal
+                      and not self._cloud_in_flight.is_set()
+                      and since_last >= self._cloud_interval_s)
+        if can_query:
+            log.info("Cloud query firing (since_last=%.1fs  state=%s)",
+                     since_last, cloud_st.name)
             self._last_cloud_query = now
             self._cloud_in_flight.set()
             threading.Thread(target=self._cloud_query,
                              args=(state, frame.copy()),
                              daemon=True, name="cloud-query").start()
+        elif not can_query and since_last >= self._cloud_interval_s * 2:
+            # Haven't queried for 2× the interval — log why
+            log.warning(
+                "Cloud query BLOCKED | state=%s  goal=%r  in_flight=%s  since=%.1fs",
+                cloud_st.name, bool(self._goal),
+                self._cloud_in_flight.is_set(), since_last)
 
         # ── 4. Update displays ────────────────────────────────────────────────
         # Front camera annotated frame
@@ -497,7 +521,11 @@ class CropGuardStrategy(NavigationStrategy):
                 return
 
             resp = self._pending_resp
-            if not resp or resp.get("type") != "waypoints":
+            if not resp:
+                log.warning("Cloud query: empty response")
+                return
+            if resp.get("type") != "waypoints":
+                log.warning("Cloud query: unexpected response type=%s", resp.get("type"))
                 return
 
             wps = np.array(resp["waypoints"])   # [8, 4]
@@ -511,7 +539,8 @@ class CropGuardStrategy(NavigationStrategy):
                 self._cloud_state   = _CloudState.NAVIGATING
 
             r_str = "straight" if radius == 0x8000 else f"r={radius}mm"
-            log.info("Cloud nav: vel=%d  %s", vel, r_str)
+            log.info("Cloud nav: vel=%d  %s  (wps[0]=%s)",
+                     vel, r_str, wps[0].tolist() if len(wps) else "?")
 
         except Exception as e:
             log.warning("Cloud query error: %s", e)
