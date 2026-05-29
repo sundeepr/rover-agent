@@ -113,48 +113,52 @@ def _process_wheel_frame(raw: np.ndarray,
                          side: str,          # "left" or "right"
                          exg_threshold: int,
                          exg_min_area: int,
-                         exg_density_pct: float = 8.0) -> tuple[bool, np.ndarray]:
+                         exg_density_pct: float = 8.0) -> tuple[bool, bool, np.ndarray]:
     """
     Analyse one wheel camera frame. No rotation applied — images shown as-is.
 
-    Detection zones (in raw frame):
-      Left  cam: top half     (raw[:h//2, :])   — wheel is in top half
-      Right cam: bottom half  (raw[h//2:, :])   — wheel is in bottom half
+    Returns (trampling, warning, display_frame).
 
-    Trampling is declared only when BOTH conditions are true:
-      1. veg_area  > exg_min_area         (a connected blob of vegetation exists)
-      2. pct_above > exg_density_pct      (enough of the zone is actually green)
-    The density guard prevents scattered pixels on gravelly/bright soil from
-    triggering a false alarm when only ~5–10 % of the zone is marginally above
-    the threshold.
+    Zone layout (each half = h//2 rows):
+      Left cam  — wheel zone: top half    (raw[:h//2, :])
+                  look-ahead:  bottom half (raw[h//2:, :])  ← crops approaching wheel
+      Right cam — wheel zone: bottom half (raw[h//2:, :])
+                  look-ahead:  top half    (raw[:h//2, :])  ← crops approaching wheel
+
+    trampling: vegetation detected IN the wheel zone (crops already under wheel)
+    warning:   vegetation detected in the look-ahead zone (crops approaching wheel)
+
+    Both flags use the same ExG threshold and density conditions.
     """
     h, w = raw.shape[:2]
 
-    # ── Detection zone ────────────────────────────────────────────────────────
+    # ── Detection zones ───────────────────────────────────────────────────────
     if side == "left":
-        wheel_zone = raw[:h // 2, :]    # top half  — wheel sits in top half
+        wheel_zone    = raw[:h // 2, :]    # top half  — wheel sits here
+        lookahead_zone = raw[h // 2:, :]   # bottom half — crops approaching
     else:
-        wheel_zone = raw[h // 2:, :]    # bottom half — wheel sits in bottom half
+        wheel_zone    = raw[h // 2:, :]    # bottom half — wheel sits here
+        lookahead_zone = raw[:h // 2, :]   # top half — crops approaching
 
-    # ── ExG stats ─────────────────────────────────────────────────────────────
-    b, g, r   = cv2.split(wheel_zone.astype(np.int16))
-    exg_raw   = (2 * g - r - b)
-    exg_mean  = float(exg_raw.mean())
-    exg_max   = int(exg_raw.max())
-    exg_p90   = float(np.percentile(exg_raw, 90))
-    pct_above = float((exg_raw > exg_threshold).mean() * 100)
+    def _zone_stats(zone):
+        b, g, r  = cv2.split(zone.astype(np.int16))
+        exg_raw  = (2 * g - r - b)
+        mean     = float(exg_raw.mean())
+        maxv     = int(exg_raw.max())
+        p90      = float(np.percentile(exg_raw, 90))
+        pct      = float((exg_raw > exg_threshold).mean() * 100)
+        mask     = _exg_mask(zone, exg_threshold)
+        area     = _vegetation_area(mask, exg_min_area)
+        detected = area > 0 and pct >= exg_density_pct
+        return mean, maxv, p90, pct, area, mask, detected
 
-    veg_mask  = _exg_mask(wheel_zone, exg_threshold)
-    veg_area  = _vegetation_area(veg_mask, exg_min_area)
+    wm, wmax, wp90, wpct, warea, wveg_mask, trampling = _zone_stats(wheel_zone)
+    lm, lmax, lp90, lpct, larea, _,         warning   = _zone_stats(lookahead_zone)
 
-    # Both conditions must pass: connected blob AND sufficient green density
-    trampling = veg_area > 0 and pct_above >= exg_density_pct
-
-    log.info("%s ExG | mean=%.1f  max=%d  p90=%.1f  above_thresh(>%d)=%.1f%%  "
-             "veg_area=%d  density_ok=%s  trampling=%s",
-             side.upper(), exg_mean, exg_max, exg_p90,
-             exg_threshold, pct_above, veg_area,
-             f"{pct_above:.1f}>={exg_density_pct}", trampling)
+    log.info("%s wheel  | mean=%.1f p90=%.1f above=%.1f%% area=%d  trampling=%s",
+             side.upper(), wm, wp90, wpct, warea, trampling)
+    log.info("%s ahead  | mean=%.1f p90=%.1f above=%.1f%% area=%d  warning=%s",
+             side.upper(), lm, lp90, lpct, larea, warning)
 
     # ── Display: raw frame with overlays ─────────────────────────────────────
     display = raw.copy()
@@ -168,58 +172,52 @@ def _process_wheel_frame(raw: np.ndarray,
     r_f = raw[:, :, 2].astype(np.int16)
     exg_full = np.clip(2 * g_f - r_f - b_f, 0, 255).astype(np.uint8)
 
-    # Faint cyan tint outside the wheel zone — shows ExG signal everywhere
-    outside_color = np.zeros_like(display)
-    outside_color[:, :] = (180, 180, 0)   # cyan-ish (BGR)
-    alpha_outside = (exg_full.astype(np.float32) / 255.0 * 0.35)[..., np.newaxis]
-    if side == "left":
-        # outside zone = bottom half (plants, not the wheel)
-        display[h // 2:, :] = np.clip(
-            display[h // 2:, :] * (1 - alpha_outside[h // 2:]) +
-            outside_color[h // 2:, :] * alpha_outside[h // 2:], 0, 255
-        ).astype(np.uint8)
-    else:
-        # outside zone = top half (plants, not the wheel)
-        display[:h // 2, :] = np.clip(
-            display[:h // 2, :] * (1 - alpha_outside[:h // 2]) +
-            outside_color[:h // 2, :] * alpha_outside[:h // 2], 0, 255
-        ).astype(np.uint8)
-
-    # Bright lime-green mask inside the wheel zone — pixels above threshold
-    veg_mask_zone = _exg_mask(wheel_zone, exg_threshold)
-    # Semi-transparent green where ExG is above threshold (60% blend)
+    # ── Wheel zone: bright lime-green ExG mask ────────────────────────────────
     zone_overlay = wheel_zone.copy()
-    zone_overlay[veg_mask_zone > 0] = (0, 255, 60)   # bright lime green
+    zone_overlay[wveg_mask > 0] = (0, 255, 60)
     blended_zone = cv2.addWeighted(wheel_zone, 0.4, zone_overlay, 0.6, 0)
     if side == "left":
-        display[:h // 2, :] = blended_zone   # wheel zone = top half
+        display[:h // 2, :] = blended_zone
     else:
-        display[h // 2:, :] = blended_zone   # wheel zone = bottom half
+        display[h // 2:, :] = blended_zone
 
-    # Cyan zone-boundary line (2 px, easy to see)
+    # ── Look-ahead zone: orange ExG tint (crops approaching) ─────────────────
+    la_zone  = lookahead_zone.copy()
+    la_mask  = _exg_mask(lookahead_zone, exg_threshold)
+    la_overlay = la_zone.copy()
+    la_overlay[la_mask > 0] = (0, 140, 255)   # orange (BGR) = upcoming crops
+    blended_la = cv2.addWeighted(la_zone, 0.5, la_overlay, 0.5, 0)
+    if side == "left":
+        display[h // 2:, :] = blended_la
+    else:
+        display[:h // 2, :] = blended_la
+
+    # ── Zone-boundary line ────────────────────────────────────────────────────
     mid_y = h // 2
-    cv2.line(display, (0, mid_y), (w, mid_y), (0, 220, 220), 2)
-    # Label arrow points INTO the wheel zone
+    line_col = (0, 0, 200) if trampling else (0, 200, 255) if warning else (0, 220, 220)
+    cv2.line(display, (0, mid_y), (w, mid_y), line_col, 2)
     zone_y = mid_y - 5 if side == "left" else mid_y + 16
-    cv2.putText(display, "WHEEL ZONE ^" if side == "left" else "WHEEL ZONE v",
-                (8, zone_y), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 220, 220), 1)
+    cv2.putText(display, "WHEEL ^" if side == "left" else "WHEEL v",
+                (8, zone_y), cv2.FONT_HERSHEY_SIMPLEX, 0.38, line_col, 1)
 
-    # ExG stats at bottom
-    density_str = f"dens={pct_above:.1f}%>={exg_density_pct:.0f}%"
+    # ── Status bar ────────────────────────────────────────────────────────────
     cv2.putText(display,
-                f"ExG mean={exg_mean:.0f} p90={exg_p90:.0f} area={veg_area} "
-                f"thr={exg_threshold} {density_str}",
+                f"wheel area={warea} p90={wp90:.0f}  ahead area={larea} p90={lp90:.0f}  thr={exg_threshold}",
                 (8, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.37, (220, 220, 0), 1)
 
-    # Label + border
-    label = f"{'!! TRAMPLE' if trampling else 'CLEAR'}  area={veg_area}"
+    # ── Label + border ────────────────────────────────────────────────────────
+    if trampling:
+        label, text_col, border_col = "!! TRAMPLE", (0, 0, 220), (0, 0, 220)
+    elif warning:
+        label, text_col, border_col = "!! AHEAD",   (0, 120, 255), (0, 120, 255)
+    else:
+        label, text_col, border_col = "CLEAR",      (0, 220, 80),  (0, 200, 50)
+
     cv2.putText(display, f"{side.upper()} WHEEL  {label}",
-                (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                (0, 0, 220) if trampling else (0, 220, 80), 2)
-    border_col = (0, 0, 220) if trampling else (0, 200, 50)
+                (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, text_col, 2)
     cv2.rectangle(display, (0, 0), (w - 1, h - 1), border_col, 6)
 
-    return trampling, display
+    return trampling, warning, display
 
 
 # ── Strategy ──────────────────────────────────────────────────────────────────
@@ -239,6 +237,7 @@ class CropGuardStrategy(NavigationStrategy):
                  left_device:        int  = 1,
                  right_device:       int  = 2,
                  max_lin_mm_s:       int  = 150,
+                 crop_guard_vel:     int  = 25,
                  icr_offset_m:       float = 0.480,
                  exg_threshold:      int  = 60,
                  exg_min_area:       int  = 500,
@@ -251,6 +250,7 @@ class CropGuardStrategy(NavigationStrategy):
         self._left_device       = left_device   # stored for lazy open in _wheel_thread
         self._right_device      = right_device
         self._max_lin_mm_s      = max_lin_mm_s
+        self._crop_guard_vel    = crop_guard_vel  # max vel while navigating in crop mode (mm/s)
         self._icr_offset_m      = icr_offset_m
         self._exg_threshold     = exg_threshold
         self._exg_min_area      = exg_min_area
@@ -278,6 +278,8 @@ class CropGuardStrategy(NavigationStrategy):
         # ── Wheel camera state ────────────────────────────────────────────────
         self._trample_left   = False
         self._trample_right  = False
+        self._warn_left      = False   # crops approaching left wheel
+        self._warn_right     = False   # crops approaching right wheel
         self._trample_lock   = threading.Lock()
         self._left_vis: np.ndarray | None   = None
         self._right_vis: np.ndarray | None  = None
@@ -354,10 +356,12 @@ class CropGuardStrategy(NavigationStrategy):
             step  = state.step
             phase = state.phase
 
-        # ── 1. Get trampling state ────────────────────────────────────────────
+        # ── 1. Get trampling + warning state ─────────────────────────────────
         with self._trample_lock:
             tramp_l = self._trample_left
             tramp_r = self._trample_right
+            warn_l  = self._warn_left
+            warn_r  = self._warn_right
 
         # ── 2. Choose motor command ───────────────────────────────────────────
         with self._cloud_lock:
@@ -370,11 +374,12 @@ class CropGuardStrategy(NavigationStrategy):
             self._diag_t = t0
             r_str = "straight" if nav_radius == 0x8000 else f"r={nav_radius}"
             log.info(
-                "DIAG | cloud=%s  goal=%r  vel=%d %s  "
-                "tramp=L%s/R%s  in_flight=%s  ws=%s",
+                "DIAG | cloud=%s  goal=%r  vel=%d(cap=%d) %s  "
+                "tramp=L%s/R%s  warn=L%s/R%s  in_flight=%s  ws=%s",
                 cloud_st.name, self._goal[:30] if self._goal else "",
-                nav_vel, r_str,
+                nav_vel, self._crop_guard_vel, r_str,
                 "Y" if tramp_l else "N", "Y" if tramp_r else "N",
+                "Y" if warn_l  else "N", "Y" if warn_r  else "N",
                 "Y" if self._cloud_in_flight.is_set() else "N",
                 "connected" if self._ws else "DISCONNECTED",
             )
@@ -400,9 +405,17 @@ class CropGuardStrategy(NavigationStrategy):
                 log.warning("Step %d | RIGHT wheel trampling — steer LEFT", step)
                 goal_override = "steer left, vegetation under right wheel"
             else:
-                # No trampling — apply latest cloud navigation command
+                # No trampling — apply cloud navigation at capped speed
                 if cloud_st == _CloudState.NAVIGATING and nav_vel > 0:
-                    rover_ctrl.drive_raw(nav_vel, nav_radius)
+                    # Cap at crop_guard_vel; halve further if crops are approaching
+                    safe_vel = self._crop_guard_vel
+                    if warn_l or warn_r:
+                        safe_vel = max(10, safe_vel // 2)
+                        log.info("Step %d | crops approaching (%s%s) — speed capped to %d mm/s",
+                                 step,
+                                 "L" if warn_l else "", "R" if warn_r else "",
+                                 safe_vel)
+                    rover_ctrl.drive_raw(safe_vel, nav_radius)
                 goal_override = None
         else:
             goal_override = None
@@ -569,24 +582,26 @@ class CropGuardStrategy(NavigationStrategy):
                 rf = self._grab(self._right_cap)
 
                 if lf is not None:
-                    tl, lvis = _process_wheel_frame(
+                    tl, wl, lvis = _process_wheel_frame(
                         lf, "left", self._exg_threshold, self._exg_min_area,
                         self._exg_density_pct)
                 else:
-                    tl   = False
+                    tl = wl = False
                     lvis = self._blank_vis("LEFT CAM MISSING")
 
                 if rf is not None:
-                    tr, rvis = _process_wheel_frame(
+                    tr, wr, rvis = _process_wheel_frame(
                         rf, "right", self._exg_threshold, self._exg_min_area,
                         self._exg_density_pct)
                 else:
-                    tr   = False
+                    tr = wr = False
                     rvis = self._blank_vis("RIGHT CAM MISSING")
 
                 with self._trample_lock:
                     self._trample_left  = tl
                     self._trample_right = tr
+                    self._warn_left     = wl
+                    self._warn_right    = wr
                 with self._wheel_vis_lock:
                     self._left_vis  = lvis
                     self._right_vis = rvis
