@@ -65,6 +65,12 @@ IMAGE_WIDTH = 640
 # OmniVLA caps at MAX_LIN_MM_S=50; Gemini uses DRIVE_VELOCITY_MM_S=150.
 _MAX_VELOCITY_REF_MM_S = 200
 
+# Minimum motor duty cycle (%) needed to overcome static friction and actually
+# move the rover.  Any non-zero commanded velocity is remapped so the output
+# never falls below this value.  Zero velocity always sends 0%.
+# Measure: lowest % at which the rover visibly moves on flat ground.
+_MOTOR_DEADBAND_PCT = 18
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -237,10 +243,25 @@ class AtlasController:
         if velocity_mm_s == 0:
             return 0, 0
 
+        def _apply_deadband(pct: float) -> int:
+            """
+            Remap a raw ±100 percentage so the output magnitude is never
+            between 0 and _MOTOR_DEADBAND_PCT.
+
+            Positive/negative sign is preserved.
+            Formula: out = sign * (DEADBAND + (100-DEADBAND) * |pct| / 100)
+            clamped to ±100.
+            """
+            if pct == 0:
+                return 0
+            sign   = 1 if pct > 0 else -1
+            scaled = _MOTOR_DEADBAND_PCT + (100 - _MOTOR_DEADBAND_PCT) * abs(pct) / 100.0
+            return _clamp(int(sign * scaled), -100, 100)
+
         if radius_mm == 0x8000:          # straight
-            pct = int(velocity_mm_s / _MAX_VELOCITY_REF_MM_S * 100)
-            pct = _clamp(pct, -100, 100)
-            return pct, pct
+            pct = velocity_mm_s / _MAX_VELOCITY_REF_MM_S * 100
+            p   = _apply_deadband(pct)
+            return p, p
 
         if radius_mm == 1:               # spin right in place
             return DRIVE_SPEED_PCT, -DRIVE_SPEED_PCT
@@ -257,8 +278,8 @@ class AtlasController:
         v_r   = velocity_mm_s * (1 + ratio)
         v_l   = velocity_mm_s * (1 - ratio)
         max_v = max(abs(v_r), abs(v_l), _MAX_VELOCITY_REF_MM_S)
-        L     = _clamp(int(v_l / max_v * 100), -100, 100)
-        R     = _clamp(int(v_r / max_v * 100), -100, 100)
+        L     = _apply_deadband(v_l / max_v * 100)
+        R     = _apply_deadband(v_r / max_v * 100)
         log.info("drive_raw: vel=%d r=%d → L=%d%% R=%d%%", velocity_mm_s, radius_mm, L, R)
         return L, R
 

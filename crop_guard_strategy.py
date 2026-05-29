@@ -229,7 +229,7 @@ class CropGuardStrategy(NavigationStrategy):
     """
 
     requires_goal   = True
-    cycle_interval  = 0.10      # 10 Hz — fast wheel check + watchdog keepalive
+    cycle_interval  = 0.05      # 20 Hz — faster wheel check + watchdog keepalive
 
     def __init__(self,
                  server_url:         str,
@@ -237,7 +237,7 @@ class CropGuardStrategy(NavigationStrategy):
                  left_device:        int  = 1,
                  right_device:       int  = 2,
                  max_lin_mm_s:       int  = 150,
-                 crop_guard_vel:     int  = 35,
+                 crop_guard_vel:     int  = 10,
                  icr_offset_m:       float = 0.480,
                  exg_threshold:      int  = 60,
                  exg_min_area:       int  = 500,
@@ -605,7 +605,7 @@ class CropGuardStrategy(NavigationStrategy):
             except Exception as e:
                 log.debug("Wheel thread error: %s", e)
 
-            time.sleep(0.10)   # 10 Hz
+            time.sleep(0.04)   # 25 Hz
 
     # ── Camera helpers ────────────────────────────────────────────────────────
 
@@ -633,7 +633,7 @@ class CropGuardStrategy(NavigationStrategy):
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        cap.set(cv2.CAP_PROP_FPS, 10)
+        cap.set(cv2.CAP_PROP_FPS, 25)
 
         # Reduce gain and backlight_compensation to prevent sun-glint washing
         # out the image outdoors.  These cameras have no exposure control —

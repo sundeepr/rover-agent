@@ -448,10 +448,11 @@ def main():
     parser.add_argument("--right-cam",  type=_device, default=2,
                         metavar="INDEX|PATH",
                         help="Right wheel camera index or path (crop_guard, default 2)")
-    parser.add_argument("--crop-guard-vel", type=int, default=35,
+    parser.add_argument("--crop-guard-vel", type=int, default=10,
                         metavar="MM_S",
-                        help="Max navigation speed (mm/s) in crop_guard mode (default 35). "
-                             "Set above motor stall speed (~20 mm/s for Atlas).")
+                        help="Navigation speed (mm/s) in crop_guard mode (default 10). "
+                             "Deadband compensation ensures motors receive at least "
+                             "_MOTOR_DEADBAND_PCT%% power even at this low value.")
     parser.add_argument("--exg-threshold", type=int, default=60,
                         metavar="N",
                         help="ExG vegetation threshold for wheel cameras (default 60)")
