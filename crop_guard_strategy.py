@@ -131,9 +131,9 @@ def _process_wheel_frame(raw: np.ndarray,
 
     # ── Detection zone: crop-row half of raw image ────────────────────────────
     if side == "left":
-        ahead_zone = raw[h // 2:, :]     # bottom half = crop row for left cam
+        ahead_zone = raw[:h // 2, :]     # top half    = crop row for left cam  (wheel is bottom)
     else:
-        ahead_zone = raw[:h // 2, :]     # top half    = crop row for right cam
+        ahead_zone = raw[h // 2:, :]     # bottom half = crop row for right cam (wheel is top)
 
     veg_mask    = _exg_mask(ahead_zone, exg_threshold)
     veg_area    = _vegetation_area(veg_mask, exg_min_area)
