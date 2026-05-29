@@ -535,6 +535,16 @@ class CropGuardStrategy(NavigationStrategy):
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
         cap.set(cv2.CAP_PROP_FPS, 10)
 
+        # Disable auto-exposure and set a fixed exposure to prevent sun-glint
+        # washing out the image outdoors.  Value 1 = manual on most V4L2 drivers
+        # (3 = aperture-priority auto).  exposure_value is camera-specific —
+        # lower = darker; tune with:
+        #   v4l2-ctl --device <path> --list-ctrls | grep -i expo
+        #   v4l2-ctl --device <path> --set-ctrl=exposure_time_absolute=150
+        cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)          # 1 = manual
+        cap.set(cv2.CAP_PROP_EXPOSURE, -6)              # OpenCV log-scale; tune as needed
+        log.info("%s wheel camera %s: auto-exposure disabled (exposure=-6)", label, path)
+
         actual_fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
         fourcc_str = "".join(chr((actual_fourcc >> (8 * i)) & 0xFF) for i in range(4))
         actual_fps  = cap.get(cv2.CAP_PROP_FPS)
