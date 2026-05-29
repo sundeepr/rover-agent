@@ -229,7 +229,7 @@ class CropGuardStrategy(NavigationStrategy):
         threading.Thread(target=self._wheel_thread, daemon=True,
                          name="wheel-cam").start()
 
-        log.info("CropGuardStrategy: left_cam=%d  right_cam=%d  server=%s",
+        log.info("CropGuardStrategy: left_cam=%s  right_cam=%s  server=%s",
                  left_device, right_device, server_url)
 
         if goal:

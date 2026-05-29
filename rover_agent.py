@@ -155,10 +155,10 @@ def agent_loop(
     # to let the driver stabilise before entering the main loop.
     cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
     if not cap.isOpened():
-        log.error("Could not open camera at device %d — trying default backend", device)
+        log.error("Could not open camera at device %s — trying default backend", device)
         cap = cv2.VideoCapture(device)
     if not cap.isOpened():
-        log.error("Could not open camera at device %d", device)
+        log.error("Could not open camera at device %s", device)
         return
 
     # Force MJPEG so the camera compresses on-chip — dramatically reduces USB
@@ -178,7 +178,7 @@ def agent_loop(
 
     # Warmup — Jetson USB cameras often need several reads before the first
     # valid frame arrives.  Discard up to 30 frames silently.
-    log.info("Camera warmup (device %d)…", device)
+    log.info("Camera warmup (device %s)…", device)
     for _w in range(30):
         ret, _ = cap.read()
         if ret:
@@ -186,11 +186,10 @@ def agent_loop(
         time.sleep(0.05)
     else:
         log.warning(
-            "Camera device %d: no frame after 30 warmup reads.\n"
+            "Camera device %s: no frame after 30 warmup reads.\n"
             "  On Jetson, even-numbered /dev/videoN nodes are capture nodes;\n"
-            "  odd-numbered ones are metadata-only and never produce frames.\n"
-            "  Try --device %d or --device %d instead.",
-            device, device + 2, max(0, device - 2),
+            "  odd-numbered ones are metadata-only and never produce frames.",
+            device,
         )
         cap.release()
         return
@@ -216,9 +215,9 @@ def agent_loop(
         if not ret:
             _consecutive_failures += 1
             if _consecutive_failures == 1:
-                log.warning("Camera device %d: failed to grab frame (will retry)", device)
+                log.warning("Camera device %s: failed to grab frame (will retry)", device)
             if _consecutive_failures >= 30:
-                log.error("Camera device %d: 30 consecutive failures — giving up", device)
+                log.error("Camera device %s: 30 consecutive failures — giving up", device)
                 break
             time.sleep(0.033)
             continue
@@ -294,7 +293,7 @@ def _down_camera_loop(strategy, device: int, state=None) -> None:
         if not cap.isOpened():
             available = _scan_cameras()
             log.error(
-                "Down-camera device %d not available — available devices: %s  "
+                "Down-camera device %s not available — available devices: %s  "
                 "(use --down-device to select the correct one)",
                 device, available or "none found",
             )
@@ -302,7 +301,7 @@ def _down_camera_loop(strategy, device: int, state=None) -> None:
 
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    log.info("Down-camera opened: device %d  %dx%d (max)", device,
+    log.info("Down-camera opened: device %s  %dx%d (max)", device,
              int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
              int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
 
@@ -318,7 +317,7 @@ def _down_camera_loop(strategy, device: int, state=None) -> None:
         else:
             consecutive_failures += 1
             if consecutive_failures >= 30:
-                log.warning("Down-camera device %d: 30 consecutive read failures — reopening", device)
+                log.warning("Down-camera device %s: 30 consecutive read failures — reopening", device)
                 cap.release()
                 cap = cv2.VideoCapture(device)
                 consecutive_failures = 0
@@ -517,7 +516,7 @@ def main():
     rover_port = args.atlas_port if args.rover == "atlas" else args.roomba_port
 
     log.info("=== Rover agent starting ===")
-    log.info("Camera device : %d", args.device)
+    log.info("Camera device : %s", args.device)
     log.info("Query interval: %.1fs", args.interval)
     log.info("Strategy      : %s", args.strategy)
     if args.strategy == "omnivla":
@@ -588,7 +587,7 @@ def main():
 
     # Down-camera loop — only when strategy supports it AND device was specified
     if hasattr(strategy, "update_down_frame") and args.down_device is not None:
-        log.info("Down-camera    : device %d", args.down_device)
+        log.info("Down-camera    : device %s", args.down_device)
         threading.Thread(
             target=_down_camera_loop,
             args=(strategy, args.down_device, state),
