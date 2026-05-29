@@ -170,10 +170,11 @@ def agent_loop(
     cap.set(cv2.CAP_PROP_FPS, 30)
     actual_fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
     fourcc_str = "".join(chr((actual_fourcc >> (8 * i)) & 0xFF) for i in range(4))
-    log.info("Camera opened: %dx%d  fourcc=%s",
+    actual_fps = cap.get(cv2.CAP_PROP_FPS)
+    log.info("Camera opened: %dx%d  fourcc=%s  fps=%.0f",
              int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
              int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-             fourcc_str)
+             fourcc_str, actual_fps)
 
     # Warmup — Jetson USB cameras often need several reads before the first
     # valid frame arrives.  Discard up to 30 frames silently.

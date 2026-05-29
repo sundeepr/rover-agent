@@ -518,16 +518,17 @@ class CropGuardStrategy(NavigationStrategy):
 
         actual_fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
         fourcc_str = "".join(chr((actual_fourcc >> (8 * i)) & 0xFF) for i in range(4))
+        actual_fps = cap.get(cv2.CAP_PROP_FPS)
 
         # Warmup — same Jetson dual-node issue as the main camera
         for _ in range(30):
             ret, _ = cap.read()
             if ret:
-                log.info("%s wheel camera ready on device %d  (%dx%d)  fourcc=%s",
+                log.info("%s wheel camera ready on device %d  (%dx%d)  fourcc=%s  fps=%.0f",
                          label, device,
                          int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
                          int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-                         fourcc_str)
+                         fourcc_str, actual_fps)
                 return cap
             time.sleep(0.05)
 
