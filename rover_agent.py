@@ -94,8 +94,9 @@ _GEOMETRY_DEFAULTS = {
     "rover_polygon_px":       [[120, 180], [520, 180], [520, 380], [120, 380]],
     "lookahead_s":            1.0,
     "arc_steps":              10,
-    "exg_threshold":          40,
+    "exg_threshold":          60,
     "exg_min_area":           500,
+    "exg_density_pct":        8.0,
     "correction_goal_suffix": "steer slightly {direction} to avoid vegetation",
 }
 
@@ -376,6 +377,7 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
             icr_offset_m        = _geo["icr_offset_mm"] / 1000.0,
             exg_threshold       = args.exg_threshold,
             exg_min_area        = args.exg_min_area,
+            exg_density_pct     = args.exg_density_pct,
             camera_calibration  = load_camera_calibration(args.camera_calibration),
         )
     if name == "omnivla_full":
@@ -445,12 +447,17 @@ def main():
     parser.add_argument("--right-cam",  type=_device, default=2,
                         metavar="INDEX|PATH",
                         help="Right wheel camera index or path (crop_guard, default 2)")
-    parser.add_argument("--exg-threshold", type=int, default=40,
+    parser.add_argument("--exg-threshold", type=int, default=60,
                         metavar="N",
-                        help="ExG vegetation threshold for wheel cameras (default 40)")
+                        help="ExG vegetation threshold for wheel cameras (default 60)")
     parser.add_argument("--exg-min-area",  type=int, default=500,
                         metavar="PX",
                         help="Min vegetation blob area in pixels (default 500)")
+    parser.add_argument("--exg-density-pct", type=float, default=8.0,
+                        metavar="PCT",
+                        help="Min %% of wheel-zone pixels above ExG threshold to "
+                             "declare trampling; filters out sparse soil noise "
+                             "(default 8.0)")
     parser.add_argument("--cloud-server", type=str,  default="ws://localhost:8765",
                         metavar="URL",
                         help="WebSocket URL of omnivla_cloud_server.py "

@@ -112,13 +112,21 @@ def _vegetation_area(mask: np.ndarray, min_area: int = 500) -> int:
 def _process_wheel_frame(raw: np.ndarray,
                          side: str,          # "left" or "right"
                          exg_threshold: int,
-                         exg_min_area: int) -> tuple[bool, np.ndarray]:
+                         exg_min_area: int,
+                         exg_density_pct: float = 8.0) -> tuple[bool, np.ndarray]:
     """
     Analyse one wheel camera frame. No rotation applied — images shown as-is.
 
     Detection zones (in raw frame):
       Left  cam: bottom half  (raw[h//2:, :])
       Right cam: top half     (raw[:h//2, :])
+
+    Trampling is declared only when BOTH conditions are true:
+      1. veg_area  > exg_min_area         (a connected blob of vegetation exists)
+      2. pct_above > exg_density_pct      (enough of the zone is actually green)
+    The density guard prevents scattered pixels on gravelly/bright soil from
+    triggering a false alarm when only ~5–10 % of the zone is marginally above
+    the threshold.
     """
     h, w = raw.shape[:2]
 
@@ -138,12 +146,15 @@ def _process_wheel_frame(raw: np.ndarray,
 
     veg_mask  = _exg_mask(wheel_zone, exg_threshold)
     veg_area  = _vegetation_area(veg_mask, exg_min_area)
-    trampling = veg_area > 0
+
+    # Both conditions must pass: connected blob AND sufficient green density
+    trampling = veg_area > 0 and pct_above >= exg_density_pct
 
     log.info("%s ExG | mean=%.1f  max=%d  p90=%.1f  above_thresh(>%d)=%.1f%%  "
-             "veg_area=%d  trampling=%s",
+             "veg_area=%d  density_ok=%s  trampling=%s",
              side.upper(), exg_mean, exg_max, exg_p90,
-             exg_threshold, pct_above, veg_area, trampling)
+             exg_threshold, pct_above, veg_area,
+             f"{pct_above:.1f}>={exg_density_pct}", trampling)
 
     # ── Display: raw frame with overlays ─────────────────────────────────────
     display = raw.copy()
@@ -198,8 +209,9 @@ class CropGuardStrategy(NavigationStrategy):
                  right_device:       int  = 2,
                  max_lin_mm_s:       int  = 150,
                  icr_offset_m:       float = 0.480,
-                 exg_threshold:      int  = 40,
+                 exg_threshold:      int  = 60,
                  exg_min_area:       int  = 500,
+                 exg_density_pct:    float = 8.0,
                  cloud_interval_s:   float = _CLOUD_INTERVAL_S,
                  camera_calibration: dict | None = None):
 
@@ -211,6 +223,7 @@ class CropGuardStrategy(NavigationStrategy):
         self._icr_offset_m      = icr_offset_m
         self._exg_threshold     = exg_threshold
         self._exg_min_area      = exg_min_area
+        self._exg_density_pct   = exg_density_pct
         self._cloud_interval_s  = cloud_interval_s
         self._calib             = camera_calibration or {}
 
@@ -496,14 +509,16 @@ class CropGuardStrategy(NavigationStrategy):
 
                 if lf is not None:
                     tl, lvis = _process_wheel_frame(
-                        lf, "left", self._exg_threshold, self._exg_min_area)
+                        lf, "left", self._exg_threshold, self._exg_min_area,
+                        self._exg_density_pct)
                 else:
                     tl   = False
                     lvis = self._blank_vis("LEFT CAM MISSING")
 
                 if rf is not None:
                     tr, rvis = _process_wheel_frame(
-                        rf, "right", self._exg_threshold, self._exg_min_area)
+                        rf, "right", self._exg_threshold, self._exg_min_area,
+                        self._exg_density_pct)
                 else:
                     tr   = False
                     rvis = self._blank_vis("RIGHT CAM MISSING")
