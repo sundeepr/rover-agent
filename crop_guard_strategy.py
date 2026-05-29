@@ -605,7 +605,7 @@ class CropGuardStrategy(NavigationStrategy):
             except Exception as e:
                 log.debug("Wheel thread error: %s", e)
 
-            time.sleep(0.04)   # 25 Hz
+            time.sleep(0.10)   # 10 Hz — matches camera fps, avoids V4L2 queue backup
 
     # ── Camera helpers ────────────────────────────────────────────────────────
 
@@ -663,7 +663,7 @@ class CropGuardStrategy(NavigationStrategy):
                      label, path, fourcc_str)
 
         # Warmup reads — driver needs a few frames to stabilise
-        for _ in range(60):
+        for _ in range(30):
             ret, _ = cap.read()
             if ret:
                 log.info("%s wheel camera ready at %s  (%dx%d)  fourcc=%s  fps=%.0f",
