@@ -501,21 +501,25 @@ class CropGuardStrategy(NavigationStrategy):
 
     @staticmethod
     def _open_cam(device: int, label: str):
-        """Open a wheel camera with V4L2 backend, MJPEG@10fps, and warmup reads.
+        """Open a wheel camera using an explicit /dev/videoN path.
 
-        Wheel cameras run at 10 fps (vs 30 fps for the front camera) to keep
-        USB bandwidth low enough for all three cameras on a shared controller.
+        Using the path string (not an integer index) guarantees OpenCV opens
+        exactly the requested node — integer indices with CAP_V4L2 can be
+        remapped by OpenCV's device enumeration and hit the wrong node.
+
+        HD USB cameras on this rover don't support MJPEG; we let the driver
+        choose the format (YUYV) and just cap FPS at 10 to save USB bandwidth.
         """
-        cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
+        path = f"/dev/video{device}"
+        cap = cv2.VideoCapture(path, cv2.CAP_V4L2)
         if not cap.isOpened():
-            cap = cv2.VideoCapture(device)   # fallback to default backend
+            cap = cv2.VideoCapture(path)        # fallback to default backend
         if not cap.isOpened():
-            log.warning("%s wheel camera NOT FOUND on device %d", label, device)
+            log.warning("%s wheel camera NOT FOUND at %s", label, path)
             return None
 
-        # Force MJPEG + 10 fps — reduces USB bandwidth so all three cameras
-        # can share the same controller without starving each other.
-        # FOURCC must be set before resolution/fps.
+        # Try MJPEG first; if the camera doesn't support it the driver will
+        # silently stay on YUYV — we check below and warn.
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
@@ -523,23 +527,25 @@ class CropGuardStrategy(NavigationStrategy):
 
         actual_fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
         fourcc_str = "".join(chr((actual_fourcc >> (8 * i)) & 0xFF) for i in range(4))
-        actual_fps = cap.get(cv2.CAP_PROP_FPS)
+        actual_fps  = cap.get(cv2.CAP_PROP_FPS)
 
-        # Warmup — same Jetson dual-node issue as the main camera
+        if fourcc_str != "MJPG":
+            log.info("%s wheel camera %s: MJPEG not supported, using %s",
+                     label, path, fourcc_str)
+
+        # Warmup reads — driver needs a few frames to stabilise
         for _ in range(30):
             ret, _ = cap.read()
             if ret:
-                log.info("%s wheel camera ready on device %d  (%dx%d)  fourcc=%s  fps=%.0f",
-                         label, device,
+                log.info("%s wheel camera ready at %s  (%dx%d)  fourcc=%s  fps=%.0f",
+                         label, path,
                          int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
                          int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
                          fourcc_str, actual_fps)
                 return cap
             time.sleep(0.05)
 
-        log.warning("%s wheel camera device %d opened but delivers no frames "
-                    "— try device %d or %d",
-                    label, device, device + 2, max(0, device - 2))
+        log.warning("%s wheel camera %s opened but delivers no frames", label, path)
         cap.release()
         return None
 
