@@ -118,13 +118,23 @@ def _process_wheel_frame(raw: np.ndarray,
 
     Returns (trampling_detected, annotated_display_frame).
 
-    Detection uses the TOP HALF of the RAW image (the ahead-of-wheel zone).
-    Display frame is the rotation-corrected full image with ExG overlay.
+    Camera mounting:
+      Left  cam (rotated 90° CCW on rover): wheel occupies TOP half of raw image,
+                                            crop row is in the BOTTOM half.
+      Right cam (rotated 90° CW  on rover): crop row is in the TOP half,
+                                            wheel occupies the BOTTOM half.
+
+    Display frame is rotation-corrected (left→CW, right→CCW) so the crop row
+    always appears on the inside (towards rover centre) in the browser view.
     """
     h, w = raw.shape[:2]
 
-    # ── Detection on top half of raw image ───────────────────────────────────
-    ahead_zone  = raw[:h // 2, :]          # top half = ground ahead of wheel
+    # ── Detection zone: crop-row half of raw image ────────────────────────────
+    if side == "left":
+        ahead_zone = raw[h // 2:, :]     # bottom half = crop row for left cam
+    else:
+        ahead_zone = raw[:h // 2, :]     # top half    = crop row for right cam
+
     veg_mask    = _exg_mask(ahead_zone, exg_threshold)
     veg_area    = _vegetation_area(veg_mask, exg_min_area)
     trampling   = veg_area > 0
@@ -650,3 +660,19 @@ class CropGuardStrategy(NavigationStrategy):
 
         stitched = np.concatenate([lv, divider, rv], axis=1)
         return stitched
+
+    def _get_left_frame(self) -> np.ndarray | None:
+        """Return the annotated left wheel camera view for the browser."""
+        with self._wheel_vis_lock:
+            lv = self._left_vis
+        if lv is None:
+            return self._blank_vis("LEFT CAM MISSING")
+        return lv
+
+    def _get_right_frame(self) -> np.ndarray | None:
+        """Return the annotated right wheel camera view for the browser."""
+        with self._wheel_vis_lock:
+            rv = self._right_vis
+        if rv is None:
+            return self._blank_vis("RIGHT CAM MISSING")
+        return rv

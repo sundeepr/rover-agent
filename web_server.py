@@ -102,13 +102,12 @@ _HTML = """<!DOCTYPE html>
     /* Content area */
     .content-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 
-    /* Videos side by side */
-    .videos-row { display: flex; flex-direction: row; background: #000;
-                  gap: 2px; overflow: hidden; justify-content: center; align-items: flex-start;
-                  flex-shrink: 0; }
-    /* Each box takes 1/3 of the row width; height = label + img (4:3) */
-    .video-box { flex: 0 1 calc(33.333% - 2px);
-                 display: flex; flex-direction: column; overflow: hidden; }
+    /* 2×2 video grid */
+    .videos-grid { display: grid;
+                   grid-template-columns: 1fr 1fr;
+                   grid-template-rows: auto auto;
+                   gap: 2px; background: #000; flex-shrink: 0; }
+    .video-box { display: flex; flex-direction: column; overflow: hidden; }
     .video-box .label { background: #111; color: #555; font-size: 0.68em;
                         text-transform: uppercase; letter-spacing: 0.1em;
                         padding: 4px 10px; flex-shrink: 0; }
@@ -202,7 +201,8 @@ _HTML = """<!DOCTYPE html>
   <div class="main">
     <div class="content-area">
 
-      <div class="videos-row">
+      <div class="videos-grid">
+        <!-- Row 1: navigation cameras -->
         <div class="video-box" style="position:relative;">
           <div class="label">&#x1F534; Live camera — click to add waypoints</div>
           <img id="live-img" src="/video/realtime" style="width:100%;display:block;background:#000;">
@@ -213,10 +213,14 @@ _HTML = """<!DOCTYPE html>
           <img id="llm-img" src="/video/llm" style="width:100%;display:block;background:#000;">
           <canvas id="llm-canvas" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></canvas>
         </div>
-        <div class="video-box" id="down-cam-box" style="position:relative;">
-          <div class="label" id="down-cam-label">&#x1F4F7; Down / Wheel cameras</div>
-          <img id="down-img" src="/video/down" style="width:100%;display:block;background:#000;">
-          <canvas id="down-canvas" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></canvas>
+        <!-- Row 2: wheel cameras -->
+        <div class="video-box" style="position:relative;">
+          <div class="label">&#x1F6DE; Left wheel camera</div>
+          <img id="left-wheel-img" src="/video/left_wheel" style="width:100%;display:block;background:#000;">
+        </div>
+        <div class="video-box" style="position:relative;">
+          <div class="label">&#x1F6DE; Right wheel camera</div>
+          <img id="right-wheel-img" src="/video/right_wheel" style="width:100%;display:block;background:#000;">
         </div>
       </div>
 
@@ -508,31 +512,7 @@ _HTML = """<!DOCTYPE html>
     }
     setInterval(_redrawLlmCanvas, 500);
 
-    function _redrawDownCanvas() {
-      const img    = document.getElementById('down-img');
-      const canvas = document.getElementById('down-canvas');
-      canvas.width  = img.offsetWidth;
-      canvas.height = img.offsetHeight;
-      if (!canvas.width || !canvas.height) return;
-      const ctx = canvas.getContext('2d');
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      const x = Math.round(0.5 * canvas.width);
-      ctx.save();
-      ctx.setLineDash([8, 6]);
-      ctx.lineWidth   = 1.5;
-      ctx.strokeStyle = 'rgba(255, 220, 0, 0.85)';
-      ctx.beginPath();
-      ctx.moveTo(x, canvas.height);
-      ctx.lineTo(x, 0);
-      ctx.stroke();
-      ctx.font         = 'bold 11px monospace';
-      ctx.fillStyle    = 'rgba(255, 220, 0, 0.9)';
-      ctx.textAlign    = 'center';
-      ctx.textBaseline = 'bottom';
-      ctx.fillText('50%', x, canvas.height - 4);
-      ctx.restore();
-    }
-    setInterval(_redrawDownCanvas, 500);
+    // down canvas removed — wheel cams now have their own grid cells
 
     function _sendWaypoints() {
       fetch('/chat', {method:'POST', headers:{'Content-Type':'application/json'},
@@ -915,9 +895,11 @@ class _ServerState:
 
     def __init__(self):
         self._lock        = threading.Lock()
-        self.raw_jpeg     = None          # bytes | None
-        self.llm_jpeg     = None          # bytes | None
-        self.down_jpeg    = None          # bytes | None  (downward-facing camera)
+        self.raw_jpeg        = None          # bytes | None
+        self.llm_jpeg        = None          # bytes | None
+        self.down_jpeg       = None          # bytes | None  (downward-facing camera)
+        self.left_wheel_jpeg = None          # bytes | None  (left wheel camera)
+        self.right_wheel_jpeg= None          # bytes | None  (right wheel camera)
         self.status       = {}            # latest JSON from agent
         self.paused       = False
         self.last_push    = 0.0           # epoch seconds
@@ -985,9 +967,11 @@ class WebServer:
     def _register_routes(self) -> None:
         app = self._app
         app.add_url_rule("/",                           "index",        self._index)
-        app.add_url_rule("/video/realtime",             "v_realtime",   self._video_realtime)
-        app.add_url_rule("/video/llm",                  "v_llm",        self._video_llm)
-        app.add_url_rule("/video/down",                 "v_down",       self._video_down)
+        app.add_url_rule("/video/realtime",             "v_realtime",     self._video_realtime)
+        app.add_url_rule("/video/llm",                  "v_llm",          self._video_llm)
+        app.add_url_rule("/video/down",                 "v_down",         self._video_down)
+        app.add_url_rule("/video/left_wheel",           "v_left_wheel",   self._video_left_wheel)
+        app.add_url_rule("/video/right_wheel",          "v_right_wheel",  self._video_right_wheel)
         app.add_url_rule("/webrtc/offer/<stream>",      "webrtc_offer", self._webrtc_offer, methods=["POST"])
         app.add_url_rule("/status",                     "status",       self._status)
         app.add_url_rule("/pause",                      "pause",        self._pause,        methods=["POST"])
@@ -1001,17 +985,21 @@ class WebServer:
     # ── Agent push endpoints ──────────────────────────────────────────────────
 
     def _agent_frame(self):
-        """POST /agent/frame?stream=realtime|llm|down  body: raw JPEG bytes."""
+        """POST /agent/frame?stream=realtime|llm|down|left_wheel|right_wheel  body: raw JPEG bytes."""
         stream = request.args.get("stream", "realtime")
         jpeg   = request.get_data()
         with self._state.lock:
             self._state.touch()
             if stream == "llm":
-                self._state.llm_jpeg  = jpeg
+                self._state.llm_jpeg         = jpeg
             elif stream == "down":
-                self._state.down_jpeg = jpeg
+                self._state.down_jpeg        = jpeg
+            elif stream == "left_wheel":
+                self._state.left_wheel_jpeg  = jpeg
+            elif stream == "right_wheel":
+                self._state.right_wheel_jpeg = jpeg
             else:
-                self._state.raw_jpeg  = jpeg
+                self._state.raw_jpeg         = jpeg
             paused = self._state.paused
         return jsonify({"ok": True, "paused": paused})
 
@@ -1122,6 +1110,18 @@ class WebServer:
     def _video_down(self):
         return Response(
             self._stream(lambda: self._state.down_jpeg, "No down camera"),
+            mimetype="multipart/x-mixed-replace; boundary=frame",
+        )
+
+    def _video_left_wheel(self):
+        return Response(
+            self._stream(lambda: self._state.left_wheel_jpeg, "Left cam initialising..."),
+            mimetype="multipart/x-mixed-replace; boundary=frame",
+        )
+
+    def _video_right_wheel(self):
+        return Response(
+            self._stream(lambda: self._state.right_wheel_jpeg, "Right cam initialising..."),
             mimetype="multipart/x-mixed-replace; boundary=frame",
         )
 

@@ -89,6 +89,16 @@ class AgentPublisher:
                         down = cv2.resize(down, (640, 480))
                     self._push_frame(sess, down, "down")
 
+            # ── Individual wheel camera frames ────────────────────────────
+            if strategy is not None and hasattr(strategy, "_get_left_frame"):
+                lf = strategy._get_left_frame()
+                if lf is not None:
+                    self._push_frame(sess, lf, "left_wheel")
+            if strategy is not None and hasattr(strategy, "_get_right_frame"):
+                rf = strategy._get_right_frame()
+                if rf is not None:
+                    self._push_frame(sess, rf, "right_wheel")
+
             # ── Status + sync (every cycle) ──────────────────────────────
             status = self._build_status(state)
             if strategy is not None and hasattr(strategy, "_get_down_frame"):
