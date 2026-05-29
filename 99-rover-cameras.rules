@@ -1,0 +1,37 @@
+# /etc/udev/rules.d/99-rover-cameras.rules
+#
+# Stable /dev/cam-* symlinks for rover cameras, matched by physical USB port.
+# Both HD wheel cameras share the same VID:PID:serial so we MUST use the
+# port path (KERNELS) to tell them apart — serial-based matching won't work.
+#
+# Physical layout (Jetson usb1 hub):
+#   usb1/1-1/1-1.1  →  /dev/video2  →  right wheel camera (HD)
+#   usb1/1-1/1-1.2  →  /dev/video4  →  left  wheel camera (HD)
+#   usb2/.../2.3    →  /dev/video0  →  front camera (5MP, unique VID:PID)
+#
+# ATTR{index}=="0" selects the capture node only (index 1 is metadata-only).
+#
+# Install:
+#   sudo cp 99-rover-cameras.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#
+# Verify:
+#   ls -la /dev/cam-*
+
+# ── Right wheel camera (HD, USB port 1-1.1) ──────────────────────────────────
+SUBSYSTEM=="video4linux", \
+  KERNELS=="1-1.1:1.0", \
+  ATTR{index}=="0", \
+  SYMLINK+="cam-right", MODE="0666", TAG+="systemd"
+
+# ── Left wheel camera (HD, USB port 1-1.2) ───────────────────────────────────
+SUBSYSTEM=="video4linux", \
+  KERNELS=="1-1.2:1.0", \
+  ATTR{index}=="0", \
+  SYMLINK+="cam-left", MODE="0666", TAG+="systemd"
+
+# ── Front camera (5MP USB Camera, unique VID:PID — port match not needed) ────
+SUBSYSTEM=="video4linux", \
+  ATTRS{idVendor}=="32e4", ATTRS{idProduct}=="0335", \
+  ATTR{index}=="0", \
+  SYMLINK+="cam-front", MODE="0666", TAG+="systemd"
