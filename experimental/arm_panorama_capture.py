@@ -120,9 +120,9 @@ def request_feedback(ser: serial.Serial) -> dict | None:
                     continue
                 try:
                     data = json.loads(line)
-                    if data.get("T") == 1051:
+                    if isinstance(data, dict) and data.get("T") == 1051:
                         return data
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, ValueError):
                     pass
     return None
 
