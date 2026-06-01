@@ -190,7 +190,14 @@ def main():
     try:
         home(ser)
 
-        print(f"\n-- Starting continuous base rotation  spd={args.spd} --")
+        # Move base to -180° before starting the sweep
+        print("-- Moving base to -180° start position --")
+        send(ser, {
+            "T": 121, "joint": 1, "angle": -180, "spd": 30, "acc": 10,
+        })
+        time.sleep(4)   # wait for arm to reach -180°
+
+        print(f"\n-- Starting continuous base rotation -180° → +180°  spd={args.spd} --")
         print(f"   Green threshold: {args.threshold*100:.2f}%  |  Ctrl-C to stop\n")
         start_base_rotation(ser, args.spd)
 
