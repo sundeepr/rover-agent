@@ -1,21 +1,90 @@
 #!/usr/bin/env python3
 """
-Continuously rotate the RoArm-M2-S base joint while reading camera frames.
-If green is detected in a frame, the live joint angles are printed and the
-frame is saved to disk.
+arm_panorama_capture.py — RoArm-M2-S green-plant scanner
+==========================================================
 
-Flow:
-  1. Home all joints  (b=0 s=0 e=90 h=180 / EoAT closed)
-  2. Start continuous base rotation (CMD_CONSTANT_CTRL T:123, direction=INCREASE)
-  3. Read camera + poll joint angles in a tight loop
-     - On each frame run HSV green-detection
-     - If green pixel ratio exceeds threshold → print angles, save frame
-  4. When base reaches +180° (or Ctrl-C), stop rotation and home
+Continuously rotates the arm base joint from -120° to +120° while streaming
+the arm-tip camera feed. Any green plants detected in the frame are highlighted
+with bounding boxes. When the largest bounding box centre falls inside a ±15%
+centre zone (both horizontally and vertically), the arm LED turns on.
 
-Usage:
+Hardware
+--------
+- RoArm-M2-S robotic arm (Waveshare), connected via USB serial (ESP32)
+- Camera mounted at the tip of the arm (EoAT), default device index 0
+
+Scan flow
+---------
+1. Load joint angles from arm_scan_config.json and move all joints to that pose
+   (shoulder, elbow, EoAT first — then base, so the arm settles safely)
+2. Move base to -120° using CMD_SINGLE_JOINT_ANGLE (T:121); wait for travel
+3. Start continuous base rotation via CMD_CONSTANT_CTRL (T:123, cmd=1/INCREASE)
+4. Per-frame loop:
+   a. Read camera frame
+   b. HSV green detection → contours → bounding boxes
+   c. Poll live joint angles via CMD_SERVO_RAD_FEEDBACK (T:105 → response T:1051)
+   d. If largest box centre is inside centre zone → LED on (T:114, led:255)
+      else → LED off (T:114, led:0)
+   e. Draw bounding boxes, HUD (angles + green %), and centre-zone crosshair
+      on the live "Arm Scan" window
+   f. Print to console when green detected above threshold
+5. Stop when base reaches +120° (from feedback) or Q is pressed
+6. Stop rotation, return base to 0°, home all joints, LED off
+
+Key arm serial commands used
+----------------------------
+  T:102  CMD_JOINTS_RAD_CTRL      — move all joints (radians) — blocking
+  T:105  CMD_SERVO_RAD_FEEDBACK   — request joint angle + coordinate feedback
+  T:114  LED control              — led:255 = on, led:0 = off
+  T:121  CMD_SINGLE_JOINT_ANGLE   — move one joint (degrees) — blocking on ESP32;
+                                    do NOT poll T:105 during this move
+  T:123  CMD_CONSTANT_CTRL        — continuous rotation; cmd:1=increase, cmd:0=stop
+
+Config file: arm_scan_config.json
+----------------------------------
+Edit this file to change the home/scan pose without touching code:
+  {
+      "home": {
+          "base_deg":     0,
+          "shoulder_deg": -60,
+          "elbow_deg":    150,
+          "eoat_deg":     180
+      }
+  }
+Shoulder -60° + elbow 150° keeps the camera roughly horizontal and pointed
+forward. Adjust elbow by the same magnitude as shoulder to maintain level gaze
+(e.g. shoulder -30° → elbow 120°).
+
+Green detection
+---------------
+Uses an HSV mask (hue 35–85, sat 60–255, val 60–255) followed by morphological
+closing to fill gaps inside plant blobs. Contours smaller than 500 px² are
+discarded as noise. The "green %" in the HUD is the fraction of all frame pixels
+that are green — 1% is the default trigger threshold (--threshold 0.01).
+
+Sweep speed
+-----------
+--spd controls the continuous rotation speed coefficient (0–20, Waveshare units).
+Default is 5 (slow). Use 8–12 for a faster sweep. At high speeds the arm may
+overshoot +120° by a frame or two before the feedback loop catches it.
+
+Usage
+-----
     python arm_panorama_capture.py
-    python arm_panorama_capture.py --port /dev/ttyUSB0 --cam 0 --spd 5 --threshold 0.01
-    python arm_panorama_capture.py --out detections/
+    python arm_panorama_capture.py --spd 10
+    python arm_panorama_capture.py --port /dev/ttyUSB1 --cam 2
+    python arm_panorama_capture.py --threshold 0.02 --config my_pose.json
+
+Arguments
+---------
+  --port      Serial port for the arm (default: /dev/ttyUSB0)
+  --cam       Camera device index (default: 0)
+  --spd       Continuous rotation speed 0–20 (default: 5)
+  --threshold Green pixel fraction to log a detection (default: 0.01 = 1%)
+  --out       Directory for any saved output (default: panorama_output/detections)
+  --config    Path to JSON config file (default: arm_scan_config.json)
+
+Press Q in the live window or Ctrl-C in the terminal to stop early.
 """
 
 import argparse
