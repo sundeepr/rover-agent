@@ -148,30 +148,56 @@ def read_frame(cap: cv2.VideoCapture) -> cv2.typing.MatLike | None:
 
 # ── Green detection ────────────────────────────────────────────────────────────
 
-def green_ratio(frame: cv2.typing.MatLike) -> float:
-    hsv  = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, GREEN_HSV_LO, GREEN_HSV_HI)
-    return float(np.count_nonzero(mask)) / mask.size
+# Minimum contour area (px²) to count as a plant — filters out noise
+MIN_CONTOUR_AREA = 500
 
 
-def annotate_frame(frame: cv2.typing.MatLike, feedback: dict, ratio: float) -> cv2.typing.MatLike:
-    out  = frame.copy()
-    b_deg = np.degrees(feedback.get("b", 0))
-    s_deg = np.degrees(feedback.get("s", 0))
-    e_deg = np.degrees(feedback.get("e", 0))
-    t_deg = np.degrees(feedback.get("t", 0))
-    lines = [
-        f"GREEN {ratio*100:.1f}%",
+def detect_green(frame: cv2.typing.MatLike) -> tuple[float, list]:
+    """
+    Returns (green_ratio, contours) where contours are the bounding boxes
+    of green regions sorted largest-first.
+    """
+    hsv     = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    mask    = cv2.inRange(hsv, GREEN_HSV_LO, GREEN_HSV_HI)
+    # Morphological close to fill small holes inside plant blobs
+    kernel  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+    mask    = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    ratio   = float(np.count_nonzero(mask)) / mask.size
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours = [c for c in contours if cv2.contourArea(c) >= MIN_CONTOUR_AREA]
+    contours = sorted(contours, key=cv2.contourArea, reverse=True)
+    return ratio, contours
+
+
+def draw_detections(frame: cv2.typing.MatLike, contours: list,
+                    feedback: dict, ratio: float) -> cv2.typing.MatLike:
+    out = frame.copy()
+
+    # Draw bounding box + area label for each green contour
+    for i, c in enumerate(contours):
+        x, y, w, h = cv2.boundingRect(c)
+        cv2.rectangle(out, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        area = cv2.contourArea(c)
+        cv2.putText(out, f"plant {i+1}  {area:.0f}px²",
+                    (x, y - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2, cv2.LINE_AA)
+
+    # HUD overlay — joint angles + green %
+    b_deg = np.degrees(feedback.get("b", float("nan")))
+    s_deg = np.degrees(feedback.get("s", float("nan")))
+    e_deg = np.degrees(feedback.get("e", float("nan")))
+    t_deg = np.degrees(feedback.get("t", float("nan")))
+    hud = [
+        f"green: {ratio*100:.1f}%   plants: {len(contours)}",
         f"base={b_deg:.1f}  shoulder={s_deg:.1f}",
         f"elbow={e_deg:.1f}  eoat={t_deg:.1f}",
     ]
-    font      = cv2.FONT_HERSHEY_SIMPLEX
-    scale     = 0.8
-    thickness = 2
-    y         = 30
-    for line in lines:
-        cv2.putText(out, line, (10, y), font, scale, (0, 255, 0), thickness, cv2.LINE_AA)
-        y += 30
+    font, scale, thickness = cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2
+    y = 28
+    for line in hud:
+        # Dark shadow for readability over any background
+        cv2.putText(out, line, (11, y + 1), font, scale, (0, 0, 0),     thickness + 1, cv2.LINE_AA)
+        cv2.putText(out, line, (10, y),     font, scale, (0, 255, 0),   thickness,     cv2.LINE_AA)
+        y += 28
     return out
 
 
@@ -225,37 +251,40 @@ def main():
         print(f"   Green threshold: {args.threshold*100:.2f}%  |  Ctrl-C to stop\n")
         start_base_rotation(ser, args.spd)
 
+        cv2.namedWindow("Arm Scan", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("Arm Scan", 1280, 720)
+
         while True:
             frame = read_frame(cap)
             if frame is None:
                 print("WARNING: dropped frame")
                 continue
 
-            ratio = green_ratio(frame)
+            ratio, contours = detect_green(frame)
 
             # Poll arm angles on every frame (non-blocking best-effort)
             feedback = request_feedback(ser) or {}
-
             b_rad = feedback.get("b", float("nan"))
-            s_rad = feedback.get("s", float("nan"))
-            e_rad = feedback.get("e", float("nan"))
-            t_rad = feedback.get("t", float("nan"))
 
-            if ratio >= args.threshold:
+            # Always draw detections and show live window
+            display = draw_detections(frame, contours, feedback, ratio)
+            cv2.imshow("Arm Scan", display)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                print("\nQ pressed — stopping.")
+                break
+
+            if ratio >= args.threshold and contours:
                 b_deg = np.degrees(b_rad)
-                s_deg = np.degrees(s_rad)
-                e_deg = np.degrees(e_rad)
-                t_deg = np.degrees(t_rad)
-
+                s_deg = np.degrees(feedback.get("s", float("nan")))
+                e_deg = np.degrees(feedback.get("e", float("nan")))
+                t_deg = np.degrees(feedback.get("t", float("nan")))
                 print(
-                    f"GREEN DETECTED  {ratio*100:.1f}%  |  "
+                    f"GREEN DETECTED  {ratio*100:.1f}%  plants={len(contours)}  |  "
                     f"base={b_deg:.1f}°  shoulder={s_deg:.1f}°  "
                     f"elbow={e_deg:.1f}°  eoat={t_deg:.1f}°"
                 )
-
-                annotated = annotate_frame(frame, feedback, ratio)
                 fname = out_dir / f"green_{detection_count:04d}_b{b_deg:.0f}.jpg"
-                cv2.imwrite(str(fname), annotated)
+                cv2.imwrite(str(fname), display)
                 print(f"  Saved → {fname}")
                 detection_count += 1
 
@@ -277,6 +306,7 @@ def main():
         home(ser, cfg)
         cap.release()
         ser.close()
+        cv2.destroyAllWindows()
         print(f"Done. {detection_count} green detection(s) saved to {out_dir}")
 
 
