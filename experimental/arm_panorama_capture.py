@@ -240,19 +240,21 @@ def main():
         # T:121 is a blocking command on the arm side — the ESP32 won't respond
         # to T:105 feedback requests while executing it. Wait long enough for
         # the full 180° travel at spd=30°/s plus acceleration headroom.
-        print("-- Moving base to -180° start position (waiting for travel to complete) --")
-        send(ser, {"T": 121, "joint": 1, "angle": -180, "spd": 30, "acc": 10})
-        travel_time = 180 / 30 + 3   # 6s travel + 3s acceleration headroom
-        print(f"  Waiting {travel_time:.0f}s for base to reach -180°...")
+        print("-- Moving base to -120° start position (waiting for travel to complete) --")
+        send(ser, {"T": 121, "joint": 1, "angle": -120, "spd": 30, "acc": 10})
+        travel_time = 120 / 30 + 3   # 4s travel + 3s acceleration headroom
+        print(f"  Waiting {travel_time:.0f}s for base to reach -120°...")
         time.sleep(travel_time)
-        print("  Base should be at -180°, starting sweep")
+        print("  Base should be at -120°, starting sweep")
 
-        print(f"\n-- Starting continuous base rotation -180° → +180°  spd={args.spd} --")
+        print(f"\n-- Starting continuous base rotation -120° → +120°  spd={args.spd} --")
         print(f"   Green threshold: {args.threshold*100:.2f}%  |  Ctrl-C to stop\n")
         start_base_rotation(ser, args.spd)
 
         cv2.namedWindow("Arm Scan", cv2.WINDOW_NORMAL)
         cv2.resizeWindow("Arm Scan", 1280, 720)
+
+        led_on = False
 
         while True:
             frame = read_frame(cap)
@@ -266,8 +268,37 @@ def main():
             feedback = request_feedback(ser) or {}
             b_rad = feedback.get("b", float("nan"))
 
-            # Always draw detections and show live window
+            # Check if the largest green contour is centred in the frame
+            frame_cx = frame.shape[1] / 2
+            centre_margin = frame.shape[1] * 0.15   # ±15% of frame width
+            plant_centred = False
+            if contours:
+                x, y, w, h = cv2.boundingRect(contours[0])
+                box_cx = x + w / 2
+                if abs(box_cx - frame_cx) <= centre_margin:
+                    plant_centred = True
+
+            # Turn LED on when a plant is centred, off otherwise
+            if plant_centred and not led_on:
+                send(ser, {"T": 114, "led": 255})
+                led_on = True
+                print("LED ON  — plant centred in frame")
+            elif not plant_centred and led_on:
+                send(ser, {"T": 114, "led": 0})
+                led_on = False
+                print("LED OFF — plant left frame centre")
+
+            # Draw detections and show live window
             display = draw_detections(frame, contours, feedback, ratio)
+            # Draw centre-zone indicator
+            cx = int(frame_cx)
+            m  = int(centre_margin)
+            cv2.line(display, (cx - m, 0), (cx - m, frame.shape[0]), (255, 255, 0), 1)
+            cv2.line(display, (cx + m, 0), (cx + m, frame.shape[0]), (255, 255, 0), 1)
+            if plant_centred:
+                cv2.putText(display, "CENTRED", (cx - 50, frame.shape[0] - 15),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
+
             cv2.imshow("Arm Scan", display)
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 print("\nQ pressed — stopping.")
@@ -279,18 +310,15 @@ def main():
                 e_deg = np.degrees(feedback.get("e", float("nan")))
                 t_deg = np.degrees(feedback.get("t", float("nan")))
                 print(
-                    f"GREEN DETECTED  {ratio*100:.1f}%  plants={len(contours)}  |  "
+                    f"GREEN DETECTED  {ratio*100:.1f}%  plants={len(contours)}"
+                    f"{'  [CENTRED]' if plant_centred else ''}  |  "
                     f"base={b_deg:.1f}°  shoulder={s_deg:.1f}°  "
                     f"elbow={e_deg:.1f}°  eoat={t_deg:.1f}°"
                 )
-                fname = out_dir / f"green_{detection_count:04d}_b{b_deg:.0f}.jpg"
-                cv2.imwrite(str(fname), display)
-                print(f"  Saved → {fname}")
-                detection_count += 1
 
-            # Stop when base has completed a full sweep to +180°
-            if not np.isnan(b_rad) and np.degrees(b_rad) >= 179.0:
-                print("\n-- Base reached +180°, stopping --")
+            # Stop when base has completed a full sweep to +120°
+            if not np.isnan(b_rad) and np.degrees(b_rad) >= 119.0:
+                print("\n-- Base reached +120°, stopping --")
                 break
 
     except KeyboardInterrupt:
@@ -299,6 +327,7 @@ def main():
     finally:
         print("Stopping rotation...")
         stop_base_rotation(ser)
+        send(ser, {"T": 114, "led": 0})   # ensure LED off on exit
         time.sleep(0.5)
         print("-- Returning base to 0° --")
         send(ser, {"T": 121, "joint": 1, "angle": 0, "spd": 30, "acc": 10})
