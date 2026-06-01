@@ -268,14 +268,17 @@ def main():
             feedback = request_feedback(ser) or {}
             b_rad = feedback.get("b", float("nan"))
 
-            # Check if the largest green contour is centred in the frame
+            # Check if the largest green contour is centred in the frame (both axes)
             frame_cx = frame.shape[1] / 2
-            centre_margin = frame.shape[1] * 0.15   # ±15% of frame width
+            frame_cy = frame.shape[0] / 2
+            margin_x = frame.shape[1] * 0.15   # ±15% of frame width
+            margin_y = frame.shape[0] * 0.15   # ±15% of frame height
             plant_centred = False
             if contours:
                 x, y, w, h = cv2.boundingRect(contours[0])
                 box_cx = x + w / 2
-                if abs(box_cx - frame_cx) <= centre_margin:
+                box_cy = y + h / 2
+                if abs(box_cx - frame_cx) <= margin_x and abs(box_cy - frame_cy) <= margin_y:
                     plant_centred = True
 
             # Turn LED on when a plant is centred, off otherwise
@@ -290,11 +293,14 @@ def main():
 
             # Draw detections and show live window
             display = draw_detections(frame, contours, feedback, ratio)
-            # Draw centre-zone indicator
-            cx = int(frame_cx)
-            m  = int(centre_margin)
-            cv2.line(display, (cx - m, 0), (cx - m, frame.shape[0]), (255, 255, 0), 1)
-            cv2.line(display, (cx + m, 0), (cx + m, frame.shape[0]), (255, 255, 0), 1)
+            # Draw centre-zone box (vertical + horizontal guide lines)
+            cx, cy = int(frame_cx), int(frame_cy)
+            mx, my = int(margin_x), int(margin_y)
+            colour = (0, 255, 255) if plant_centred else (255, 255, 0)
+            cv2.line(display, (cx - mx, 0),            (cx - mx, frame.shape[0]), colour, 1)
+            cv2.line(display, (cx + mx, 0),            (cx + mx, frame.shape[0]), colour, 1)
+            cv2.line(display, (0, cy - my),            (frame.shape[1], cy - my), colour, 1)
+            cv2.line(display, (0, cy + my),            (frame.shape[1], cy + my), colour, 1)
             if plant_centred:
                 cv2.putText(display, "CENTRED", (cx - 50, frame.shape[0] - 15),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
