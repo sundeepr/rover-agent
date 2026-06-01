@@ -190,6 +190,13 @@ def main():
     try:
         home(ser)
 
+        # Set shoulder to -30° and elbow to +30° for scanning pose
+        print("-- Setting scanning pose: shoulder=-30°  elbow=+30° --")
+        send(ser, {"T": 121, "joint": 2, "angle": -30, "spd": 30, "acc": 10})
+        time.sleep(2)
+        send(ser, {"T": 121, "joint": 3, "angle":  30, "spd": 30, "acc": 10})
+        time.sleep(2)
+
         # Move base to -180° before starting the sweep
         print("-- Moving base to -180° start position --")
         send(ser, {
