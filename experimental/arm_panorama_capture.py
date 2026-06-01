@@ -210,22 +210,16 @@ def main():
     try:
         home(ser, cfg)
 
-        # Move base to -180° and poll until it actually arrives (30s timeout)
-        print("-- Moving base to -180° start position --")
+        # Move base to -180°.
+        # T:121 is a blocking command on the arm side — the ESP32 won't respond
+        # to T:105 feedback requests while executing it. Wait long enough for
+        # the full 180° travel at spd=30°/s plus acceleration headroom.
+        print("-- Moving base to -180° start position (waiting for travel to complete) --")
         send(ser, {"T": 121, "joint": 1, "angle": -180, "spd": 30, "acc": 10})
-        deadline_180 = time.time() + 30
-        while time.time() < deadline_180:
-            fb = request_feedback(ser)
-            if fb is None:
-                time.sleep(0.1)
-                continue
-            base_now = np.degrees(fb.get("b", 0.0))
-            print(f"  base={base_now:.1f}°", end="\r", flush=True)
-            if base_now <= -178.0:
-                print(f"\n  Reached {base_now:.1f}°, starting sweep")
-                break
-        else:
-            sys.exit("ERROR: Timed out waiting for base to reach -180°")
+        travel_time = 180 / 30 + 3   # 6s travel + 3s acceleration headroom
+        print(f"  Waiting {travel_time:.0f}s for base to reach -180°...")
+        time.sleep(travel_time)
+        print("  Base should be at -180°, starting sweep")
 
         print(f"\n-- Starting continuous base rotation -180° → +180°  spd={args.spd} --")
         print(f"   Green threshold: {args.threshold*100:.2f}%  |  Ctrl-C to stop\n")
