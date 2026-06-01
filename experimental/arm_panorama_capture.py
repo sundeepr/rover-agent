@@ -106,19 +106,24 @@ def stop_base_rotation(ser: serial.Serial) -> None:
 
 def request_feedback(ser: serial.Serial) -> dict | None:
     """Send T:105 and read back the JSON feedback line. Returns None on timeout."""
+    ser.reset_input_buffer()   # discard stale bytes from rotation responses
     send(ser, {"T": 105})
-    deadline = time.time() + 0.2
+    deadline = time.time() + 0.3
     buf = b""
     while time.time() < deadline:
         chunk = ser.read(ser.in_waiting or 1)
         if chunk:
             buf += chunk
-            if b"\n" in buf:
-                line = buf.split(b"\n")[0].strip()
+            # Scan all complete lines in the buffer for the feedback response (T:1051)
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                line = line.strip()
                 try:
-                    return json.loads(line)
+                    data = json.loads(line)
+                    if data.get("T") == 1051:
+                        return data
                 except json.JSONDecodeError:
-                    return None
+                    pass
     return None
 
 
@@ -259,9 +264,12 @@ def main():
         print("\nInterrupted by user.")
 
     finally:
-        print("Stopping rotation and homing...")
+        print("Stopping rotation...")
         stop_base_rotation(ser)
         time.sleep(0.5)
+        print("-- Returning base to 0° --")
+        send(ser, {"T": 121, "joint": 1, "angle": 0, "spd": 30, "acc": 10})
+        time.sleep(4)
         home(ser, cfg)
         cap.release()
         ser.close()

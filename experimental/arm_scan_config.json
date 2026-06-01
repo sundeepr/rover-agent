@@ -1,8 +1,8 @@
 {
     "home": {
         "base_deg":     0,
-        "shoulder_deg": -30,
-        "elbow_deg":    120,
+        "shoulder_deg": -60,
+        "elbow_deg":    150,
         "eoat_deg":     180
     }
 }
