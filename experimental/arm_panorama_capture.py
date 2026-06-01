@@ -105,19 +105,19 @@ def stop_base_rotation(ser: serial.Serial) -> None:
 
 
 def request_feedback(ser: serial.Serial) -> dict | None:
-    """Send T:105 and read back the JSON feedback line. Returns None on timeout."""
-    ser.reset_input_buffer()   # discard stale bytes from rotation responses
+    """Send T:105 and read back the T:1051 feedback line. Returns None on timeout."""
     send(ser, {"T": 105})
-    deadline = time.time() + 0.3
+    deadline = time.time() + 0.5
     buf = b""
     while time.time() < deadline:
         chunk = ser.read(ser.in_waiting or 1)
         if chunk:
             buf += chunk
-            # Scan all complete lines in the buffer for the feedback response (T:1051)
             while b"\n" in buf:
                 line, buf = buf.split(b"\n", 1)
                 line = line.strip()
+                if not line:
+                    continue
                 try:
                     data = json.loads(line)
                     if data.get("T") == 1051:
@@ -210,18 +210,22 @@ def main():
     try:
         home(ser, cfg)
 
-        # Move base to -180° and poll until it actually arrives
+        # Move base to -180° and poll until it actually arrives (30s timeout)
         print("-- Moving base to -180° start position --")
         send(ser, {"T": 121, "joint": 1, "angle": -180, "spd": 30, "acc": 10})
-        while True:
+        deadline_180 = time.time() + 30
+        while time.time() < deadline_180:
             fb = request_feedback(ser)
-            if fb is not None:
-                base_now = np.degrees(fb.get("b", 0))
-                print(f"  base={base_now:.1f}°", end="\r")
-                if base_now <= -178.0:
-                    print(f"\n  Reached {base_now:.1f}°, starting sweep")
-                    break
-            time.sleep(0.1)
+            if fb is None:
+                time.sleep(0.1)
+                continue
+            base_now = np.degrees(fb.get("b", 0.0))
+            print(f"  base={base_now:.1f}°", end="\r", flush=True)
+            if base_now <= -178.0:
+                print(f"\n  Reached {base_now:.1f}°, starting sweep")
+                break
+        else:
+            sys.exit("ERROR: Timed out waiting for base to reach -180°")
 
         print(f"\n-- Starting continuous base rotation -180° → +180°  spd={args.spd} --")
         print(f"   Green threshold: {args.threshold*100:.2f}%  |  Ctrl-C to stop\n")
