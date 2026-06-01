@@ -210,12 +210,18 @@ def main():
     try:
         home(ser, cfg)
 
-        # Move base to -180° before starting the sweep
+        # Move base to -180° and poll until it actually arrives
         print("-- Moving base to -180° start position --")
-        send(ser, {
-            "T": 121, "joint": 1, "angle": -180, "spd": 30, "acc": 10,
-        })
-        time.sleep(4)   # wait for arm to reach -180°
+        send(ser, {"T": 121, "joint": 1, "angle": -180, "spd": 30, "acc": 10})
+        while True:
+            fb = request_feedback(ser)
+            if fb is not None:
+                base_now = np.degrees(fb.get("b", 0))
+                print(f"  base={base_now:.1f}°", end="\r")
+                if base_now <= -178.0:
+                    print(f"\n  Reached {base_now:.1f}°, starting sweep")
+                    break
+            time.sleep(0.1)
 
         print(f"\n-- Starting continuous base rotation -180° → +180°  spd={args.spd} --")
         print(f"   Green threshold: {args.threshold*100:.2f}%  |  Ctrl-C to stop\n")
