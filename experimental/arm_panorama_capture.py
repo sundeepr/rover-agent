@@ -33,12 +33,7 @@ SERIAL_PORT = "/dev/ttyUSB0"
 BAUD_RATE   = 115200
 CAM_DEVICE  = 0
 OUTPUT_DIR  = "panorama_output/detections"
-
-# Default joint angles (degrees) for home
-DEFAULT_BASE     =   0
-DEFAULT_SHOULDER =   0
-DEFAULT_ELBOW    =  90
-DEFAULT_EOAT     = 180   # closed clamp
+DEFAULT_CONFIG = Path(__file__).parent / "arm_scan_config.json"
 
 # HSV green range — tune if needed
 GREEN_HSV_LO = np.array([ 35,  60,  60], dtype=np.uint8)
@@ -58,17 +53,33 @@ def send(ser: serial.Serial, cmd: dict) -> None:
     ser.write(line.encode())
 
 
-def home(ser: serial.Serial) -> None:
-    print("\n-- Homing all joints --")
-    send(ser, {
-        "T": 102,                   # CMD_JOINTS_RAD_CTRL — blocks until done
-        "base":     0.0,
-        "shoulder": 0.0,
-        "elbow":    1.57,
-        "hand":     3.14,
-        "spd":      0,
-        "acc":      10,
-    })
+def load_config(path: Path) -> dict:
+    if not path.exists():
+        sys.exit(f"ERROR: Config file not found: {path}")
+    with open(path) as f:
+        cfg = json.load(f)
+    home = cfg.get("home", {})
+    required = ["base_deg", "shoulder_deg", "elbow_deg", "eoat_deg"]
+    missing = [k for k in required if k not in home]
+    if missing:
+        sys.exit(f"ERROR: Config missing fields in 'home': {missing}")
+    print(f"Config loaded from {path}")
+    print(f"  home: base={home['base_deg']}°  shoulder={home['shoulder_deg']}°  "
+          f"elbow={home['elbow_deg']}°  eoat={home['eoat_deg']}°")
+    return cfg
+
+
+def home(ser: serial.Serial, cfg: dict) -> None:
+    h = cfg["home"]
+    print(f"\n-- Moving to scan home: base={h['base_deg']}°  shoulder={h['shoulder_deg']}°  "
+          f"elbow={h['elbow_deg']}°  eoat={h['eoat_deg']}° --")
+    send(ser, {"T": 121, "joint": 2, "angle": h["shoulder_deg"], "spd": 30, "acc": 10})
+    time.sleep(2)
+    send(ser, {"T": 121, "joint": 3, "angle": h["elbow_deg"],    "spd": 30, "acc": 10})
+    time.sleep(2)
+    send(ser, {"T": 121, "joint": 4, "angle": h["eoat_deg"],     "spd": 30, "acc": 10})
+    time.sleep(1)
+    send(ser, {"T": 121, "joint": 1, "angle": h["base_deg"],     "spd": 30, "acc": 10})
     time.sleep(3)
 
 
@@ -175,7 +186,11 @@ def main():
                         help="Green pixel fraction to trigger save (default: 0.01 = 1%%)")
     parser.add_argument("--out",       default=OUTPUT_DIR,
                         help=f"Output directory for detections (default: {OUTPUT_DIR})")
+    parser.add_argument("--config",    default=str(DEFAULT_CONFIG),
+                        help=f"Path to arm config JSON (default: {DEFAULT_CONFIG})")
     args = parser.parse_args()
+
+    cfg = load_config(Path(args.config))
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -188,14 +203,7 @@ def main():
 
     detection_count = 0
     try:
-        home(ser)
-
-        # Set shoulder to -30° and elbow to +30° for scanning pose
-        print("-- Setting scanning pose: shoulder=-30°  elbow=+30° --")
-        send(ser, {"T": 121, "joint": 2, "angle": -30, "spd": 30, "acc": 10})
-        time.sleep(2)
-        send(ser, {"T": 121, "joint": 3, "angle": 120, "spd": 30, "acc": 10})
-        time.sleep(2)
+        home(ser, cfg)
 
         # Move base to -180° before starting the sweep
         print("-- Moving base to -180° start position --")
@@ -254,7 +262,7 @@ def main():
         print("Stopping rotation and homing...")
         stop_base_rotation(ser)
         time.sleep(0.5)
-        home(ser)
+        home(ser, cfg)
         cap.release()
         ser.close()
         print(f"Done. {detection_count} green detection(s) saved to {out_dir}")
