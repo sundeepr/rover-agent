@@ -185,12 +185,21 @@ def _process_wheel_frame(raw: np.ndarray,
     h, w = raw.shape[:2]
 
     # ── Detection zones ───────────────────────────────────────────────────────
+    # Both cameras are mounted facing down.  In both raw images the wheel sits
+    # in the bottom half.
+    #
+    # Forward motion direction (in raw image pixels):
+    #   Left  cam: plants enter from the RIGHT edge → look-ahead = right columns
+    #   Right cam: plants enter from the LEFT  edge → look-ahead = left  columns
+    #
+    # Trampling zone  = bottom half  (where the wheel is, both cameras)
+    # Look-ahead zone = right half of top (left cam) / left half of top (right cam)
+    wheel_zone = raw[h // 2:, :]          # bottom half — wheel, both cameras
+
     if side == "left":
-        wheel_zone    = raw[:h // 2, :]    # top half  — wheel sits here
-        lookahead_zone = raw[h // 2:, :]   # bottom half — crops approaching
+        lookahead_zone = raw[:h // 2, w // 2:]   # top-right — plants entering
     else:
-        wheel_zone    = raw[h // 2:, :]    # bottom half — wheel sits here
-        lookahead_zone = raw[:h // 2, :]   # top half — crops approaching
+        lookahead_zone = raw[:h // 2, :w // 2]   # top-left  — plants entering
 
     def _zone_stats(zone):
         vi_map = _veg_index(zone, veg_index).astype(np.float32)
@@ -225,32 +234,24 @@ def _process_wheel_frame(raw: np.ndarray,
     exg_full = np.clip(2 * g_f - r_f - b_f, 0, 255).astype(np.uint8)
 
     # ── Wheel zone: bright lime-green ExG mask ────────────────────────────────
+    # Wheel zone overlay (bottom half, both cameras)
     zone_overlay = wheel_zone.copy()
     zone_overlay[wveg_mask > 0] = (0, 255, 60)
-    blended_zone = cv2.addWeighted(wheel_zone, 0.4, zone_overlay, 0.6, 0)
-    if side == "left":
-        display[:h // 2, :] = blended_zone
-    else:
-        display[h // 2:, :] = blended_zone
+    display[h // 2:, :] = cv2.addWeighted(wheel_zone, 0.4, zone_overlay, 0.6, 0)
 
-    # ── Look-ahead zone: orange ExG tint (crops approaching) ─────────────────
-    la_zone  = lookahead_zone.copy()
-    la_mask  = _exg_mask(lookahead_zone, exg_threshold)
-    la_overlay = la_zone.copy()
-    la_overlay[la_mask > 0] = (0, 140, 255)   # orange (BGR) = upcoming crops
-    blended_la = cv2.addWeighted(la_zone, 0.5, la_overlay, 0.5, 0)
-    if side == "left":
-        display[h // 2:, :] = blended_la
-    else:
-        display[:h // 2, :] = blended_la
+    # Top half: natural image — no overlay (shows crops not yet under wheel)
+
+    # ── Look-ahead zone: natural image, no overlay ───────────────────────────
+    # Crops here are not under the wheel yet — show them as-is so the
+    # operator can see the real scene without misleading colour cues.
 
     # ── Zone-boundary line ────────────────────────────────────────────────────
     mid_y = h // 2
     line_col = (0, 0, 200) if trampling else (0, 200, 255) if warning else (0, 220, 220)
     cv2.line(display, (0, mid_y), (w, mid_y), line_col, 2)
-    zone_y = mid_y - 5 if side == "left" else mid_y + 16
-    cv2.putText(display, "WHEEL ^" if side == "left" else "WHEEL v",
-                (8, zone_y), cv2.FONT_HERSHEY_SIMPLEX, 0.38, line_col, 1)
+    zone_y = mid_y + 16
+    cv2.putText(display, "WHEEL v", (8, zone_y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.38, line_col, 1)
 
     # ── Status bar ────────────────────────────────────────────────────────────
     fps_str = f"{fps:.1f}fps  " if fps > 0 else ""
@@ -261,8 +262,6 @@ def _process_wheel_frame(raw: np.ndarray,
     # ── Label + border ────────────────────────────────────────────────────────
     if trampling:
         label, text_col, border_col = "!! TRAMPLE", (0, 0, 220), (0, 0, 220)
-    elif warning:
-        label, text_col, border_col = "!! AHEAD",   (0, 120, 255), (0, 120, 255)
     else:
         label, text_col, border_col = "CLEAR",      (0, 220, 80),  (0, 200, 50)
 
