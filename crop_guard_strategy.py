@@ -113,7 +113,8 @@ def _process_wheel_frame(raw: np.ndarray,
                          side: str,          # "left" or "right"
                          exg_threshold: int,
                          exg_min_area: int,
-                         exg_density_pct: float = 8.0) -> tuple[bool, bool, np.ndarray]:
+                         exg_density_pct: float = 8.0,
+                         verbose: bool = True) -> tuple[bool, bool, np.ndarray]:
     """
     Analyse one wheel camera frame. No rotation applied — images shown as-is.
 
@@ -155,10 +156,11 @@ def _process_wheel_frame(raw: np.ndarray,
     wm, wmax, wp90, wpct, warea, wveg_mask, trampling = _zone_stats(wheel_zone)
     lm, lmax, lp90, lpct, larea, _,         warning   = _zone_stats(lookahead_zone)
 
-    log.info("%s wheel  | mean=%.1f p90=%.1f above=%.1f%% area=%d  trampling=%s",
-             side.upper(), wm, wp90, wpct, warea, trampling)
-    log.info("%s ahead  | mean=%.1f p90=%.1f above=%.1f%% area=%d  warning=%s",
-             side.upper(), lm, lp90, lpct, larea, warning)
+    if verbose:
+        log.info("%s wheel  | mean=%.1f p90=%.1f above=%.1f%% area=%d  trampling=%s",
+                 side.upper(), wm, wp90, wpct, warea, trampling)
+        log.info("%s ahead  | mean=%.1f p90=%.1f above=%.1f%% area=%d  warning=%s",
+                 side.upper(), lm, lp90, lpct, larea, warning)
 
     # ── Display: raw frame with overlays ─────────────────────────────────────
     display = raw.copy()
@@ -586,10 +588,12 @@ class CropGuardStrategy(NavigationStrategy):
                 lf = self._grab(self._left_cap)
                 rf = self._grab(self._right_cap)
 
+                both_ready = self._left_cap is not None and self._right_cap is not None
+
                 if lf is not None:
                     tl, wl, lvis = _process_wheel_frame(
                         lf, "left", self._exg_threshold, self._exg_min_area,
-                        self._exg_density_pct)
+                        self._exg_density_pct, verbose=both_ready)
                 else:
                     tl = wl = False
                     lvis = self._blank_vis("LEFT CAM MISSING")
@@ -597,7 +601,7 @@ class CropGuardStrategy(NavigationStrategy):
                 if rf is not None:
                     tr, wr, rvis = _process_wheel_frame(
                         rf, "right", self._exg_threshold, self._exg_min_area,
-                        self._exg_density_pct)
+                        self._exg_density_pct, verbose=both_ready)
                 else:
                     tr = wr = False
                     rvis = self._blank_vis("RIGHT CAM MISSING")
