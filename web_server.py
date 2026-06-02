@@ -205,22 +205,22 @@ _HTML = """<!DOCTYPE html>
         <!-- Row 1: navigation cameras -->
         <div class="video-box" style="position:relative;">
           <div class="label">&#x1F534; Live camera — click to add waypoints</div>
-          <img id="live-img" src="/video/realtime" style="width:100%;display:block;background:#000;">
+          <video id="live-img" autoplay playsinline style="width:100%;display:block;background:#000;"></video>
           <canvas id="waypoint-canvas" style="position:absolute;top:0;left:0;width:100%;height:100%;cursor:crosshair;"></canvas>
         </div>
         <div class="video-box" style="position:relative;">
           <div class="label">&#x1F9E0; Last query — with waypoints</div>
-          <img id="llm-img" src="/video/llm" style="width:100%;display:block;background:#000;">
+          <video id="llm-img" autoplay playsinline style="width:100%;display:block;background:#000;"></video>
           <canvas id="llm-canvas" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></canvas>
         </div>
         <!-- Row 2: wheel cameras -->
         <div class="video-box" style="position:relative;">
           <div class="label">&#x1F6DE; Left wheel camera</div>
-          <img id="left-wheel-img" src="/video/left_wheel" style="width:100%;display:block;background:#000;">
+          <video id="left-wheel-img" autoplay playsinline style="width:100%;display:block;background:#000;"></video>
         </div>
         <div class="video-box" style="position:relative;">
           <div class="label">&#x1F6DE; Right wheel camera</div>
-          <img id="right-wheel-img" src="/video/right_wheel" style="width:100%;display:block;background:#000;">
+          <video id="right-wheel-img" autoplay playsinline style="width:100%;display:block;background:#000;"></video>
         </div>
       </div>
 
@@ -521,6 +521,12 @@ _HTML = """<!DOCTYPE html>
     }
 
     document.addEventListener('DOMContentLoaded', () => {
+      // Start WebRTC for all four video streams
+      _startWebRTC('live-img',        'realtime');
+      _startWebRTC('llm-img',         'llm');
+      _startWebRTC('left-wheel-img',  'left_wheel');
+      _startWebRTC('right-wheel-img', 'right_wheel');
+
       const canvas = document.getElementById('waypoint-canvas');
       canvas.addEventListener('click', e => {
         const r   = canvas.getBoundingClientRect();
@@ -1065,13 +1071,19 @@ class WebServer:
         state = self._state
         if stream == "llm":
             def get_jpeg():
-                with state.lock: return state.llm_jpeg
+                with state._lock: return state.llm_jpeg
         elif stream == "down":
             def get_jpeg():
-                with state.lock: return state.down_jpeg
+                with state._lock: return state.down_jpeg
+        elif stream == "left_wheel":
+            def get_jpeg():
+                with state._lock: return state.left_wheel_jpeg
+        elif stream == "right_wheel":
+            def get_jpeg():
+                with state._lock: return state.right_wheel_jpeg
         else:
             def get_jpeg():
-                with state.lock: return state.raw_jpeg
+                with state._lock: return state.raw_jpeg
 
         track = JpegVideoTrack(get_jpeg, self._blank_jpeg)
         pc.addTrack(track)
