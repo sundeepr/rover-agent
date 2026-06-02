@@ -52,7 +52,6 @@ class WheelGuardStrategy(NavigationStrategy):
                  left_device              = 1,
                  right_device             = 2,
                  forward_vel:       int   = 10,
-                 drive_duty:        float = 0.4,
                  exg_threshold:     int   = 60,
                  exg_min_area:      int   = 500,
                  exg_density_pct:   float = 8.0,
@@ -66,9 +65,7 @@ class WheelGuardStrategy(NavigationStrategy):
         self._forward_vel     = forward_vel
         self._exg_threshold   = exg_threshold
         self._exg_min_area    = exg_min_area
-        self._drive_duty      = max(0.0, min(1.0, drive_duty))
         self._exg_density_pct = exg_density_pct
-        self._pulse_step      = 0   # counts _do_step calls for duty-cycle pulsing
         self._veg_index       = veg_index
         self._clahe           = clahe
         self._clahe_clip      = clahe_clip
@@ -132,29 +129,18 @@ class WheelGuardStrategy(NavigationStrategy):
         operator_active = (state.operator_control is not None
                            and state.operator_until > time.time())
 
-        self._pulse_step += 1
-        # Pulse period: 10 steps at 20 Hz = 0.5 s per full cycle.
-        # drive_duty=0.4 → drive 4 steps (200 ms), stop 6 steps (300 ms).
-        _PULSE_PERIOD = 10
-        in_drive_phase = (self._pulse_step % _PULSE_PERIOD) < int(self._drive_duty * _PULSE_PERIOD)
-
         if rover_ctrl and not paused and not operator_active:
             if tramp_l and tramp_r:
                 rover_ctrl.drive_raw(0, 0x8000)
                 log.warning("Step %d | BOTH trampling — STOP", step)
-                self._pulse_step = 0   # reset pulse so next clear starts a fresh drive phase
             elif tramp_l:
                 rover_ctrl.drive_raw(_CORRECT_VEL, _CORRECT_RADIUS_LEFT)
                 log.warning("Step %d | LEFT trampling — steer RIGHT", step)
-                self._pulse_step = 0
             elif tramp_r:
                 rover_ctrl.drive_raw(_CORRECT_VEL, _CORRECT_RADIUS_RIGHT)
                 log.warning("Step %d | RIGHT trampling — steer LEFT", step)
-                self._pulse_step = 0
-            elif in_drive_phase:
-                rover_ctrl.drive_raw(self._forward_vel, 0x8000)
             else:
-                rover_ctrl.drive_raw(0, 0x8000)   # stop phase of pulse
+                rover_ctrl.drive_raw(self._forward_vel, 0x8000)
 
         # Update result for web UI
         tramp_str = (("L" if tramp_l else "") + ("R" if tramp_r else "")) or "clear"

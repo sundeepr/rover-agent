@@ -69,7 +69,7 @@ _MAX_VELOCITY_REF_MM_S = 200
 # move the rover.  Any non-zero commanded velocity is remapped so the output
 # never falls below this value.  Zero velocity always sends 0%.
 # Measure: lowest % at which the rover visibly moves on flat ground.
-_MOTOR_DEADBAND_PCT = 10
+_MOTOR_DEADBAND_PCT = 8
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
