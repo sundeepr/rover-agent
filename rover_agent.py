@@ -585,6 +585,37 @@ def main():
         sys.exit(0)
     signal.signal(signal.SIGTERM, _on_sigterm)
 
+    # WebSocket control server — direct joystick channel for browser / Android
+    if args.control_port:
+        from control_server import ControlServer
+        ControlServer(state, rover_ctrl, port=args.control_port).start()
+        log.info("WS control     : ws://0.0.0.0:%d", args.control_port)
+
+    # Agent loop + publisher start immediately so all camera feeds appear in
+    # the browser before the user confirms navigation.  goal_ready gates motor
+    # commands — these threads are safe to run before Enter is pressed.
+    threading.Thread(
+        target=agent_loop,
+        args=(state, strategy, args.device, args.interval, rover_ctrl),
+        daemon=True,
+    ).start()
+
+    if hasattr(strategy, "update_down_frame") and args.down_device is not None:
+        log.info("Down-camera    : device %s", args.down_device)
+        threading.Thread(
+            target=_down_camera_loop,
+            args=(strategy, args.down_device, state),
+            daemon=True,
+        ).start()
+
+    publisher = AgentPublisher(args.web_server)
+    threading.Thread(
+        target=publisher.run,
+        args=(state, rover_ctrl, strategy),
+        daemon=True,
+    ).start()
+    log.info("Agent running — publishing to %s", args.web_server)
+
     # ── Wait for all cameras, then ask user to confirm before navigating ──────
     if hasattr(strategy, "cameras_ready") and args.goal:
         log.info("Waiting for wheel cameras to initialise (up to 60 s)…")
@@ -613,7 +644,6 @@ def main():
         print(f"  Goal         : {args.goal}")
         print("=" * 60)
         try:
-            # Flush any buffered newlines (e.g. Enter key used to launch script)
             import termios
             termios.tcflush(sys.stdin, termios.TCIFLUSH)
         except Exception:
@@ -626,40 +656,7 @@ def main():
         print("Starting navigation.\n")
         state.goal_ready.set()
     elif args.goal and args.strategy not in _NO_GOAL_STRATEGIES:
-        # Strategies without cameras_ready start immediately
         state.goal_ready.set()
-
-    # WebSocket control server — direct joystick channel for browser / Android
-    if args.control_port:
-        from control_server import ControlServer
-        ControlServer(state, rover_ctrl, port=args.control_port).start()
-        log.info("WS control     : ws://0.0.0.0:%d", args.control_port)
-
-    # Agent loop (front camera + inference dispatch)
-    threading.Thread(
-        target=agent_loop,
-        args=(state, strategy, args.device, args.interval, rover_ctrl),
-        daemon=True,
-    ).start()
-
-    # Down-camera loop — only when strategy supports it AND device was specified
-    if hasattr(strategy, "update_down_frame") and args.down_device is not None:
-        log.info("Down-camera    : device %s", args.down_device)
-        threading.Thread(
-            target=_down_camera_loop,
-            args=(strategy, args.down_device, state),
-            daemon=True,
-        ).start()
-
-    # Publisher loop (reads AgentState, POSTs to web server)
-    publisher = AgentPublisher(args.web_server)
-    threading.Thread(
-        target=publisher.run,
-        args=(state, rover_ctrl, strategy),
-        daemon=True,
-    ).start()
-
-    log.info("Agent running — publishing to %s", args.web_server)
 
     try:
         while True:
