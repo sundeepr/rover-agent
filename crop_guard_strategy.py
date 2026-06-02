@@ -191,10 +191,10 @@ def _process_wheel_frame(raw: np.ndarray,
     lm, lmax, lp90, lpct, larea, _,         warning   = _zone_stats(lookahead_zone)
 
     if verbose:
-        log.info("%s wheel  | mean=%.1f p90=%.1f above=%.1f%% area=%d  trampling=%s",
-                 side.upper(), wm, wp90, wpct, warea, trampling)
-        log.info("%s ahead  | mean=%.1f p90=%.1f above=%.1f%% area=%d  warning=%s",
-                 side.upper(), lm, lp90, lpct, larea, warning)
+        log.debug("%s wheel  | mean=%.1f p90=%.1f above=%.1f%% area=%d  trampling=%s",
+                  side.upper(), wm, wp90, wpct, warea, trampling)
+        log.debug("%s ahead  | mean=%.1f p90=%.1f above=%.1f%% area=%d  warning=%s",
+                  side.upper(), lm, lp90, lpct, larea, warning)
 
     # ── Display: raw frame with overlays ─────────────────────────────────────
     display = raw.copy()

@@ -34,6 +34,10 @@ try:
     from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
     from aiortc.contrib.media import MediaBlackhole
     _WEBRTC_AVAILABLE = True
+    # Suppress noisy ICE candidate-pair state-change logs from aiortc/aioice
+    logging.getLogger("aioice").setLevel(logging.WARNING)
+    logging.getLogger("aiortc").setLevel(logging.WARNING)
+    logging.getLogger("aiortc.rtcdtlstransport").setLevel(logging.WARNING)
 except ImportError:
     _WEBRTC_AVAILABLE = False
     log.warning("aiortc not installed — WebRTC disabled, MJPEG fallback active. "
@@ -205,22 +209,22 @@ _HTML = """<!DOCTYPE html>
         <!-- Row 1: navigation cameras -->
         <div class="video-box" style="position:relative;">
           <div class="label">&#x1F534; Live camera — click to add waypoints</div>
-          <video id="live-img" autoplay playsinline style="width:100%;display:block;background:#000;"></video>
+          <video id="live-img" autoplay playsinline muted style="width:100%;display:block;background:#000;"></video>
           <canvas id="waypoint-canvas" style="position:absolute;top:0;left:0;width:100%;height:100%;cursor:crosshair;"></canvas>
         </div>
         <div class="video-box" style="position:relative;">
           <div class="label">&#x1F9E0; Last query — with waypoints</div>
-          <video id="llm-img" autoplay playsinline style="width:100%;display:block;background:#000;"></video>
+          <video id="llm-img" autoplay playsinline muted style="width:100%;display:block;background:#000;"></video>
           <canvas id="llm-canvas" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></canvas>
         </div>
         <!-- Row 2: wheel cameras -->
         <div class="video-box" style="position:relative;">
           <div class="label">&#x1F6DE; Left wheel camera</div>
-          <video id="left-wheel-img" autoplay playsinline style="width:100%;display:block;background:#000;"></video>
+          <video id="left-wheel-img" autoplay playsinline muted style="width:100%;display:block;background:#000;"></video>
         </div>
         <div class="video-box" style="position:relative;">
           <div class="label">&#x1F6DE; Right wheel camera</div>
-          <video id="right-wheel-img" autoplay playsinline style="width:100%;display:block;background:#000;"></video>
+          <video id="right-wheel-img" autoplay playsinline muted style="width:100%;display:block;background:#000;"></video>
         </div>
       </div>
 
