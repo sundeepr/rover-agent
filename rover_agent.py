@@ -441,6 +441,7 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
             left_device       = args.left_cam,
             right_device      = args.right_cam,
             forward_vel       = args.crop_guard_vel,
+            drive_duty        = args.drive_duty,
             exg_threshold     = args.exg_threshold,
             exg_min_area      = args.exg_min_area,
             exg_density_pct   = args.exg_density_pct,
@@ -517,6 +518,11 @@ def main():
     parser.add_argument("--right-cam",  type=_device, default=2,
                         metavar="INDEX|PATH",
                         help="Right wheel camera index or path (crop_guard, default 2)")
+    parser.add_argument("--drive-duty", type=float, default=0.4,
+                        metavar="0-1",
+                        help="Fraction of time spent driving vs stopped (pulse drive). "
+                             "0.4 = drive 200ms, stop 300ms per 0.5s cycle. "
+                             "Reduces effective speed without losing torque (default 0.4)")
     parser.add_argument("--crop-guard-vel", type=int, default=10,
                         metavar="MM_S",
                         help="Navigation speed (mm/s) in crop_guard mode (default 10). "
