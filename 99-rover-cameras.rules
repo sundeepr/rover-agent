@@ -4,8 +4,8 @@
 #
 # Physical layout:
 #   usb-3610000.usb-1.1  →  /dev/video4  →  front camera (5MP, unique VID:PID 32e4:0335)
-#   usb-3610000.usb-2.1  →  /dev/video0  →  left  wheel camera (Logitech C270)
-#   usb-3610000.usb-2.3  →  /dev/video2  →  right wheel camera (Logitech C270)
+#   usb1/1-2.1           →  /dev/video0  →  left  wheel camera (Logitech C270)
+#   usb1/1-2.3           →  /dev/video2  →  right wheel camera (Logitech C270)
 #
 # Logitech C270 cameras are video-only (no audio interface) so no
 # snd-usb-audio unbind is needed.
@@ -18,15 +18,15 @@
 #   ls -la /dev/cam-*
 #   # expected: cam-front→video4  cam-left→video0  cam-right→video2
 
-# ── Left wheel camera (C270 on USB port 2.1) ─────────────────────────────────
+# ── Left wheel camera (C270 on USB port 1-2.1) ───────────────────────────────
 SUBSYSTEM=="video4linux", \
-  KERNELS=="2-2.1:1.0", \
+  KERNELS=="1-2.1:1.0", \
   ATTR{index}=="0", \
   SYMLINK+="cam-left", MODE="0666", TAG+="systemd"
 
-# ── Right wheel camera (C270 on USB port 2.3) ────────────────────────────────
+# ── Right wheel camera (C270 on USB port 1-2.3) ───────────────────────────────
 SUBSYSTEM=="video4linux", \
-  KERNELS=="2-2.3:1.0", \
+  KERNELS=="1-2.3:1.0", \
   ATTR{index}=="0", \
   SYMLINK+="cam-right", MODE="0666", TAG+="systemd"
 
