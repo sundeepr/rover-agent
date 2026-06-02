@@ -114,7 +114,8 @@ def _process_wheel_frame(raw: np.ndarray,
                          exg_threshold: int,
                          exg_min_area: int,
                          exg_density_pct: float = 8.0,
-                         verbose: bool = True) -> tuple[bool, bool, np.ndarray]:
+                         verbose: bool = True,
+                         fps: float = 0.0) -> tuple[bool, bool, np.ndarray]:
     """
     Analyse one wheel camera frame. No rotation applied — images shown as-is.
 
@@ -203,8 +204,9 @@ def _process_wheel_frame(raw: np.ndarray,
                 (8, zone_y), cv2.FONT_HERSHEY_SIMPLEX, 0.38, line_col, 1)
 
     # ── Status bar ────────────────────────────────────────────────────────────
+    fps_str = f"{fps:.1f}fps  " if fps > 0 else ""
     cv2.putText(display,
-                f"wheel area={warea} p90={wp90:.0f}  ahead area={larea} p90={lp90:.0f}  thr={exg_threshold}",
+                f"{fps_str}wheel area={warea} p90={wp90:.0f}  ahead area={larea} p90={lp90:.0f}  thr={exg_threshold}",
                 (8, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.37, (220, 220, 0), 1)
 
     # ── Label + border ────────────────────────────────────────────────────────
@@ -590,10 +592,21 @@ class CropGuardStrategy(NavigationStrategy):
 
                 both_ready = self._left_cap is not None and self._right_cap is not None
 
+                # Rolling FPS measurement (per camera)
+                now_fps = time.time()
+                if not hasattr(self, "_fps_times"):
+                    self._fps_times = {"left": [], "right": []}
+                for side in ("left", "right"):
+                    self._fps_times[side].append(now_fps)
+                    self._fps_times[side] = [t for t in self._fps_times[side]
+                                             if now_fps - t <= 2.0]
+                fps_l = len(self._fps_times["left"])  / 2.0
+                fps_r = len(self._fps_times["right"]) / 2.0
+
                 if lf is not None:
                     tl, wl, lvis = _process_wheel_frame(
                         lf, "left", self._exg_threshold, self._exg_min_area,
-                        self._exg_density_pct, verbose=both_ready)
+                        self._exg_density_pct, verbose=both_ready, fps=fps_l)
                 else:
                     tl = wl = False
                     lvis = self._blank_vis("LEFT CAM MISSING")
@@ -601,7 +614,7 @@ class CropGuardStrategy(NavigationStrategy):
                 if rf is not None:
                     tr, wr, rvis = _process_wheel_frame(
                         rf, "right", self._exg_threshold, self._exg_min_area,
-                        self._exg_density_pct, verbose=both_ready)
+                        self._exg_density_pct, verbose=both_ready, fps=fps_r)
                 else:
                     tr = wr = False
                     rvis = self._blank_vis("RIGHT CAM MISSING")
