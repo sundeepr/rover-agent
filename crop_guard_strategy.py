@@ -311,6 +311,15 @@ class CropGuardStrategy(NavigationStrategy):
     def name(self) -> str:
         return "crop_guard"
 
+    def cameras_ready(self) -> tuple[bool, bool, bool]:
+        """Return (front_ok, left_ok, right_ok) camera readiness.
+
+        The front camera is always managed externally (rover_agent.py opens it),
+        so we only track the two wheel cameras here.  front_ok is always True
+        from this strategy's perspective.
+        """
+        return True, self._left_cap is not None, self._right_cap is not None
+
     def set_goal(self, goal: str) -> None:
         self._goal = goal
         asyncio.run_coroutine_threadsafe(

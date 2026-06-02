@@ -563,8 +563,8 @@ def main():
         strategy.set_goal(args.goal)
         with state.result_lock:
             state.goal = args.goal
-        state.goal_ready.set()
         log.info("CLI goal applied: '%s'", args.goal)
+        # goal_ready is set below after camera check + user confirmation
     elif args.strategy in _NO_GOAL_STRATEGIES:
         # These strategies don't need a language goal to start.
         state.goal_ready.set()
@@ -584,6 +584,44 @@ def main():
     def _on_sigterm(signum, frame):
         sys.exit(0)
     signal.signal(signal.SIGTERM, _on_sigterm)
+
+    # ── Wait for all cameras, then ask user to confirm before navigating ──────
+    if hasattr(strategy, "cameras_ready") and args.goal:
+        log.info("Waiting for wheel cameras to initialise (up to 60 s)…")
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            front_ok, left_ok, right_ok = strategy.cameras_ready()
+            status = (f"  front={'OK' if front_ok else 'WAIT'}  "
+                      f"left={'OK' if left_ok else 'WAIT'}  "
+                      f"right={'OK' if right_ok else 'WAIT'}")
+            if left_ok and right_ok:
+                log.info("All wheel cameras ready: %s", status)
+                break
+            log.info("Camera status: %s", status)
+            time.sleep(1.0)
+        else:
+            front_ok, left_ok, right_ok = strategy.cameras_ready()
+            log.warning("Camera init timeout — left=%s right=%s — continuing anyway",
+                        "OK" if left_ok else "MISSING",
+                        "OK" if right_ok else "MISSING")
+
+        print("\n" + "=" * 60)
+        front_ok, left_ok, right_ok = strategy.cameras_ready()
+        print(f"  Front camera : {'✓ ready' if front_ok else '✗ missing'}")
+        print(f"  Left  wheel  : {'✓ ready' if left_ok  else '✗ missing'}")
+        print(f"  Right wheel  : {'✓ ready' if right_ok else '✗ missing'}")
+        print(f"  Goal         : {args.goal}")
+        print("=" * 60)
+        try:
+            input("  Press Enter to start navigation (Ctrl-C to abort)… ")
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted.")
+            return
+        print("Starting navigation.\n")
+        state.goal_ready.set()
+    elif args.goal and args.strategy not in _NO_GOAL_STRATEGIES:
+        # Strategies without cameras_ready start immediately
+        state.goal_ready.set()
 
     # WebSocket control server — direct joystick channel for browser / Android
     if args.control_port:
