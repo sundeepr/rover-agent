@@ -86,15 +86,48 @@ class _CloudState(Enum):
     NAVIGATING   = auto()
 
 
-# ── ExG helpers ───────────────────────────────────────────────────────────────
+# ── Vegetation index helpers ──────────────────────────────────────────────────
+#
+# ExG       = 2G − R − B                   (absolute, fails in bright sun)
+# ExGNorm   = (2G − R − B) / (R+G+B+1)    (normalised, threshold ~0.05–0.15)
+# NGRDI     = (G − R) / (G + R + 1)        (ratio, robust in bright sun)
+# VARI      = (G − R) / (G + R − B + 1)    (most discriminative outdoors)
+#
+# NGRDI and VARI return float32 in roughly [−1, +1]; thresholds are fractions
+# scaled to 0–255 internally so the rest of the pipeline is unchanged.
 
-def _exg_mask(frame_bgr: np.ndarray, threshold: int = 20) -> np.ndarray:
-    """Return binary ExG mask: ExG = 2G − R − B > threshold."""
-    b = frame_bgr[:, :, 0].astype(np.int16)
-    g = frame_bgr[:, :, 1].astype(np.int16)
-    r = frame_bgr[:, :, 2].astype(np.int16)
-    exg = (2 * g - r - b).clip(0, 255).astype(np.uint8)
-    _, mask = cv2.threshold(exg, threshold, 255, cv2.THRESH_BINARY)
+def _veg_index(frame_bgr: np.ndarray, index: str = "exg") -> np.ndarray:
+    """
+    Compute a vegetation index and return it scaled to uint8 [0, 255].
+    Values ≤ 0 (bare soil / sky) are clipped to 0.
+    """
+    b = frame_bgr[:, :, 0].astype(np.float32)
+    g = frame_bgr[:, :, 1].astype(np.float32)
+    r = frame_bgr[:, :, 2].astype(np.float32)
+
+    if index == "ngrdi":
+        denom = g + r + 1e-6
+        vi = (g - r) / denom          # range ≈ [−1, +1]
+        vi = (vi * 255).clip(0, 255)  # scale: threshold of 60 ≈ NGRDI > 0.24
+    elif index == "vari":
+        denom = g + r - b + 1e-6
+        vi = (g - r) / denom
+        vi = (vi * 255).clip(0, 255)
+    elif index == "exgnorm":
+        denom = r + g + b + 1e-6
+        vi = (2 * g - r - b) / denom  # range ≈ [−1, +1]
+        vi = (vi * 255).clip(0, 255)
+    else:  # "exg" — original absolute index
+        vi = (2 * g - r - b).clip(0, 255)
+
+    return vi.astype(np.uint8)
+
+
+def _exg_mask(frame_bgr: np.ndarray, threshold: int = 20,
+              index: str = "exg") -> np.ndarray:
+    """Return binary vegetation mask using the chosen index."""
+    vi = _veg_index(frame_bgr, index)
+    _, mask = cv2.threshold(vi, threshold, 255, cv2.THRESH_BINARY)
     return mask
 
 
@@ -115,7 +148,8 @@ def _process_wheel_frame(raw: np.ndarray,
                          exg_min_area: int,
                          exg_density_pct: float = 8.0,
                          verbose: bool = True,
-                         fps: float = 0.0) -> tuple[bool, bool, np.ndarray]:
+                         fps: float = 0.0,
+                         veg_index: str = "exg") -> tuple[bool, bool, np.ndarray]:
     """
     Analyse one wheel camera frame. No rotation applied — images shown as-is.
 
@@ -143,14 +177,13 @@ def _process_wheel_frame(raw: np.ndarray,
         lookahead_zone = raw[:h // 2, :]   # top half — crops approaching
 
     def _zone_stats(zone):
-        b, g, r  = cv2.split(zone.astype(np.int16))
-        exg_raw  = (2 * g - r - b)
-        mean     = float(exg_raw.mean())
-        maxv     = int(exg_raw.max())
-        p90      = float(np.percentile(exg_raw, 90))
-        pct      = float((exg_raw > exg_threshold).mean() * 100)
-        mask     = _exg_mask(zone, exg_threshold)
-        area     = _vegetation_area(mask, exg_min_area)
+        vi_map = _veg_index(zone, veg_index).astype(np.float32)
+        mean   = float(vi_map.mean())
+        maxv   = int(vi_map.max())
+        p90    = float(np.percentile(vi_map, 90))
+        pct    = float((vi_map > exg_threshold).mean() * 100)
+        mask   = _exg_mask(zone, exg_threshold, veg_index)
+        area   = _vegetation_area(mask, exg_min_area)
         detected = area > 0 and pct >= exg_density_pct
         return mean, maxv, p90, pct, area, mask, detected
 
@@ -206,7 +239,7 @@ def _process_wheel_frame(raw: np.ndarray,
     # ── Status bar ────────────────────────────────────────────────────────────
     fps_str = f"{fps:.1f}fps  " if fps > 0 else ""
     cv2.putText(display,
-                f"{fps_str}wheel area={warea} p90={wp90:.0f}  ahead area={larea} p90={lp90:.0f}  thr={exg_threshold}",
+                f"{fps_str}{veg_index} wheel={warea} p90={wp90:.0f}  ahead={larea} p90={lp90:.0f}  thr={exg_threshold}",
                 (8, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.37, (220, 220, 0), 1)
 
     # ── Label + border ────────────────────────────────────────────────────────
@@ -246,6 +279,7 @@ class CropGuardStrategy(NavigationStrategy):
                  exg_threshold:      int  = 60,
                  exg_min_area:       int  = 500,
                  exg_density_pct:    float = 8.0,
+                 veg_index:          str   = "ngrdi",
                  cloud_interval_s:   float = _CLOUD_INTERVAL_S,
                  camera_calibration: dict | None = None):
 
@@ -259,6 +293,7 @@ class CropGuardStrategy(NavigationStrategy):
         self._exg_threshold     = exg_threshold
         self._exg_min_area      = exg_min_area
         self._exg_density_pct   = exg_density_pct
+        self._veg_index         = veg_index
         self._cloud_interval_s  = cloud_interval_s
         self._calib             = camera_calibration or {}
 
@@ -606,7 +641,8 @@ class CropGuardStrategy(NavigationStrategy):
                 if lf is not None:
                     tl, wl, lvis = _process_wheel_frame(
                         lf, "left", self._exg_threshold, self._exg_min_area,
-                        self._exg_density_pct, verbose=both_ready, fps=fps_l)
+                        self._exg_density_pct, verbose=both_ready, fps=fps_l,
+                        veg_index=self._veg_index)
                 else:
                     tl = wl = False
                     lvis = self._blank_vis("LEFT CAM MISSING")
@@ -614,7 +650,8 @@ class CropGuardStrategy(NavigationStrategy):
                 if rf is not None:
                     tr, wr, rvis = _process_wheel_frame(
                         rf, "right", self._exg_threshold, self._exg_min_area,
-                        self._exg_density_pct, verbose=both_ready, fps=fps_r)
+                        self._exg_density_pct, verbose=both_ready, fps=fps_r,
+                        veg_index=self._veg_index)
                 else:
                     tr = wr = False
                     rvis = self._blank_vis("RIGHT CAM MISSING")

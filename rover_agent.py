@@ -418,6 +418,7 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
             exg_threshold       = args.exg_threshold,
             exg_min_area        = args.exg_min_area,
             exg_density_pct     = args.exg_density_pct,
+            veg_index           = args.veg_index,
             camera_calibration  = load_camera_calibration(args.camera_calibration),
         )
     if name == "wheel_guard":
@@ -429,6 +430,7 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
             exg_threshold     = args.exg_threshold,
             exg_min_area      = args.exg_min_area,
             exg_density_pct   = args.exg_density_pct,
+            veg_index         = args.veg_index,
         )
     if name == "omnivla_full":
         from omnivla_full_strategy import OmniVLAFullStrategy
@@ -509,6 +511,11 @@ def main():
     parser.add_argument("--exg-min-area",  type=int, default=500,
                         metavar="PX",
                         help="Min vegetation blob area in pixels (default 500)")
+    parser.add_argument("--veg-index", type=str, default="ngrdi",
+                        choices=["exg", "exgnorm", "ngrdi", "vari"],
+                        help="Vegetation index for wheel cameras. "
+                             "ngrdi/vari are ratio-based and work better in "
+                             "bright sunlight where exg fails (default: ngrdi)")
     parser.add_argument("--exg-density-pct", type=float, default=8.0,
                         metavar="PCT",
                         help="Min %% of wheel-zone pixels above ExG threshold to "
