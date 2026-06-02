@@ -1,21 +1,14 @@
 # /etc/udev/rules.d/99-rover-cameras.rules
 #
-# Two things:
-# 1. Stable /dev/cam-* symlinks matched by physical USB port (not serial,
-#    since both HD cameras share VID:PID:serial 349c:2317:20181212000000).
-# 2. Unbind snd-usb-audio from the HD wheel cameras.
+# Stable /dev/cam-* symlinks matched by physical USB port.
 #
-#    These cameras are USB video+audio composite devices.  When two are
-#    connected simultaneously, the combined isochronous bandwidth of
-#    2x video + 2x audio overwhelms the Tegra xHCI buffer:
-#      "buffer overrun event for slot N ep 4 on endpoint"
-#    Unbinding the audio interface leaves only video isochronous transfers
-#    running and stops the overruns.
+# Physical layout:
+#   usb-3610000.usb-1.1  →  /dev/video4  →  front camera (5MP, unique VID:PID 32e4:0335)
+#   usb-3610000.usb-2.1  →  /dev/video0  →  left  wheel camera (Logitech C270)
+#   usb-3610000.usb-2.3  →  /dev/video2  →  right wheel camera (Logitech C270)
 #
-# Physical layout (update KERNELS if you replug to different ports):
-#   usb1/1-1/1-1.1   →  /dev/video4  →  left  wheel camera (HD)
-#   usb1/1-2/1-2.4   →  /dev/video2  →  right wheel camera (HD)
-#   usb2/.../2.3     →  /dev/video0  →  front camera (5MP, unique VID:PID)
+# Logitech C270 cameras are video-only (no audio interface) so no
+# snd-usb-audio unbind is needed.
 #
 # Install:
 #   sudo cp 99-rover-cameras.rules /etc/udev/rules.d/
@@ -23,35 +16,17 @@
 #
 # Verify symlinks:
 #   ls -la /dev/cam-*
-#
-# Verify audio unbound (should show nothing):
-#   ls /sys/bus/usb/drivers/snd-usb-audio/ | grep "1-1.1\|1-2.4"
+#   # expected: cam-front→video4  cam-left→video0  cam-right→video2
 
-# ── Disable audio on both HD wheel cameras ────────────────────────────────────
-# These cameras are USB video+audio composites. Two simultaneous audio
-# isochronous streams cause xHCI buffer overruns on the Tegra controller:
-#   "buffer overrun event for slot N ep 4 on endpoint"
-# We unbind snd-usb-audio as soon as it binds to each audio interface.
-# ACTION=="bind" fires after the driver is already attached, so there is
-# no race condition — %k is the interface name (e.g. 1-1.1:1.2).
-
-ACTION=="bind", SUBSYSTEM=="usb", DRIVER=="snd-usb-audio", \
-  KERNELS=="1-1.1", \
-  RUN+="/bin/sh -c 'echo %k > /sys/bus/usb/drivers/snd-usb-audio/unbind 2>/dev/null || true'"
-
-ACTION=="bind", SUBSYSTEM=="usb", DRIVER=="snd-usb-audio", \
-  KERNELS=="1-2.4", \
-  RUN+="/bin/sh -c 'echo %k > /sys/bus/usb/drivers/snd-usb-audio/unbind 2>/dev/null || true'"
-
-# ── Left wheel camera symlink (capture node only, index 0) ───────────────────
+# ── Left wheel camera (C270 on USB port 2.1) ─────────────────────────────────
 SUBSYSTEM=="video4linux", \
-  KERNELS=="1-1.1:1.0", \
+  KERNELS=="2-2.1:1.0", \
   ATTR{index}=="0", \
   SYMLINK+="cam-left", MODE="0666", TAG+="systemd"
 
-# ── Right wheel camera symlink (capture node only, index 0) ──────────────────
+# ── Right wheel camera (C270 on USB port 2.3) ────────────────────────────────
 SUBSYSTEM=="video4linux", \
-  KERNELS=="1-2.4:1.0", \
+  KERNELS=="2-2.3:1.0", \
   ATTR{index}=="0", \
   SYMLINK+="cam-right", MODE="0666", TAG+="systemd"
 
