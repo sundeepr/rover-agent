@@ -381,6 +381,16 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
             exg_density_pct     = args.exg_density_pct,
             camera_calibration  = load_camera_calibration(args.camera_calibration),
         )
+    if name == "wheel_guard":
+        from wheel_guard_strategy import WheelGuardStrategy
+        return WheelGuardStrategy(
+            left_device       = args.left_cam,
+            right_device      = args.right_cam,
+            forward_vel       = args.crop_guard_vel,
+            exg_threshold     = args.exg_threshold,
+            exg_min_area      = args.exg_min_area,
+            exg_density_pct   = args.exg_density_pct,
+        )
     if name == "omnivla_full":
         from omnivla_full_strategy import OmniVLAFullStrategy
         _geo = load_geometry(getattr(args, "rover_geometry", None))
@@ -558,7 +568,8 @@ def main():
 
     # If a goal was given on the CLI, apply it immediately so the agent
     # starts navigating without waiting for web chat input.
-    _NO_GOAL_STRATEGIES = ("line_follow", "plant_center", "boundary_guard", "teleop")
+    _NO_GOAL_STRATEGIES = ("line_follow", "plant_center", "boundary_guard", "teleop",
+                           "wheel_guard")
     if args.goal and args.strategy not in _NO_GOAL_STRATEGIES:
         strategy.set_goal(args.goal)
         with state.result_lock:
