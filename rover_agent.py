@@ -419,6 +419,8 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
             exg_min_area        = args.exg_min_area,
             exg_density_pct     = args.exg_density_pct,
             veg_index           = args.veg_index,
+            clahe               = args.clahe,
+            clahe_clip          = args.clahe_clip,
             camera_calibration  = load_camera_calibration(args.camera_calibration),
         )
     if name == "wheel_guard":
@@ -431,6 +433,8 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
             exg_min_area      = args.exg_min_area,
             exg_density_pct   = args.exg_density_pct,
             veg_index         = args.veg_index,
+            clahe             = args.clahe,
+            clahe_clip        = args.clahe_clip,
         )
     if name == "omnivla_full":
         from omnivla_full_strategy import OmniVLAFullStrategy
@@ -511,6 +515,12 @@ def main():
     parser.add_argument("--exg-min-area",  type=int, default=500,
                         metavar="PX",
                         help="Min vegetation blob area in pixels (default 500)")
+    parser.add_argument("--clahe", action="store_true",
+                        help="Apply CLAHE contrast enhancement to wheel camera frames "
+                             "before vegetation detection — helps in bright sunlight")
+    parser.add_argument("--clahe-clip", type=float, default=2.0,
+                        metavar="CLIP",
+                        help="CLAHE clip limit (default 2.0; higher = more contrast)")
     parser.add_argument("--veg-index", type=str, default="ngrdi",
                         choices=["exg", "exgnorm", "ngrdi", "vari"],
                         help="Vegetation index for wheel cameras. "

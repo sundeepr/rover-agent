@@ -55,7 +55,9 @@ class WheelGuardStrategy(NavigationStrategy):
                  exg_threshold:     int   = 60,
                  exg_min_area:      int   = 500,
                  exg_density_pct:   float = 8.0,
-                 veg_index:         str   = "ngrdi"):
+                 veg_index:         str   = "ngrdi",
+                 clahe:             bool  = False,
+                 clahe_clip:        float = 2.0):
 
         self._left_device     = left_device
         self._right_device    = right_device
@@ -64,6 +66,8 @@ class WheelGuardStrategy(NavigationStrategy):
         self._exg_min_area    = exg_min_area
         self._exg_density_pct = exg_density_pct
         self._veg_index       = veg_index
+        self._clahe           = clahe
+        self._clahe_clip      = clahe_clip
 
         self._trample_left  = False
         self._trample_right = False
@@ -178,7 +182,8 @@ class WheelGuardStrategy(NavigationStrategy):
                     tl, wl, lvis = _process_wheel_frame(
                         lf, "left", self._exg_threshold, self._exg_min_area,
                         self._exg_density_pct, verbose=both_ready, fps=fps_l,
-                        veg_index=self._veg_index)
+                        veg_index=self._veg_index,
+                        clahe=self._clahe, clahe_clip=self._clahe_clip)
                 else:
                     tl = wl = False
                     lvis = self._blank_vis("LEFT CAM MISSING")
@@ -187,7 +192,8 @@ class WheelGuardStrategy(NavigationStrategy):
                     tr, wr, rvis = _process_wheel_frame(
                         rf, "right", self._exg_threshold, self._exg_min_area,
                         self._exg_density_pct, verbose=both_ready, fps=fps_r,
-                        veg_index=self._veg_index)
+                        veg_index=self._veg_index,
+                        clahe=self._clahe, clahe_clip=self._clahe_clip)
                 else:
                     tr = wr = False
                     rvis = self._blank_vis("RIGHT CAM MISSING")

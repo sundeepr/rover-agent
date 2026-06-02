@@ -322,14 +322,56 @@ _HTML = """<!DOCTYPE html>
 
   <script>
     // ── WebRTC video setup ────────────────────────────────────────────────────
+    const _pcs = {};          // elementId → RTCPeerConnection
+    const _fpsLabels = {};    // elementId → overlay <span>
+
+    function _makeFpsOverlay(videoBox, elementId) {
+      const span = document.createElement('span');
+      span.style.cssText = 'position:absolute;top:4px;right:6px;' +
+        'background:rgba(0,0,0,0.55);color:#0f0;font:bold 11px monospace;' +
+        'padding:1px 5px;border-radius:3px;pointer-events:none;z-index:10;';
+      span.textContent = 'WebRTC…';
+      videoBox.style.position = 'relative';
+      videoBox.appendChild(span);
+      _fpsLabels[elementId] = span;
+    }
+
+    async function _pollStats(elementId) {
+      const pc  = _pcs[elementId];
+      const lbl = _fpsLabels[elementId];
+      if (!pc || !lbl) return;
+      try {
+        const stats = await pc.getStats();
+        stats.forEach(r => {
+          if (r.type === 'inbound-rtp' && r.kind === 'video') {
+            const fps    = r.framesPerSecond != null ? r.framesPerSecond.toFixed(1) : '?';
+            const kbps   = r.bytesReceived != null && r._prevBytes != null
+              ? (((r.bytesReceived - r._prevBytes) * 8) / 1000).toFixed(0)
+              : null;
+            lbl.textContent = `WebRTC ${fps} fps`;
+            lbl.style.color = parseFloat(fps) > 0 ? '#0f0' : '#f80';
+          }
+        });
+      } catch(_) {}
+    }
+
     async function _startWebRTC(elementId, stream) {
       const pc = new RTCPeerConnection({
         iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
       });
+      _pcs[elementId] = pc;
+
+      // Create fps overlay on the parent video-box
+      const el = document.getElementById(elementId);
+      if (el) _makeFpsOverlay(el.parentElement, elementId);
 
       pc.ontrack = e => {
         const el = document.getElementById(elementId);
-        if (el && e.streams[0]) el.srcObject = e.streams[0];
+        if (el && e.streams[0]) {
+          el.srcObject = e.streams[0];
+          // Start polling stats once track arrives
+          setInterval(() => _pollStats(elementId), 1000);
+        }
       };
 
       // Dummy transceiver to receive video
@@ -364,6 +406,10 @@ _HTML = """<!DOCTYPE html>
         // Fallback: replace <video> with <img> MJPEG
         const el = document.getElementById(elementId);
         if (el) {
+          if (_fpsLabels[elementId]) {
+            _fpsLabels[elementId].textContent = 'MJPEG';
+            _fpsLabels[elementId].style.color = '#fa0';
+          }
           const img = document.createElement('img');
           img.id    = elementId;
           img.src   = '/video/' + stream;

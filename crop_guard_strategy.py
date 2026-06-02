@@ -142,6 +142,16 @@ def _vegetation_area(mask: np.ndarray, min_area: int = 500) -> int:
 
 # ── Wheel frame processing ────────────────────────────────────────────────────
 
+def _clahe_enhance(frame_bgr: np.ndarray, clip: float = 2.0,
+                   tile: int = 8) -> np.ndarray:
+    """Apply CLAHE to the L channel in LAB space to reduce washout."""
+    lab   = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(tile, tile))
+    l     = clahe.apply(l)
+    return cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
+
+
 def _process_wheel_frame(raw: np.ndarray,
                          side: str,          # "left" or "right"
                          exg_threshold: int,
@@ -149,7 +159,9 @@ def _process_wheel_frame(raw: np.ndarray,
                          exg_density_pct: float = 8.0,
                          verbose: bool = True,
                          fps: float = 0.0,
-                         veg_index: str = "exg") -> tuple[bool, bool, np.ndarray]:
+                         veg_index: str = "exg",
+                         clahe: bool = False,
+                         clahe_clip: float = 2.0) -> tuple[bool, bool, np.ndarray]:
     """
     Analyse one wheel camera frame. No rotation applied — images shown as-is.
 
@@ -166,6 +178,10 @@ def _process_wheel_frame(raw: np.ndarray,
 
     Both flags use the same ExG threshold and density conditions.
     """
+    # ── Optional CLAHE to reduce bright-sun washout ───────────────────────────
+    if clahe:
+        raw = _clahe_enhance(raw, clip=clahe_clip)
+
     h, w = raw.shape[:2]
 
     # ── Detection zones ───────────────────────────────────────────────────────
@@ -280,6 +296,8 @@ class CropGuardStrategy(NavigationStrategy):
                  exg_min_area:       int  = 500,
                  exg_density_pct:    float = 8.0,
                  veg_index:          str   = "ngrdi",
+                 clahe:              bool  = False,
+                 clahe_clip:         float = 2.0,
                  cloud_interval_s:   float = _CLOUD_INTERVAL_S,
                  camera_calibration: dict | None = None):
 
@@ -294,6 +312,8 @@ class CropGuardStrategy(NavigationStrategy):
         self._exg_min_area      = exg_min_area
         self._exg_density_pct   = exg_density_pct
         self._veg_index         = veg_index
+        self._clahe             = clahe
+        self._clahe_clip        = clahe_clip
         self._cloud_interval_s  = cloud_interval_s
         self._calib             = camera_calibration or {}
 
@@ -642,7 +662,8 @@ class CropGuardStrategy(NavigationStrategy):
                     tl, wl, lvis = _process_wheel_frame(
                         lf, "left", self._exg_threshold, self._exg_min_area,
                         self._exg_density_pct, verbose=both_ready, fps=fps_l,
-                        veg_index=self._veg_index)
+                        veg_index=self._veg_index,
+                        clahe=self._clahe, clahe_clip=self._clahe_clip)
                 else:
                     tl = wl = False
                     lvis = self._blank_vis("LEFT CAM MISSING")
@@ -651,7 +672,8 @@ class CropGuardStrategy(NavigationStrategy):
                     tr, wr, rvis = _process_wheel_frame(
                         rf, "right", self._exg_threshold, self._exg_min_area,
                         self._exg_density_pct, verbose=both_ready, fps=fps_r,
-                        veg_index=self._veg_index)
+                        veg_index=self._veg_index,
+                        clahe=self._clahe, clahe_clip=self._clahe_clip)
                 else:
                     tr = wr = False
                     rvis = self._blank_vis("RIGHT CAM MISSING")
