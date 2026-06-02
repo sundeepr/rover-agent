@@ -613,6 +613,12 @@ def main():
         print(f"  Goal         : {args.goal}")
         print("=" * 60)
         try:
+            # Flush any buffered newlines (e.g. Enter key used to launch script)
+            import termios
+            termios.tcflush(sys.stdin, termios.TCIFLUSH)
+        except Exception:
+            pass
+        try:
             input("  Press Enter to start navigation (Ctrl-C to abort)… ")
         except (EOFError, KeyboardInterrupt):
             print("\nAborted.")
