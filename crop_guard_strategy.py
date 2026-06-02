@@ -642,26 +642,9 @@ class CropGuardStrategy(NavigationStrategy):
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        cap.set(cv2.CAP_PROP_FPS, 10)
+        cap.set(cv2.CAP_PROP_FPS, 30)
 
-        # Reduce gain and backlight_compensation to prevent sun-glint washing
-        # out the image outdoors.  These cameras have no exposure control —
-        # gain and backlight_compensation are the effective levers.
-        # Defaults: gain=136, backlight_compensation=136, brightness=128.
-        # Tune live with:
-        #   v4l2-ctl --device <path> --set-ctrl=gain=64
-        #   v4l2-ctl --device <path> --set-ctrl=backlight_compensation=0
-        cap.set(cv2.CAP_PROP_GAIN,       64)   # default 136 — lower = darker
-        cap.set(cv2.CAP_PROP_BRIGHTNESS, 90)   # default 128 — slightly darker
-        # backlight_compensation has no OpenCV constant — set via v4l2-ctl after open
-        import subprocess, shlex
-        try:
-            subprocess.run(
-                shlex.split(f"v4l2-ctl --device {path} --set-ctrl=backlight_compensation=0"),
-                check=False, capture_output=True)
-        except Exception:
-            pass
-        log.info("%s wheel camera %s: gain=64 brightness=90 backlight_comp=0", label, path)
+        log.info("%s wheel camera %s: using auto exposure/gain", label, path)
 
         actual_fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
         fourcc_str = "".join(chr((actual_fourcc >> (8 * i)) & 0xFF) for i in range(4))
