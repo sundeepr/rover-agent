@@ -264,6 +264,45 @@ def agent_loop(
     log.info("Camera released")
 
 
+# ── Headless strategy loop (no front camera) ──────────────────────────────────
+
+def _headless_loop(state, strategy, interval: float, rover_ctrl=None) -> None:
+    """
+    Dispatch strategy.run_query() at the strategy's cycle_interval without
+    opening any camera.  Used when --device is omitted (e.g. wheel_guard).
+    A blank frame is passed so run_query signatures still work.
+    """
+    import numpy as np
+    blank = np.zeros((480, 640, 3), dtype=np.uint8)
+    last_query_time   = 0.0
+    _logged_in_flight = False
+
+    while True:
+        now               = time.time()
+        effective_interval = getattr(strategy, "cycle_interval", interval)
+        goal_ok = (state.goal_ready.is_set()
+                   or not getattr(strategy, "requires_goal", True))
+
+        if goal_ok and now - last_query_time >= effective_interval:
+            if state.query_in_flight.is_set():
+                if not _logged_in_flight:
+                    log.info("Previous query still in-flight — skipping")
+                    _logged_in_flight = True
+            else:
+                _logged_in_flight = False
+                last_query_time   = now
+                with state.result_lock:
+                    state.step += 1
+                state.query_in_flight.set()
+                threading.Thread(
+                    target=strategy.run_query,
+                    args=(state, blank, None, rover_ctrl),
+                    daemon=True,
+                ).start()
+
+        time.sleep(0.01)
+
+
 # ── Down-camera loop ───────────────────────────────────────────────────────────
 
 def _scan_cameras(max_index: int = 6) -> list[int]:
@@ -429,7 +468,7 @@ def _device(value: str):
 
 def main():
     parser = argparse.ArgumentParser(description="Rover navigation agent")
-    parser.add_argument("--device",      type=_device, default=0,
+    parser.add_argument("--device",      type=_device, default=None,
                         metavar="INDEX|PATH",
                         help="Camera device index or path (e.g. 0 or /dev/cam-front)")
     parser.add_argument("--interval",    type=float, default=3.0,
@@ -606,11 +645,20 @@ def main():
     # Agent loop + publisher start immediately so all camera feeds appear in
     # the browser before the user confirms navigation.  goal_ready gates motor
     # commands — these threads are safe to run before Enter is pressed.
-    threading.Thread(
-        target=agent_loop,
-        args=(state, strategy, args.device, args.interval, rover_ctrl),
-        daemon=True,
-    ).start()
+    if args.device is not None:
+        log.info("Camera device : %s", args.device)
+        threading.Thread(
+            target=agent_loop,
+            args=(state, strategy, args.device, args.interval, rover_ctrl),
+            daemon=True,
+        ).start()
+    else:
+        log.info("Camera device : none (headless mode)")
+        threading.Thread(
+            target=_headless_loop,
+            args=(state, strategy, args.interval, rover_ctrl),
+            daemon=True,
+        ).start()
 
     if hasattr(strategy, "update_down_frame") and args.down_device is not None:
         log.info("Down-camera    : device %s", args.down_device)
