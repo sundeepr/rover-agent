@@ -367,6 +367,17 @@ def _down_camera_loop(strategy, device: int, state=None) -> None:
 
 # ── Strategy factory ───────────────────────────────────────────────────────────
 
+def _build_cam_controls(args) -> dict:
+    """Build v4l2 control dict from CLI args for wheel cameras."""
+    ctrl = {}
+    ctrl["backlight_compensation"] = args.cam_backlight
+    if args.cam_saturation is not None:
+        ctrl["saturation"] = args.cam_saturation
+    if args.cam_exposure is not None:
+        ctrl["exposure_time_absolute"] = args.cam_exposure
+    return ctrl
+
+
 def _build_strategy(name: str, args) -> NavigationStrategy:
     """
     Instantiate and return the requested NavigationStrategy.
@@ -421,6 +432,7 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
             veg_index           = args.veg_index,
             clahe               = args.clahe,
             clahe_clip          = args.clahe_clip,
+            cam_controls        = _build_cam_controls(args),
             camera_calibration  = load_camera_calibration(args.camera_calibration),
         )
     if name == "wheel_guard":
@@ -435,6 +447,7 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
             veg_index         = args.veg_index,
             clahe             = args.clahe,
             clahe_clip        = args.clahe_clip,
+            cam_controls      = _build_cam_controls(args),
         )
     if name == "omnivla_full":
         from omnivla_full_strategy import OmniVLAFullStrategy
@@ -515,6 +528,20 @@ def main():
     parser.add_argument("--exg-min-area",  type=int, default=500,
                         metavar="PX",
                         help="Min vegetation blob area in pixels (default 500)")
+    parser.add_argument("--cam-exposure", type=int, default=None,
+                        metavar="N",
+                        help="Manual exposure time (1–10000, C270 units ~100µs). "
+                             "Sets auto_exposure=1 then exposure_time_absolute=N. "
+                             "Try 50–80 in bright sun (default=None = camera auto)")
+    parser.add_argument("--cam-backlight", type=int, default=0,
+                        choices=[0, 1],
+                        help="backlight_compensation (0=off, 1=on, default 0). "
+                             "Off is better outdoors — on boosts brightness for "
+                             "backlit subjects which washes out outdoor scenes")
+    parser.add_argument("--cam-saturation", type=int, default=None,
+                        metavar="N",
+                        help="Saturation 0–255 (C270 default 32). Higher values make "
+                             "greens more distinct from white/grey soil. Try 80–120")
     parser.add_argument("--clahe", action="store_true",
                         help="Apply CLAHE contrast enhancement to wheel camera frames "
                              "before vegetation detection — helps in bright sunlight")

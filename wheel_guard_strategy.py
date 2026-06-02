@@ -57,7 +57,8 @@ class WheelGuardStrategy(NavigationStrategy):
                  exg_density_pct:   float = 8.0,
                  veg_index:         str   = "ngrdi",
                  clahe:             bool  = False,
-                 clahe_clip:        float = 2.0):
+                 clahe_clip:        float = 2.0,
+                 cam_controls:      dict | None = None):
 
         self._left_device     = left_device
         self._right_device    = right_device
@@ -68,6 +69,7 @@ class WheelGuardStrategy(NavigationStrategy):
         self._veg_index       = veg_index
         self._clahe           = clahe
         self._clahe_clip      = clahe_clip
+        self._cam_controls    = cam_controls or {}
 
         self._trample_left  = False
         self._trample_right = False
@@ -156,9 +158,9 @@ class WheelGuardStrategy(NavigationStrategy):
     def _wheel_thread(self) -> None:
         log.info("Wheel cameras: waiting 4s for main camera to initialise…")
         time.sleep(4.0)
-        self._left_cap  = self._open_cam(self._left_device,  "left")
+        self._left_cap  = self._open_cam(self._left_device,  "left",  self._cam_controls)
         time.sleep(5.0)
-        self._right_cap = self._open_cam(self._right_device, "right")
+        self._right_cap = self._open_cam(self._right_device, "right", self._cam_controls)
 
         if not hasattr(self, "_fps_times"):
             self._fps_times = {"left": [], "right": []}
@@ -215,7 +217,7 @@ class WheelGuardStrategy(NavigationStrategy):
     # ── Camera helpers (shared with crop_guard) ───────────────────────────────
 
     @staticmethod
-    def _open_cam(device, label: str):
+    def _open_cam(device, label: str, cam_controls: dict | None = None):
         path = device if isinstance(device, str) else f"/dev/video{device}"
         cap = cv2.VideoCapture(path, cv2.CAP_V4L2)
         if not cap.isOpened():
@@ -232,7 +234,19 @@ class WheelGuardStrategy(NavigationStrategy):
         actual_fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
         fourcc_str = "".join(chr((actual_fourcc >> (8 * i)) & 0xFF) for i in range(4))
         actual_fps  = cap.get(cv2.CAP_PROP_FPS)
-        log.info("%s wheel camera %s: using auto exposure/gain", label, path)
+        if cam_controls:
+            import subprocess, shlex
+            ctrl_str = ",".join(f"{k}={v}" for k, v in cam_controls.items())
+            if "exposure_time_absolute" in cam_controls:
+                subprocess.run(
+                    shlex.split(f"v4l2-ctl --device {path} --set-ctrl=auto_exposure=1"),
+                    check=False, capture_output=True)
+            subprocess.run(
+                shlex.split(f"v4l2-ctl --device {path} --set-ctrl={ctrl_str}"),
+                check=False, capture_output=True)
+            log.info("%s wheel camera %s: applied controls %s", label, path, ctrl_str)
+        else:
+            log.info("%s wheel camera %s: using auto exposure", label, path)
 
         for _ in range(60):
             ret, _ = cap.read()

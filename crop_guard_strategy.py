@@ -298,6 +298,7 @@ class CropGuardStrategy(NavigationStrategy):
                  veg_index:          str   = "ngrdi",
                  clahe:              bool  = False,
                  clahe_clip:         float = 2.0,
+                 cam_controls:       dict | None = None,
                  cloud_interval_s:   float = _CLOUD_INTERVAL_S,
                  camera_calibration: dict | None = None):
 
@@ -314,6 +315,7 @@ class CropGuardStrategy(NavigationStrategy):
         self._veg_index         = veg_index
         self._clahe             = clahe
         self._clahe_clip        = clahe_clip
+        self._cam_controls      = cam_controls or {}
         self._cloud_interval_s  = cloud_interval_s
         self._calib             = camera_calibration or {}
 
@@ -636,9 +638,9 @@ class CropGuardStrategy(NavigationStrategy):
         log.info("Wheel cameras: waiting %.0fs for main camera to initialise…",
                  _STARTUP_DELAY_S)
         time.sleep(_STARTUP_DELAY_S)
-        self._left_cap  = self._open_cam(self._left_device,  "left")
+        self._left_cap  = self._open_cam(self._left_device,  "left",  self._cam_controls)
         time.sleep(5.0)   # stagger: both cams on same USB hub — give left time to fully stabilise
-        self._right_cap = self._open_cam(self._right_device, "right")
+        self._right_cap = self._open_cam(self._right_device, "right", self._cam_controls)
 
         while self._running:
             try:
@@ -695,7 +697,7 @@ class CropGuardStrategy(NavigationStrategy):
     # ── Camera helpers ────────────────────────────────────────────────────────
 
     @staticmethod
-    def _open_cam(device, label: str):
+    def _open_cam(device, label: str, cam_controls: dict | None = None):
         """Open a wheel camera using an explicit /dev/videoN path.
 
         `device` can be an int (2 → /dev/video2) or a path string
@@ -720,7 +722,22 @@ class CropGuardStrategy(NavigationStrategy):
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         cap.set(cv2.CAP_PROP_FPS, 10)
 
-        log.info("%s wheel camera %s: using auto exposure/gain", label, path)
+        # Apply v4l2 controls for bright-sun washout reduction.
+        # cam_controls is a dict of {ctrl_name: value} passed from the strategy.
+        if cam_controls:
+            import subprocess, shlex
+            ctrl_str = ",".join(f"{k}={v}" for k, v in cam_controls.items())
+            # exposure_time_absolute requires auto_exposure=1 (manual) first
+            if "exposure_time_absolute" in cam_controls:
+                subprocess.run(
+                    shlex.split(f"v4l2-ctl --device {path} --set-ctrl=auto_exposure=1"),
+                    check=False, capture_output=True)
+            subprocess.run(
+                shlex.split(f"v4l2-ctl --device {path} --set-ctrl={ctrl_str}"),
+                check=False, capture_output=True)
+            log.info("%s wheel camera %s: applied controls %s", label, path, ctrl_str)
+        else:
+            log.info("%s wheel camera %s: using auto exposure", label, path)
 
         actual_fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
         fourcc_str = "".join(chr((actual_fourcc >> (8 * i)) & 0xFF) for i in range(4))
