@@ -450,7 +450,8 @@ def main():
     parser.add_argument("--strategy",    type=str,   default="omnivla_full",
                         choices=["omnivla_full", "cloud_omnivla", "bev_omnivla",
                                  "omnivla", "line_follow", "plant_center",
-                                 "boundary_guard", "teleop", "crop_guard"],
+                                 "boundary_guard", "teleop", "crop_guard",
+                                 "wheel_guard"],
                         help="Navigation strategy (default: omnivla_full)")
     parser.add_argument("--left-cam",   type=_device, default=1,
                         metavar="INDEX|PATH",
