@@ -181,7 +181,6 @@ def open_frame_source(device_or_url,
         log.warning("%s camera NOT FOUND at %s", label, path)
         return None
 
-    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     cap.set(cv2.CAP_PROP_FPS, fps)

@@ -162,10 +162,6 @@ def agent_loop(
         log.error("Could not open camera at device %s", device)
         return
 
-    # Force MJPEG so the camera compresses on-chip — dramatically reduces USB
-    # bandwidth vs the default YUYV (uncompressed), which matters when 3 cameras
-    # share the same USB controller on Jetson.  FOURCC must be set first.
-    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     cap.set(cv2.CAP_PROP_FPS, 10)
