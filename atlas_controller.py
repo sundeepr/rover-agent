@@ -106,6 +106,7 @@ class AtlasController:
         self.baud    = baud
         self.dry_run = dry_run
         self._ser: "serial.Serial | None" = None
+        self._aux    = 0   # current AUX value — persists across drive_raw calls
 
     # ── Connection ────────────────────────────────────────────────────────────
 
@@ -186,9 +187,9 @@ class AtlasController:
         log.info("Atlas stopped")
 
     def set_aux(self, pct: int) -> None:
-        """Set the AUX output (0–100 %). Wheels are not affected."""
-        pct = _clamp(int(pct), 0, 100)
-        self._send_cmd(0, 0, pct)
+        """Set the AUX output (0–100 %). Persists across drive_raw calls."""
+        self._aux = _clamp(int(pct), 0, 100)
+        log.info("atlas aux: %d%%", self._aux)
 
     # ── Pixel → bearing ───────────────────────────────────────────────────────
 
@@ -290,8 +291,10 @@ class AtlasController:
 
     # ── Serial I/O ────────────────────────────────────────────────────────────
 
-    def _send_cmd(self, L: int, R: int, AUX: int = 0) -> None:
+    def _send_cmd(self, L: int, R: int, AUX: int | None = None) -> None:
         """Send one command frame, or log it in dry-run mode."""
+        if AUX is None:
+            AUX = self._aux   # use current tracked AUX value
         frame = _make_frame(L, R, AUX)
         log.debug("atlas: %s", frame.decode().strip())
         if self.dry_run:
