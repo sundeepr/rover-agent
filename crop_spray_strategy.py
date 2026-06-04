@@ -401,7 +401,7 @@ class CropSprayStrategy(NavigationStrategy):
                     _arm_send(ser, {"T": 114, "led": 0})
                     led_on = False
 
-                if self._recorder and frames_processed % 5 == 0:
+                if self._recorder:
                     self._recorder.record("arm_cam", frame, fps=10)
 
                 frames_processed += 1
