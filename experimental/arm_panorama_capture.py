@@ -330,8 +330,7 @@ def main():
         print(f"   Green threshold: {threshold*100:.2f}%  |  Ctrl-C to stop\n")
         start_base_rotation(ser, sweep_spd)
         sweep_start_time = time.time()
-        # Conservative max time: 240° at ~10°/s per speed unit + 5s headroom
-        max_sweep_s = abs(end_deg - start_deg) / max(sweep_spd * 2, 1) + 5
+        max_sweep_s = sweep.get("timeout_s", 60)
 
         if not args.no_ui:
             cv2.namedWindow("Arm Scan", cv2.WINDOW_NORMAL)

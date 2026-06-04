@@ -6,9 +6,10 @@
         "eoat_deg":     180
     },
     "sweep": {
-        "start_deg":    -120,
-        "end_deg":       120,
-        "spd":             5,
-        "green_threshold": 0.01
+        "start_deg":      -120,
+        "end_deg":         120,
+        "spd":              10,
+        "green_threshold":  0.01,
+        "timeout_s":        60
     }
 }

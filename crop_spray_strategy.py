@@ -397,7 +397,7 @@ class CropSprayStrategy(NavigationStrategy):
             _arm_send(ser, {"T": 123, "m": 0, "axis": 1, "cmd": 1,
                             "spd": sweep_spd})
             sweep_start_time = time.time()
-            max_sweep_s = abs(end_deg - start_deg) / max(sweep_spd * 2, 1) + 5
+            max_sweep_s = sweep.get("timeout_s", 60)
 
             led_on = False
             frames_processed = 0
