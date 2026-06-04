@@ -298,8 +298,13 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Opening serial port {args.port} at {BAUD_RATE} baud")
-    ser = serial.Serial(args.port, BAUD_RATE, timeout=0.5)
-    time.sleep(2)   # allow ESP32 to boot
+    # dsrdtr=False / rtscts=False prevents toggling DTR/RTS on open,
+    # which would reset the ESP32 (Arduino bootloader behaviour).
+    ser = serial.Serial(args.port, BAUD_RATE, timeout=0.5,
+                        dsrdtr=False, rtscts=False)
+    ser.dtr = False
+    ser.rts = False
+    time.sleep(4)   # allow ESP32 to be fully ready
 
     cap = open_camera(args.cam)
 

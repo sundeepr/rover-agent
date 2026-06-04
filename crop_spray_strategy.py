@@ -347,8 +347,11 @@ class CropSprayStrategy(NavigationStrategy):
         cap = None
         try:
             log.info("Arm sweep: opening serial %s", self._arm_port)
-            ser = serial.Serial(self._arm_port, 115200, timeout=0.5)
-            time.sleep(2)
+            ser = serial.Serial(self._arm_port, 115200, timeout=0.5,
+                                dsrdtr=False, rtscts=False)
+            ser.dtr = False
+            ser.rts = False
+            time.sleep(4)   # wait for ESP32 to be fully ready
 
             cap = cv2.VideoCapture(self._arm_cam_device)
             if not cap.isOpened():
