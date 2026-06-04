@@ -157,6 +157,7 @@ class CropSprayStrategy(NavigationStrategy):
         self._arm_cam_device  = arm_cam_device
         self._arm_sweep_spd   = arm_sweep_spd
         self._recorder        = None
+        self._arm_ser         = None   # kept open between sweeps, reused
 
         # Load arm config
         cfg_path = Path(arm_config_path)
@@ -334,24 +335,40 @@ class CropSprayStrategy(NavigationStrategy):
                          name="wheel-reopen").start()
 
     def _reopen_wheel_cams(self) -> None:
-        time.sleep(1.0)   # give arm camera time to fully release
-        log.info("Reopening wheel cameras…")
-        self._left_src  = open_frame_source(self._left_device,  "left",  self._cam_controls)
-        time.sleep(5.0)
+        # Retry opening left camera until it succeeds — the arm camera
+        # may take a moment to fully release USB bandwidth on the Jetson.
+        log.info("Waiting for arm camera to release USB bandwidth…")
+        for attempt in range(20):   # up to 10s (20 × 0.5s)
+            time.sleep(0.5)
+            src = open_frame_source(self._left_device, "left", self._cam_controls)
+            if src is not None and src.is_open():
+                self._left_src = src
+                log.info("Left wheel camera ready after %.1fs", (attempt + 1) * 0.5)
+                break
+            if src:
+                src.release()
+        else:
+            log.warning("Left wheel camera could not reopen after arm sweep")
+
+        time.sleep(5.0)   # stagger
         self._right_src = open_frame_source(self._right_device, "right", self._cam_controls)
 
     # ── Arm sweep (runs on dedicated thread) ──────────────────────────────────
 
     def _arm_sweep(self) -> None:
-        ser = None
         cap = None
         try:
-            log.info("Arm sweep: opening serial %s", self._arm_port)
-            ser = serial.Serial(self._arm_port, 115200, timeout=0.5,
-                                dsrdtr=False, rtscts=False)
-            ser.dtr = False
-            ser.rts = False
-            time.sleep(4)   # wait for ESP32 to be fully ready
+            # Reuse existing serial port; open only on first sweep or after error
+            if self._arm_ser is None or not self._arm_ser.is_open:
+                log.info("Arm sweep: opening serial %s", self._arm_port)
+                self._arm_ser = serial.Serial(self._arm_port, 115200, timeout=0.5,
+                                              dsrdtr=False, rtscts=False)
+                self._arm_ser.dtr = False
+                self._arm_ser.rts = False
+                time.sleep(4)   # only needed on first open — ESP32 boot time
+            else:
+                log.info("Arm sweep: reusing open serial %s", self._arm_port)
+            ser = self._arm_ser
 
             cap = cv2.VideoCapture(self._arm_cam_device)
             if not cap.isOpened():
@@ -434,22 +451,29 @@ class CropSprayStrategy(NavigationStrategy):
             log.error("Arm sweep error: %s", e, exc_info=True)
 
         finally:
-            # Ensure LED off, stop rotation, home arm
-            if ser and ser.is_open:
+            # Stop rotation + LED off — serial stays open for next sweep
+            if self._arm_ser and self._arm_ser.is_open:
                 try:
-                    _arm_send(ser, {"T": 123, "m": 0, "axis": 1, "cmd": 0, "spd": 0})
-                    _arm_send(ser, {"T": 114, "led": 0})
+                    _arm_send(self._arm_ser, {"T": 123, "m": 0, "axis": 1, "cmd": 0, "spd": 0})
+                    _arm_send(self._arm_ser, {"T": 114, "led": 0})
                     time.sleep(0.5)
                     log.info("Arm sweep: returning base to 0°")
-                    _arm_send(ser, {"T": 121, "joint": 1, "angle": 0, "spd": 30, "acc": 10})
+                    _arm_send(self._arm_ser, {"T": 121, "joint": 1, "angle": 0, "spd": 30, "acc": 10})
                     time.sleep(4)
-                    _arm_home(ser, self._arm_cfg)
+                    _arm_home(self._arm_ser, self._arm_cfg)
                 except Exception as e:
-                    log.warning("Arm cleanup error: %s", e)
-                ser.close()
+                    log.warning("Arm cleanup error: %s — serial will reopen next sweep", e)
+                    try:
+                        self._arm_ser.close()
+                    except Exception:
+                        pass
+                    self._arm_ser = None   # force reopen on next sweep
+
+            # Release arm camera — wheel cams reopen after this
             if cap:
                 cap.release()
-            log.info("Arm sweep complete — signalling GUARD transition")
+                cap = None
+            log.info("Arm camera released — signalling GUARD transition")
             self._spray_done.set()
 
     # ── Wheel camera thread ───────────────────────────────────────────────────
