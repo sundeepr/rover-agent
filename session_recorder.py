@@ -147,6 +147,14 @@ class SessionRecorder:
         self._raw_writer:  Optional[cv2.VideoWriter] = None
         self._down_writer: Optional[cv2.VideoWriter] = None
 
+        # Generic named sensor streams — any camera or data source can call
+        # record(name, data). Data type is detected automatically:
+        #   np.ndarray → video file  (<name>.avi, lazy VideoWriter init)
+        #   dict / scalar → JSONL file (<name>.jsonl, one record per call)
+        self._stream_writers: dict[str, cv2.VideoWriter]  = {}   # name → VideoWriter
+        self._stream_files:   dict[str, object]           = {}   # name → file handle
+        self._stream_lock = threading.Lock()
+
         # Frame counter — incremented on every write_frames() call so that
         # decisions and events can be correlated with a specific video frame.
         self._frame_idx = 0
@@ -193,6 +201,56 @@ class SessionRecorder:
             self._raw_writer.write(raw)
         self._frame_idx += 1
 
+    def record(self, name: str, data, fps: float | None = None) -> None:
+        """
+        Generic sensor recorder — thread-safe, lazy-initialised.
+
+        data types:
+          np.ndarray          → <name>.avi  (MJPG video, lazy VideoWriter init)
+          dict                → <name>.jsonl (one JSON line per call, ts injected)
+          int | float | str   → <name>.jsonl (wrapped as {"value": data, "ts": ...})
+
+        fps is only used when data is an ndarray and the writer hasn't been
+        created yet; defaults to self._fps.
+        """
+        with self._stream_lock:
+            if isinstance(data, np.ndarray):
+                self._record_video(name, data, fps or self._fps)
+            else:
+                self._record_jsonl(name, data)
+
+    def _record_video(self, name: str, frame: np.ndarray, fps: float) -> None:
+        """Write one video frame to <name>.avi (must be called under _stream_lock)."""
+        if name not in self._stream_writers:
+            h, w = frame.shape[:2]
+            fourcc = cv2.VideoWriter_fourcc(*"MJPG")
+            writer = cv2.VideoWriter(
+                str(self.session_dir / f"{name}.avi"), fourcc, fps, (w, h)
+            )
+            if not writer.isOpened():
+                log.error("VideoWriter failed for stream %r — frames will not be saved", name)
+                self._stream_writers[name] = None
+            else:
+                log.info("Recording stream %r → %s.avi  (%.0f fps)", name, name, fps)
+                self._stream_writers[name] = writer
+        writer = self._stream_writers.get(name)
+        if writer:
+            writer.write(frame)
+
+    def _record_jsonl(self, name: str, data) -> None:
+        """Append one JSON record to <name>.jsonl (must be called under _stream_lock)."""
+        if name not in self._stream_files:
+            fh = open(self.session_dir / f"{name}.jsonl", "a", encoding="utf-8")
+            self._stream_files[name] = fh
+            log.info("Recording stream %r → %s.jsonl", name, name)
+        fh = self._stream_files[name]
+        if isinstance(data, dict):
+            record = {"ts": time.time(), **data}
+        else:
+            record = {"ts": time.time(), "value": data}
+        fh.write(json.dumps(record) + "\n")
+        fh.flush()
+
     def write_down_frame(self, frame: np.ndarray) -> None:
         """Write one downward-camera frame to down.avi (lazy-init, thread-safe)."""
         h, w = frame.shape[:2]
@@ -206,6 +264,32 @@ class SessionRecorder:
                 self._down_writer = None
         if self._down_writer:
             self._down_writer.write(frame)
+
+    def write_wheel_frame(self, frame: np.ndarray, side: str) -> None:
+        """Write one wheel camera frame to left_wheel.avi or right_wheel.avi."""
+        h, w = frame.shape[:2]
+        if side == "left":
+            if self._left_wheel_writer is None:
+                fourcc = cv2.VideoWriter_fourcc(*"MJPG")
+                self._left_wheel_writer = cv2.VideoWriter(
+                    str(self.session_dir / "left_wheel.avi"), fourcc, self._fps, (w, h)
+                )
+                if not self._left_wheel_writer.isOpened():
+                    log.error("left_wheel.avi VideoWriter failed to open")
+                    self._left_wheel_writer = None
+            if self._left_wheel_writer:
+                self._left_wheel_writer.write(frame)
+        else:
+            if self._right_wheel_writer is None:
+                fourcc = cv2.VideoWriter_fourcc(*"MJPG")
+                self._right_wheel_writer = cv2.VideoWriter(
+                    str(self.session_dir / "right_wheel.avi"), fourcc, self._fps, (w, h)
+                )
+                if not self._right_wheel_writer.isOpened():
+                    log.error("right_wheel.avi VideoWriter failed to open")
+                    self._right_wheel_writer = None
+            if self._right_wheel_writer:
+                self._right_wheel_writer.write(frame)
 
     # ── Per-step data log ──────────────────────────────────────────────────────
     # Called from strategy threads — guarded by a lock.
@@ -262,6 +346,23 @@ class SessionRecorder:
         if self._down_writer:
             self._down_writer.release()
             self._down_writer = None
+        with self._stream_lock:
+            for name, writer in self._stream_writers.items():
+                if writer:
+                    writer.release()
+            self._stream_writers.clear()
+            for name, fh in self._stream_files.items():
+                try:
+                    fh.close()
+                except Exception:
+                    pass
+            self._stream_files.clear()
+        if self._left_wheel_writer:
+            self._left_wheel_writer.release()
+            self._left_wheel_writer = None
+        if self._right_wheel_writer:
+            self._right_wheel_writer.release()
+            self._right_wheel_writer = None
         with self._decisions_lock:
             self._decisions_fh.close()
         with self._events_lock:

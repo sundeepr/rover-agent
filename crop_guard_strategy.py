@@ -315,6 +315,7 @@ class CropGuardStrategy(NavigationStrategy):
         self._clahe             = clahe
         self._clahe_clip        = clahe_clip
         self._cam_controls      = cam_controls or {}
+        self._recorder          = None   # set via set_recorder() after construction
         self._cloud_interval_s  = cloud_interval_s
         self._calib             = camera_calibration or {}
 
@@ -379,6 +380,9 @@ class CropGuardStrategy(NavigationStrategy):
         from this strategy's perspective.
         """
         return True, self._left_cap is not None, self._right_cap is not None
+
+    def set_recorder(self, recorder) -> None:
+        self._recorder = recorder
 
     def set_goal(self, goal: str) -> None:
         self._goal = goal
@@ -658,6 +662,12 @@ class CropGuardStrategy(NavigationStrategy):
                                              if now_fps - t <= 2.0]
                 fps_l = len(self._fps_times["left"])  / 2.0
                 fps_r = len(self._fps_times["right"]) / 2.0
+
+                # Record raw frames before annotation
+                if lf is not None and self._recorder:
+                    self._recorder.record("left_wheel", lf, fps=10)
+                if rf is not None and self._recorder:
+                    self._recorder.record("right_wheel", rf, fps=10)
 
                 if lf is not None:
                     tl, wl, lvis = _process_wheel_frame(

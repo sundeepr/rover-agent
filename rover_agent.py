@@ -646,9 +646,11 @@ def main():
 
     from session_recorder import SessionRecorder
     state               = AgentState()
-    state.recorder      = SessionRecorder()
+    state.recorder       = SessionRecorder()
     state.query_interval = args.interval
     strategy             = _build_strategy(args.strategy, args)
+    if hasattr(strategy, "set_recorder"):
+        strategy.set_recorder(state.recorder)
 
     # If a goal was given on the CLI, apply it immediately so the agent
     # starts navigating without waiting for web chat input.
