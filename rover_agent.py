@@ -449,6 +449,25 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
             clahe_clip        = args.clahe_clip,
             cam_controls      = _build_cam_controls(args),
         )
+    if name == "crop_spray":
+        from crop_spray_strategy import CropSprayStrategy
+        return CropSprayStrategy(
+            left_device       = args.left_cam,
+            right_device      = args.right_cam,
+            forward_vel       = args.crop_guard_vel,
+            guard_duration_s  = args.guard_duration,
+            exg_threshold     = args.exg_threshold,
+            exg_min_area      = args.exg_min_area,
+            exg_density_pct   = args.exg_density_pct,
+            veg_index         = args.veg_index,
+            clahe             = args.clahe,
+            clahe_clip        = args.clahe_clip,
+            cam_controls      = _build_cam_controls(args),
+            arm_port          = args.arm_port,
+            arm_cam_device    = args.arm_cam,
+            arm_config_path   = args.arm_config,
+            arm_sweep_spd     = args.arm_spd,
+        )
     if name == "omnivla_full":
         from omnivla_full_strategy import OmniVLAFullStrategy
         _geo = load_geometry(getattr(args, "rover_geometry", None))
@@ -509,7 +528,7 @@ def main():
                         choices=["omnivla_full", "cloud_omnivla", "bev_omnivla",
                                  "omnivla", "line_follow", "plant_center",
                                  "boundary_guard", "teleop", "crop_guard",
-                                 "wheel_guard"],
+                                 "wheel_guard", "crop_spray"],
                         help="Navigation strategy (default: omnivla_full)")
     parser.add_argument("--left-cam",   type=_device, default=1,
                         metavar="INDEX|PATH",
@@ -522,6 +541,18 @@ def main():
                         help="Navigation speed (mm/s) in crop_guard mode (default 10). "
                              "Deadband compensation ensures motors receive at least "
                              "_MOTOR_DEADBAND_PCT%% power even at this low value.")
+    parser.add_argument("--guard-duration", type=float, default=2.0,
+                        metavar="SECS",
+                        help="Seconds of clear-wheel driving before arm spray sweep (default 2.0)")
+    parser.add_argument("--arm-port",   type=str, default="/dev/ttyUSB0",
+                        help="Serial port for RoArm-M2-S (default /dev/ttyUSB0)")
+    parser.add_argument("--arm-cam",    type=int, default=0,
+                        help="Camera device index mounted on arm tip (default 0)")
+    parser.add_argument("--arm-config", type=str,
+                        default=str(Path(__file__).parent / "experimental" / "arm_scan_config.json"),
+                        help="Path to arm_scan_config.json")
+    parser.add_argument("--arm-spd",    type=int, default=5,
+                        help="Arm continuous rotation speed 0-20 (default 5)")
     parser.add_argument("--exg-threshold", type=int, default=60,
                         metavar="N",
                         help="ExG vegetation threshold for wheel cameras (default 60)")
@@ -655,7 +686,7 @@ def main():
     # If a goal was given on the CLI, apply it immediately so the agent
     # starts navigating without waiting for web chat input.
     _NO_GOAL_STRATEGIES = ("line_follow", "plant_center", "boundary_guard", "teleop",
-                           "wheel_guard")
+                           "wheel_guard", "crop_spray")
     if args.goal and args.strategy not in _NO_GOAL_STRATEGIES:
         strategy.set_goal(args.goal)
         with state.result_lock:
