@@ -386,13 +386,25 @@ class CropSprayStrategy(NavigationStrategy):
             frames_processed = 0
 
             while True:
+                # ── Stop checks run FIRST — before any camera or feedback call ──
+                elapsed = time.time() - sweep_start_time
+                if elapsed >= max_sweep_s:
+                    log.warning("Arm sweep time limit (%.0fs) reached — stopping", max_sweep_s)
+                    break
+
+                # Poll feedback (0.5s timeout) and check angle
+                feedback = _arm_feedback(ser)
+                b_rad    = feedback.get("b", float("nan"))
+                if not np.isnan(b_rad) and np.degrees(b_rad) >= end_deg - 5.0:
+                    log.info("Arm sweep: base at %.1f° — sweep complete", np.degrees(b_rad))
+                    break
+
+                # ── Camera frame (non-blocking best-effort) ───────────────────
                 ret, frame = cap.read()
                 if not ret:
                     continue
 
                 ratio, contours = _arm_detect_green(frame)
-                feedback = _arm_feedback(ser)
-                b_rad    = feedback.get("b", float("nan"))
 
                 # LED on when largest green blob is centred
                 plant_centred = False
@@ -417,15 +429,6 @@ class CropSprayStrategy(NavigationStrategy):
                     self._recorder.record("arm_cam", frame, fps=10)
 
                 frames_processed += 1
-
-                # Stop at end_deg (5° early for deceleration) or on time limit
-                elapsed = time.time() - sweep_start_time
-                if elapsed >= max_sweep_s:
-                    log.warning("Arm sweep time limit reached — stopping")
-                    break
-                if not np.isnan(b_rad) and np.degrees(b_rad) >= end_deg - 5.0:
-                    log.info("Arm sweep: base reached +120° — sweep complete")
-                    break
 
         except Exception as e:
             log.error("Arm sweep error: %s", e, exc_info=True)
