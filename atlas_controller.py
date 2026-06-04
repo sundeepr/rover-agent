@@ -185,6 +185,17 @@ class AtlasController:
         self._send_cmd(0, 0)
         log.info("Atlas stopped")
 
+    def set_aux(self, pct: int) -> None:
+        """Set the AUX output (0–100 %). Wheels are not affected."""
+        pct = _clamp(int(pct), 0, 100)
+        frame = _make_frame(0, 0, pct)
+        log.debug("atlas aux: %d%%", pct)
+        if self.dry_run:
+            log.info("DRY-RUN atlas aux: %d%%", pct)
+            return
+        with self._lock:
+            self._serial.write(frame)
+
     # ── Pixel → bearing ───────────────────────────────────────────────────────
 
     def _pixel_to_bearing(self, pixel_x: int) -> float:

@@ -158,6 +158,7 @@ class CropSprayStrategy(NavigationStrategy):
         self._arm_sweep_spd   = arm_sweep_spd
         self._recorder        = None
         self._arm_ser         = None   # kept open between sweeps, reused
+        self._rover_ctrl      = None   # set during transition to spray
 
         # Load arm config
         cfg_path = Path(arm_config_path)
@@ -307,6 +308,7 @@ class CropSprayStrategy(NavigationStrategy):
         """Release wheel cameras, stop rover, launch arm sweep thread."""
         with self._phase_lock:
             self._phase = _Phase.SPRAY
+        self._rover_ctrl = rover_ctrl
         self._spray_done.clear()
 
         if rover_ctrl:
@@ -434,12 +436,14 @@ class CropSprayStrategy(NavigationStrategy):
                         plant_centred = True
 
                 if plant_centred and not led_on:
-                    _arm_send(ser, {"T": 114, "led": 255})
+                    if self._rover_ctrl and hasattr(self._rover_ctrl, "set_aux"):
+                        self._rover_ctrl.set_aux(50)
                     led_on = True
-                    log.info("Arm LED ON  — plant centred (base=%.1f°)",
+                    log.info("AUX 50%% — plant centred (base=%.1f°)",
                              np.degrees(b_rad) if not np.isnan(b_rad) else float("nan"))
                 elif not plant_centred and led_on:
-                    _arm_send(ser, {"T": 114, "led": 0})
+                    if self._rover_ctrl and hasattr(self._rover_ctrl, "set_aux"):
+                        self._rover_ctrl.set_aux(0)
                     led_on = False
 
                 if self._recorder:
@@ -468,6 +472,10 @@ class CropSprayStrategy(NavigationStrategy):
                     except Exception:
                         pass
                     self._arm_ser = None   # force reopen on next sweep
+
+            # Ensure AUX off when sweep ends
+            if self._rover_ctrl and hasattr(self._rover_ctrl, "set_aux"):
+                self._rover_ctrl.set_aux(0)
 
             # Release arm camera — wheel cams reopen after this
             if cap:
