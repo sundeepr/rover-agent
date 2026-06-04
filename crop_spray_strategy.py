@@ -379,6 +379,8 @@ class CropSprayStrategy(NavigationStrategy):
                      start_deg, end_deg, sweep_spd)
             _arm_send(ser, {"T": 123, "m": 0, "axis": 1, "cmd": 1,
                             "spd": sweep_spd})
+            sweep_start_time = time.time()
+            max_sweep_s = abs(end_deg - start_deg) / max(sweep_spd * 2, 1) + 5
 
             led_on = False
             frames_processed = 0
@@ -416,8 +418,12 @@ class CropSprayStrategy(NavigationStrategy):
 
                 frames_processed += 1
 
-                # Stop when sweep end angle reached
-                if not np.isnan(b_rad) and np.degrees(b_rad) >= end_deg - 1.0:
+                # Stop at end_deg (5° early for deceleration) or on time limit
+                elapsed = time.time() - sweep_start_time
+                if elapsed >= max_sweep_s:
+                    log.warning("Arm sweep time limit reached — stopping")
+                    break
+                if not np.isnan(b_rad) and np.degrees(b_rad) >= end_deg - 5.0:
                     log.info("Arm sweep: base reached +120° — sweep complete")
                     break
 
