@@ -378,6 +378,21 @@ class CropSprayStrategy(NavigationStrategy):
                 return
             cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+            # Apply same v4l2 exposure/saturation controls as wheel cameras
+            if self._cam_controls:
+                import subprocess, shlex
+                path = f"/dev/video{self._arm_cam_device}"
+                ctrl_str = ",".join(f"{k}={v}" for k, v in self._cam_controls.items())
+                if "exposure_time_absolute" in self._cam_controls:
+                    subprocess.run(
+                        shlex.split(f"v4l2-ctl --device {path} --set-ctrl=auto_exposure=1"),
+                        check=False, capture_output=True)
+                subprocess.run(
+                    shlex.split(f"v4l2-ctl --device {path} --set-ctrl={ctrl_str}"),
+                    check=False, capture_output=True)
+                log.info("Arm camera %d: applied controls %s", self._arm_cam_device, ctrl_str)
+
             log.info("Arm camera %d opened", self._arm_cam_device)
 
             # Read sweep params from config (fall back to constructor args)
