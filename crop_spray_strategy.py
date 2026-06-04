@@ -140,7 +140,8 @@ class CropSprayStrategy(NavigationStrategy):
                  arm_port:           str   = _DEFAULT_ARM_PORT,
                  arm_cam_device:     int   = 0,
                  arm_config_path:    str   = str(_DEFAULT_ARM_CONFIG),
-                 arm_sweep_spd:      int   = 5):
+                 arm_sweep_spd:      int   = 5,
+                 arm_aux_pct:        int   = 50):
 
         self._left_device     = left_device
         self._right_device    = right_device
@@ -156,6 +157,7 @@ class CropSprayStrategy(NavigationStrategy):
         self._arm_port        = arm_port
         self._arm_cam_device  = arm_cam_device
         self._arm_sweep_spd   = arm_sweep_spd
+        self._arm_aux_pct     = arm_aux_pct
         self._recorder        = None
         self._arm_ser         = None   # kept open between sweeps, reused
         self._rover_ctrl      = None   # set during transition to spray
@@ -400,6 +402,7 @@ class CropSprayStrategy(NavigationStrategy):
             start_deg = sweep.get("start_deg",   -120)
             end_deg   = sweep.get("end_deg",       120)
             sweep_spd = sweep.get("spd",  self._arm_sweep_spd)
+            aux_pct   = sweep.get("aux_pct", self._arm_aux_pct)
 
             # Home arm and move to sweep start position
             _arm_home(ser, self._arm_cfg)
@@ -452,9 +455,9 @@ class CropSprayStrategy(NavigationStrategy):
 
                 if plant_centred and not led_on:
                     if self._rover_ctrl and hasattr(self._rover_ctrl, "set_aux"):
-                        self._rover_ctrl.set_aux(50)
+                        self._rover_ctrl.set_aux(aux_pct)
                     led_on = True
-                    log.info("AUX 50%% — plant centred (base=%.1f°)",
+                    log.info("AUX %d%% — plant centred (base=%.1f°)", aux_pct,
                              np.degrees(b_rad) if not np.isnan(b_rad) else float("nan"))
                 elif not plant_centred and led_on:
                     if self._rover_ctrl and hasattr(self._rover_ctrl, "set_aux"):

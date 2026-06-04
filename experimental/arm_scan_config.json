@@ -10,6 +10,7 @@
         "end_deg":         120,
         "spd":              10,
         "green_threshold":  0.01,
-        "timeout_s":        60
+        "timeout_s":        60,
+        "aux_pct":          50
     }
 }

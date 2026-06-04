@@ -463,6 +463,7 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
             arm_cam_device    = args.arm_cam,
             arm_config_path   = args.arm_config,
             arm_sweep_spd     = args.arm_spd,
+            arm_aux_pct       = args.arm_aux,
         )
     if name == "omnivla_full":
         from omnivla_full_strategy import OmniVLAFullStrategy
@@ -549,6 +550,9 @@ def main():
                         help="Path to arm_scan_config.json")
     parser.add_argument("--arm-spd",    type=int, default=5,
                         help="Arm continuous rotation speed 0-20 (default 5)")
+    parser.add_argument("--arm-aux",    type=int, default=50,
+                        metavar="PCT",
+                        help="AUX output %% sent to rover when plant centred (default 50)")
     parser.add_argument("--exg-threshold", type=int, default=60,
                         metavar="N",
                         help="ExG vegetation threshold for wheel cameras (default 60)")
