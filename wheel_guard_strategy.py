@@ -7,15 +7,12 @@ any wheel that detects vegetation.
 
 Camera layout
 ─────────────
-  Left  wheel cam (--left-cam)  : top half = wheel zone
+  Left  wheel cam (--left-cam)  : bottom half = wheel zone
   Right wheel cam (--right-cam) : bottom half = wheel zone
 
-Behaviour
-─────────
-  Both clear       → drive straight at forward_vel
-  Left trampling   → steer right (negative radius)
-  Right trampling  → steer left  (positive radius)
-  Both trampling   → stop
+Each camera can be a local USB device OR a WebSocket stream:
+  --left-cam /dev/cam-left          → local V4L2 device
+  --left-cam ws://192.168.1.10:5010 → remote JPEG-over-WebSocket stream
 
 Usage
 ─────
@@ -33,6 +30,7 @@ import numpy as np
 
 from navigation_strategy import AgentState, NavigationStrategy
 from crop_guard_strategy import _process_wheel_frame
+from frame_source import open_frame_source, FrameSource
 
 log = logging.getLogger("rover.wheel_guard")
 
@@ -82,8 +80,8 @@ class WheelGuardStrategy(NavigationStrategy):
         self._right_vis: np.ndarray | None = None
         self._wheel_vis_lock = threading.Lock()
 
-        self._left_cap  = None
-        self._right_cap = None
+        self._left_src:  FrameSource | None = None
+        self._right_src: FrameSource | None = None
 
         self._running = True
         threading.Thread(target=self._wheel_thread, daemon=True,
@@ -108,7 +106,9 @@ class WheelGuardStrategy(NavigationStrategy):
         pass
 
     def cameras_ready(self) -> tuple[bool, bool, bool]:
-        return True, self._left_cap is not None, self._right_cap is not None
+        left_ok  = self._left_src  is not None and self._left_src.is_open()
+        right_ok = self._right_src is not None and self._right_src.is_open()
+        return True, left_ok, right_ok
 
     def run_query(self, state: AgentState, frame: np.ndarray,
                   captures_dir, rover_ctrl) -> None:
@@ -162,19 +162,20 @@ class WheelGuardStrategy(NavigationStrategy):
     def _wheel_thread(self) -> None:
         log.info("Wheel cameras: waiting 4s for main camera to initialise…")
         time.sleep(4.0)
-        self._left_cap  = self._open_cam(self._left_device,  "left",  self._cam_controls)
+        self._left_src  = open_frame_source(self._left_device,  "left",  self._cam_controls)
         time.sleep(5.0)
-        self._right_cap = self._open_cam(self._right_device, "right", self._cam_controls)
+        self._right_src = open_frame_source(self._right_device, "right", self._cam_controls)
 
         if not hasattr(self, "_fps_times"):
             self._fps_times = {"left": [], "right": []}
 
         while self._running:
             try:
-                lf = self._grab(self._left_cap)
-                rf = self._grab(self._right_cap)
+                lf = self._left_src.read()  if self._left_src  else None
+                rf = self._right_src.read() if self._right_src else None
 
-                both_ready = self._left_cap is not None and self._right_cap is not None
+                both_ready = (self._left_src  is not None and self._left_src.is_open() and
+                              self._right_src is not None and self._right_src.is_open())
 
                 now_fps = time.time()
                 for side in ("left", "right"):
@@ -225,60 +226,6 @@ class WheelGuardStrategy(NavigationStrategy):
             time.sleep(0.04)   # 25 Hz
 
     # ── Camera helpers (shared with crop_guard) ───────────────────────────────
-
-    @staticmethod
-    def _open_cam(device, label: str, cam_controls: dict | None = None):
-        path = device if isinstance(device, str) else f"/dev/video{device}"
-        cap = cv2.VideoCapture(path, cv2.CAP_V4L2)
-        if not cap.isOpened():
-            cap = cv2.VideoCapture(path)
-        if not cap.isOpened():
-            log.warning("%s wheel camera NOT FOUND at %s", label, path)
-            return None
-
-        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        cap.set(cv2.CAP_PROP_FPS, 10)
-
-        actual_fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
-        fourcc_str = "".join(chr((actual_fourcc >> (8 * i)) & 0xFF) for i in range(4))
-        actual_fps  = cap.get(cv2.CAP_PROP_FPS)
-        if cam_controls:
-            import subprocess, shlex
-            ctrl_str = ",".join(f"{k}={v}" for k, v in cam_controls.items())
-            if "exposure_time_absolute" in cam_controls:
-                subprocess.run(
-                    shlex.split(f"v4l2-ctl --device {path} --set-ctrl=auto_exposure=1"),
-                    check=False, capture_output=True)
-            subprocess.run(
-                shlex.split(f"v4l2-ctl --device {path} --set-ctrl={ctrl_str}"),
-                check=False, capture_output=True)
-            log.info("%s wheel camera %s: applied controls %s", label, path, ctrl_str)
-        else:
-            log.info("%s wheel camera %s: using auto exposure", label, path)
-
-        for _ in range(60):
-            ret, _ = cap.read()
-            if ret:
-                log.info("%s wheel camera ready at %s  (%dx%d)  fourcc=%s  fps=%.0f",
-                         label, path,
-                         int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-                         int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-                         fourcc_str, actual_fps)
-                return cap
-            time.sleep(0.05)
-
-        log.warning("%s wheel camera %s opened but delivers no frames", label, path)
-        cap.release()
-        return None
-
-    @staticmethod
-    def _grab(cap) -> np.ndarray | None:
-        if cap is None or not cap.isOpened():
-            return None
-        ret, frame = cap.read()
-        return frame if ret else None
 
     @staticmethod
     def _blank_vis(label: str) -> np.ndarray:

@@ -59,6 +59,7 @@ import cv2
 import numpy as np
 
 from navigation_strategy import AgentState, NavigationStrategy
+from frame_source import open_frame_source, FrameSource
 from omnivla_strategy import (
     METRIC_SPACING, WAYPOINT_IDX,
     _waypoint_to_drive, _annotate,
@@ -351,8 +352,8 @@ class CropGuardStrategy(NavigationStrategy):
         # main camera (device 0) initialisation — on Jetson all USB cameras
         # share one controller, and grabbing frames on 2+4 before 0 is ready
         # starves device 0's warmup reads.
-        self._left_cap  = None
-        self._right_cap = None
+        self._left_src:  FrameSource | None = None
+        self._right_src: FrameSource | None = None
 
         # Background wheel-capture thread (10 Hz independent of OmniVLA timing)
         self._running = True
@@ -379,7 +380,9 @@ class CropGuardStrategy(NavigationStrategy):
         so we only track the two wheel cameras here.  front_ok is always True
         from this strategy's perspective.
         """
-        return True, self._left_cap is not None, self._right_cap is not None
+        left_ok  = self._left_src  is not None and self._left_src.is_open()
+        right_ok = self._right_src is not None and self._right_src.is_open()
+        return True, left_ok, right_ok
 
     def set_recorder(self, recorder) -> None:
         self._recorder = recorder
@@ -641,16 +644,17 @@ class CropGuardStrategy(NavigationStrategy):
         log.info("Wheel cameras: waiting %.0fs for main camera to initialise…",
                  _STARTUP_DELAY_S)
         time.sleep(_STARTUP_DELAY_S)
-        self._left_cap  = self._open_cam(self._left_device,  "left",  self._cam_controls)
+        self._left_src  = open_frame_source(self._left_device,  "left",  self._cam_controls)
         time.sleep(5.0)   # stagger: both cams on same USB hub — give left time to fully stabilise
-        self._right_cap = self._open_cam(self._right_device, "right", self._cam_controls)
+        self._right_src = open_frame_source(self._right_device, "right", self._cam_controls)
 
         while self._running:
             try:
-                lf = self._grab(self._left_cap)
-                rf = self._grab(self._right_cap)
+                lf = self._left_src.read()  if self._left_src  else None
+                rf = self._right_src.read() if self._right_src else None
 
-                both_ready = self._left_cap is not None and self._right_cap is not None
+                both_ready = (self._left_src  is not None and self._left_src.is_open() and
+                              self._right_src is not None and self._right_src.is_open())
 
                 # Rolling FPS measurement (per camera)
                 now_fps = time.time()
@@ -703,81 +707,7 @@ class CropGuardStrategy(NavigationStrategy):
 
             time.sleep(0.10)   # 10 Hz — matches camera fps, avoids V4L2 queue backup
 
-    # ── Camera helpers ────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _open_cam(device, label: str, cam_controls: dict | None = None):
-        """Open a wheel camera using an explicit /dev/videoN path.
-
-        `device` can be an int (2 → /dev/video2) or a path string
-        (/dev/cam-left).  Using a path bypasses OpenCV's index remapping
-        which can open the wrong node when multiple cameras share a VID:PID.
-
-        HD USB cameras on this rover don't support MJPEG; we let the driver
-        choose the format (YUYV) and just cap FPS at 10 to save USB bandwidth.
-        """
-        path = device if isinstance(device, str) else f"/dev/video{device}"
-        cap = cv2.VideoCapture(path, cv2.CAP_V4L2)
-        if not cap.isOpened():
-            cap = cv2.VideoCapture(path)        # fallback to default backend
-        if not cap.isOpened():
-            log.warning("%s wheel camera NOT FOUND at %s", label, path)
-            return None
-
-        # Try MJPEG first; if the camera doesn't support it the driver will
-        # silently stay on YUYV — we check below and warn.
-        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        cap.set(cv2.CAP_PROP_FPS, 10)
-
-        # Apply v4l2 controls for bright-sun washout reduction.
-        # cam_controls is a dict of {ctrl_name: value} passed from the strategy.
-        if cam_controls:
-            import subprocess, shlex
-            ctrl_str = ",".join(f"{k}={v}" for k, v in cam_controls.items())
-            # exposure_time_absolute requires auto_exposure=1 (manual) first
-            if "exposure_time_absolute" in cam_controls:
-                subprocess.run(
-                    shlex.split(f"v4l2-ctl --device {path} --set-ctrl=auto_exposure=1"),
-                    check=False, capture_output=True)
-            subprocess.run(
-                shlex.split(f"v4l2-ctl --device {path} --set-ctrl={ctrl_str}"),
-                check=False, capture_output=True)
-            log.info("%s wheel camera %s: applied controls %s", label, path, ctrl_str)
-        else:
-            log.info("%s wheel camera %s: using auto exposure", label, path)
-
-        actual_fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
-        fourcc_str = "".join(chr((actual_fourcc >> (8 * i)) & 0xFF) for i in range(4))
-        actual_fps  = cap.get(cv2.CAP_PROP_FPS)
-
-        if fourcc_str != "MJPG":
-            log.info("%s wheel camera %s: MJPEG not supported, using %s",
-                     label, path, fourcc_str)
-
-        # Warmup reads — driver needs a few frames to stabilise
-        for _ in range(30):
-            ret, _ = cap.read()
-            if ret:
-                log.info("%s wheel camera ready at %s  (%dx%d)  fourcc=%s  fps=%.0f",
-                         label, path,
-                         int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-                         int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-                         fourcc_str, actual_fps)
-                return cap
-            time.sleep(0.05)
-
-        log.warning("%s wheel camera %s opened but delivers no frames", label, path)
-        cap.release()
-        return None
-
-    @staticmethod
-    def _grab(cap) -> np.ndarray | None:
-        if cap is None or not cap.isOpened():
-            return None
-        ret, frame = cap.read()
-        return frame if ret else None
+    # ── Display helpers ───────────────────────────────────────────────────────
 
     @staticmethod
     def _blank_vis(label: str) -> np.ndarray:
