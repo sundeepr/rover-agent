@@ -288,6 +288,8 @@ def main():
                         help=f"Output directory for detections (default: {OUTPUT_DIR})")
     parser.add_argument("--config",    default=str(DEFAULT_CONFIG),
                         help=f"Path to arm config JSON (default: {DEFAULT_CONFIG})")
+    parser.add_argument("--no-ui",     action="store_true",
+                        help="Disable the OpenCV display window (headless mode)")
     args = parser.parse_args()
 
     cfg = load_config(Path(args.config))
@@ -320,8 +322,9 @@ def main():
         print(f"   Green threshold: {args.threshold*100:.2f}%  |  Ctrl-C to stop\n")
         start_base_rotation(ser, args.spd)
 
-        cv2.namedWindow("Arm Scan", cv2.WINDOW_NORMAL)
-        cv2.resizeWindow("Arm Scan", 1280, 720)
+        if not args.no_ui:
+            cv2.namedWindow("Arm Scan", cv2.WINDOW_NORMAL)
+            cv2.resizeWindow("Arm Scan", 1280, 720)
 
         led_on = False
 
@@ -361,23 +364,23 @@ def main():
                 print("LED OFF — plant left frame centre")
 
             # Draw detections and show live window
-            display = draw_detections(frame, contours, feedback, ratio)
-            # Draw centre-zone box (vertical + horizontal guide lines)
-            cx, cy = int(frame_cx), int(frame_cy)
-            mx, my = int(margin_x), int(margin_y)
-            colour = (0, 255, 255) if plant_centred else (255, 255, 0)
-            cv2.line(display, (cx - mx, 0),            (cx - mx, frame.shape[0]), colour, 1)
-            cv2.line(display, (cx + mx, 0),            (cx + mx, frame.shape[0]), colour, 1)
-            cv2.line(display, (0, cy - my),            (frame.shape[1], cy - my), colour, 1)
-            cv2.line(display, (0, cy + my),            (frame.shape[1], cy + my), colour, 1)
-            if plant_centred:
-                cv2.putText(display, "CENTRED", (cx - 50, frame.shape[0] - 15),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
-
-            cv2.imshow("Arm Scan", display)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                print("\nQ pressed — stopping.")
-                break
+            if not args.no_ui:
+                display = draw_detections(frame, contours, feedback, ratio)
+                # Draw centre-zone box (vertical + horizontal guide lines)
+                cx, cy = int(frame_cx), int(frame_cy)
+                mx, my = int(margin_x), int(margin_y)
+                colour = (0, 255, 255) if plant_centred else (255, 255, 0)
+                cv2.line(display, (cx - mx, 0),         (cx - mx, frame.shape[0]), colour, 1)
+                cv2.line(display, (cx + mx, 0),         (cx + mx, frame.shape[0]), colour, 1)
+                cv2.line(display, (0, cy - my),         (frame.shape[1], cy - my), colour, 1)
+                cv2.line(display, (0, cy + my),         (frame.shape[1], cy + my), colour, 1)
+                if plant_centred:
+                    cv2.putText(display, "CENTRED", (cx - 50, frame.shape[0] - 15),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
+                cv2.imshow("Arm Scan", display)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    print("\nQ pressed — stopping.")
+                    break
 
             if ratio >= args.threshold and contours:
                 b_deg = np.degrees(b_rad)
@@ -410,7 +413,8 @@ def main():
         home(ser, cfg)
         cap.release()
         ser.close()
-        cv2.destroyAllWindows()
+        if not args.no_ui:
+            cv2.destroyAllWindows()
         print(f"Done. {detection_count} green detection(s) saved to {out_dir}")
 
 
