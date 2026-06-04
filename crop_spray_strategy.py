@@ -361,17 +361,24 @@ class CropSprayStrategy(NavigationStrategy):
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
             log.info("Arm camera %d opened", self._arm_cam_device)
 
+            # Read sweep params from config (fall back to constructor args)
+            sweep     = self._arm_cfg.get("sweep", {})
+            start_deg = sweep.get("start_deg",   -120)
+            end_deg   = sweep.get("end_deg",       120)
+            sweep_spd = sweep.get("spd",  self._arm_sweep_spd)
+
             # Home arm and move to sweep start position
             _arm_home(ser, self._arm_cfg)
-            log.info("Arm sweep: moving base to -120°…")
-            _arm_send(ser, {"T": 121, "joint": 1, "angle": -120, "spd": 30, "acc": 10})
-            travel_s = 120 / 30 + 3
+            log.info("Arm sweep: moving base to %d°…", start_deg)
+            _arm_send(ser, {"T": 121, "joint": 1, "angle": start_deg, "spd": 30, "acc": 10})
+            travel_s = abs(start_deg) / 30 + 3
             time.sleep(travel_s)
 
             # Start continuous rotation
-            log.info("Arm sweep: starting rotation spd=%d", self._arm_sweep_spd)
+            log.info("Arm sweep: starting rotation %d°→%d° spd=%d",
+                     start_deg, end_deg, sweep_spd)
             _arm_send(ser, {"T": 123, "m": 0, "axis": 1, "cmd": 1,
-                            "spd": self._arm_sweep_spd})
+                            "spd": sweep_spd})
 
             led_on = False
             frames_processed = 0
@@ -409,8 +416,8 @@ class CropSprayStrategy(NavigationStrategy):
 
                 frames_processed += 1
 
-                # Stop at +120°
-                if not np.isnan(b_rad) and np.degrees(b_rad) >= 119.0:
+                # Stop when sweep end angle reached
+                if not np.isnan(b_rad) and np.degrees(b_rad) >= end_deg - 1.0:
                     log.info("Arm sweep: base reached +120° — sweep complete")
                     break
 

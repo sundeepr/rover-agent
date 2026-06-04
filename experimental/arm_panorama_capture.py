@@ -306,26 +306,29 @@ def main():
     ser.rts = False
     time.sleep(4)   # allow ESP32 to be fully ready
 
+    # Sweep parameters: config file takes precedence over CLI args
+    sweep      = cfg.get("sweep", {})
+    start_deg  = sweep.get("start_deg",        -120)
+    end_deg    = sweep.get("end_deg",            120)
+    sweep_spd  = sweep.get("spd",          args.spd)
+    threshold  = sweep.get("green_threshold", args.threshold)
+
     cap = open_camera(args.cam)
 
     detection_count = 0
     try:
         home(ser, cfg)
 
-        # Move base to -180°.
-        # T:121 is a blocking command on the arm side — the ESP32 won't respond
-        # to T:105 feedback requests while executing it. Wait long enough for
-        # the full 180° travel at spd=30°/s plus acceleration headroom.
-        print("-- Moving base to -120° start position (waiting for travel to complete) --")
-        send(ser, {"T": 121, "joint": 1, "angle": -120, "spd": 30, "acc": 10})
-        travel_time = 120 / 30 + 3   # 4s travel + 3s acceleration headroom
-        print(f"  Waiting {travel_time:.0f}s for base to reach -120°...")
+        travel_time = abs(start_deg) / 30 + 3
+        print(f"-- Moving base to {start_deg}° start position --")
+        send(ser, {"T": 121, "joint": 1, "angle": start_deg, "spd": 30, "acc": 10})
+        print(f"  Waiting {travel_time:.0f}s for base to reach {start_deg}°...")
         time.sleep(travel_time)
-        print("  Base should be at -120°, starting sweep")
+        print(f"  Base at {start_deg}°, starting sweep")
 
-        print(f"\n-- Starting continuous base rotation -120° → +120°  spd={args.spd} --")
-        print(f"   Green threshold: {args.threshold*100:.2f}%  |  Ctrl-C to stop\n")
-        start_base_rotation(ser, args.spd)
+        print(f"\n-- Continuous base rotation {start_deg}° → {end_deg}°  spd={sweep_spd} --")
+        print(f"   Green threshold: {threshold*100:.2f}%  |  Ctrl-C to stop\n")
+        start_base_rotation(ser, sweep_spd)
 
         if not args.no_ui:
             cv2.namedWindow("Arm Scan", cv2.WINDOW_NORMAL)
@@ -387,7 +390,7 @@ def main():
                     print("\nQ pressed — stopping.")
                     break
 
-            if ratio >= args.threshold and contours:
+            if ratio >= threshold and contours:
                 b_deg = np.degrees(b_rad)
                 s_deg = np.degrees(feedback.get("s", float("nan")))
                 e_deg = np.degrees(feedback.get("e", float("nan")))
@@ -399,8 +402,8 @@ def main():
                     f"elbow={e_deg:.1f}°  eoat={t_deg:.1f}°"
                 )
 
-            # Stop when base has completed a full sweep to +120°
-            if not np.isnan(b_rad) and np.degrees(b_rad) >= 119.0:
+            # Stop when base has completed the sweep to end_deg
+            if not np.isnan(b_rad) and np.degrees(b_rad) >= end_deg - 1.0:
                 print("\n-- Base reached +120°, stopping --")
                 break
 
