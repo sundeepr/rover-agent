@@ -511,6 +511,17 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
             max_lin_mm_s=args.omnivla_velocity,
             icr_offset_m=_geo["icr_offset_mm"] / 1000.0,
         )
+    if name == "row_change":
+        from row_change_strategy import RowChangeStrategy
+        return RowChangeStrategy(
+            qwen_server_url    = args.qwen_server,
+            forward_vel        = args.crop_guard_vel,
+            turn_90_duration_s = args.turn_90_duration,
+            nudge_mm           = args.nudge_mm,
+            nudge_vel          = args.nudge_vel,
+            qwen_interval_s    = args.qwen_interval,
+            end_confirmations  = args.end_confirmations,
+        )
     if name == "line_follow":
         from line_follow_strategy import LineFollowStrategy
         return LineFollowStrategy(
@@ -562,7 +573,7 @@ def main():
                         choices=["omnivla_full", "cloud_omnivla", "bev_omnivla",
                                  "omnivla", "line_follow", "plant_center",
                                  "boundary_guard", "teleop", "crop_guard",
-                                 "wheel_guard", "crop_spray"],
+                                 "wheel_guard", "crop_spray", "row_change"],
                         help="Navigation strategy (default: omnivla_full)")
     parser.add_argument("--left-cam",   type=_device, default=1,
                         metavar="INDEX|PATH",
@@ -630,6 +641,29 @@ def main():
                         metavar="URL",
                         help="WebSocket URL of omnivla_cloud_server.py "
                              "(cloud_omnivla strategy, default: ws://localhost:8765)")
+    parser.add_argument("--qwen-server", type=str,  default="ws://localhost:8766",
+                        metavar="URL",
+                        help="WebSocket URL of qwen_cloud_server.py "
+                             "(row_change strategy, default: ws://localhost:8766)")
+    parser.add_argument("--turn-90-duration", type=float, default=4.5,
+                        metavar="SECS",
+                        help="Time in seconds for a 90° tank turn (row_change, default 4.5). "
+                             "Calibrate on the actual hardware.")
+    parser.add_argument("--nudge-mm", type=int, default=150,
+                        metavar="MM",
+                        help="Step size in mm for each forward nudge when finding/aligning "
+                             "to next row (row_change, default 150)")
+    parser.add_argument("--nudge-vel", type=int, default=30,
+                        metavar="MM_S",
+                        help="Speed in mm/s for nudge moves (row_change, default 30)")
+    parser.add_argument("--qwen-interval", type=float, default=3.0,
+                        metavar="SECS",
+                        help="Seconds between Qwen end-of-row checks during row following "
+                             "(row_change, default 3.0)")
+    parser.add_argument("--end-confirmations", type=int, default=2,
+                        metavar="N",
+                        help="Consecutive YES answers from Qwen before triggering row change "
+                             "(default 2)")
     parser.add_argument("--omnivla-weights", type=str, default=None,
                         metavar="PATH",
                         help="Path to custom OmniVLA-edge weights (.pth). "
@@ -723,7 +757,7 @@ def main():
     # If a goal was given on the CLI, apply it immediately so the agent
     # starts navigating without waiting for web chat input.
     _NO_GOAL_STRATEGIES = ("line_follow", "plant_center", "boundary_guard", "teleop",
-                           "wheel_guard", "crop_spray")
+                           "wheel_guard", "crop_spray", "row_change")
     if args.goal and args.strategy not in _NO_GOAL_STRATEGIES:
         strategy.set_goal(args.goal)
         with state.result_lock:
