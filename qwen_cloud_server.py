@@ -168,8 +168,7 @@ class InferenceEngine:
             generated_ids = self._model.generate(
                 **inputs,
                 max_new_tokens=self._max_new_tokens,
-                temperature=self._temperature if self._temperature < 1.0 else None,
-                do_sample=self._temperature > 0.0,
+                do_sample=False,   # greedy — most reliable for short structured answers
             )
 
         # Trim prompt tokens — only decode the new tokens
@@ -183,7 +182,19 @@ class InferenceEngine:
             clean_up_tokenization_spaces=False,
         )[0].strip()
 
+        # Strip markdown code fences the model sometimes adds (```python\nYES\n```)
+        response_text = _strip_markdown(response_text)
+
         return {"text": response_text, "elapsed": round(time.time() - t0, 3)}
+
+
+def _strip_markdown(text: str) -> str:
+    """Remove markdown code fences and extra whitespace from model output."""
+    import re
+    # Remove ```lang ... ``` blocks, keeping only the inner content
+    text = re.sub(r"```[a-zA-Z]*\n?", "", text)
+    text = text.replace("```", "")
+    return text.strip()
 
 
 # ── Per-connection session ────────────────────────────────────────────────────

@@ -41,7 +41,6 @@ Usage
 
 import asyncio
 import base64
-import io
 import json
 import logging
 import threading
@@ -52,6 +51,8 @@ import cv2
 import numpy as np
 
 from navigation_strategy import AgentState, NavigationStrategy
+from crop_guard_strategy import _process_wheel_frame
+from frame_source import open_frame_source, FrameSource
 
 log = logging.getLogger("rover.row_change")
 
@@ -119,8 +120,8 @@ class _QwenClient:
             try:
                 log.info("Connecting to Qwen server: %s", self._url)
                 async with websockets.connect(self._url,
-                                              ping_interval=20,
-                                              ping_timeout=30) as ws:
+                                              ping_interval=30,
+                                              ping_timeout=120) as ws:
                     self._ws    = ws
                     self._ready = True
                     delay       = self._RECONNECT_DELAY
@@ -148,7 +149,7 @@ class _QwenClient:
                     self._pending = msg
                 self._response_event.set()
 
-    def query(self, frame_jpeg: bytes, instruction: str, timeout: float = 30.0) -> str | None:
+    def query(self, frame_jpeg: bytes, instruction: str, timeout: float = 120.0) -> str | None:
         """
         Send one frame + instruction, block until the model replies.
 
