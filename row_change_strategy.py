@@ -58,33 +58,52 @@ log = logging.getLogger("rover.row_change")
 
 _JPEG_QUALITY = 80
 
+
+def _parse_json(text: str) -> dict | None:
+    """Extract and parse the first JSON object from a model response string."""
+    import json, re
+    # Try direct parse first
+    try:
+        return json.loads(text.strip())
+    except Exception:
+        pass
+    # Find first {...} block in the text
+    m = re.search(r'\{[^{}]+\}', text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group())
+        except Exception:
+            pass
+    return None
+
 # ── Qwen prompts ──────────────────────────────────────────────────────────────
 
 _PROMPT_END_OF_ROW = (
     "Look at this camera image from an agricultural rover driving along a crop row. "
     "The crop row the rover is currently following appears in the BOTTOM HALF of the image. "
-    "Ignore any crops or fields visible in the top half of the image — those are distant "
-    "fields and not the row being followed. "
+    "Ignore any crops or fields visible in the top half — those are distant fields. "
     "Has the rover reached the END of the crop row it is currently on? "
     "Signs of row end: the bottom half shows bare soil or open space with no more plants, "
     "the planted area in the bottom half terminates, a headland or turning area is visible. "
-    "Do not write code. Reply with only the single word YES or NO."
+    'Reply with a JSON object only, no explanation outside the JSON: '
+    '{"answer": "YES" or "NO", "reason": "one sentence"}'
 )
 
 _PROMPT_OVER_ROW = (
     "Look at this camera image from an agricultural rover. "
-    "Is the rover currently positioned over or immediately next to a crop row? "
-    "A crop row means plants or vegetation forming a line visible in the image. "
-    "Do not write code. Reply with only the single word YES or NO."
+    "Is the rover currently positioned over or immediately next to a crop row "
+    "(plants or vegetation forming a line visible in the image)? "
+    'Reply with a JSON object only, no explanation outside the JSON: '
+    '{"answer": "YES" or "NO", "reason": "one sentence"}'
 )
 
 _PROMPT_ALIGNED = (
     "Look at this camera image from an agricultural rover. "
     "Is the rover centred and aligned along a crop row, ready to drive straight down it? "
-    "Do not write code. Reply with exactly one of these words: "
-    "ALIGNED (rover is on the row), "
-    "FORWARD (the row is further ahead of the rover), "
-    "BACKWARD (the row is behind the rover)."
+    'Reply with a JSON object only, no explanation outside the JSON: '
+    '{"answer": "ALIGNED", "reason": "one sentence"} if on the row, '
+    '{"answer": "FORWARD", "reason": "one sentence"} if the row is further ahead, '
+    '{"answer": "BACKWARD", "reason": "one sentence"} if the row is behind.'
 )
 
 
@@ -329,17 +348,24 @@ class RowChangeStrategy(NavigationStrategy):
                 now = time.time()
                 if now - last_qwen_t >= self._qwen_interval_s:
                     last_qwen_t = now
-                    answer = self._qwen_query(frame, _PROMPT_END_OF_ROW)
-                    log.info("[FOLLOWING] Qwen: %r  confirmations=%d",
-                             answer, self._confirmations)
-                    if self._is_yes(answer):
+                    parsed = self._qwen_query(frame, _PROMPT_END_OF_ROW)
+                    if not self._is_valid(parsed):
+                        # Garbled/empty response — skip, don't reset counter
+                        log.info("[FOLLOWING] Qwen: invalid response %r — ignoring",
+                                 parsed)
+                    elif self._is_yes(parsed):
                         self._confirmations += 1
+                        log.info("[FOLLOWING] Qwen: YES (%s)  confirmations=%d/%d",
+                                 parsed.get("reason", ""), self._confirmations,
+                                 self._end_confirmations)
                         if self._confirmations >= self._end_confirmations:
                             log.info("End of row confirmed — starting maneuver")
                             self._confirmations = 0
                             self._run_maneuver(state, rover_ctrl)
                             last_qwen_t = 0.0
                     else:
+                        log.info("[FOLLOWING] Qwen: NO (%s)  confirmations reset",
+                                 parsed.get("reason", ""))
                         self._confirmations = 0
 
                 time.sleep(0.05)
@@ -369,10 +395,12 @@ class RowChangeStrategy(NavigationStrategy):
             time.sleep(0.3)   # settle before grabbing frame
             frame = self._latest_frame(state)
             if frame is not None:
-                answer = self._qwen_query(frame, _PROMPT_OVER_ROW)
-                log.info("[FINDING_ROW] nudge %d/%d  Qwen: %r",
-                         i + 1, self._max_find, answer)
-                if self._is_yes(answer):
+                parsed = self._qwen_query(frame, _PROMPT_OVER_ROW)
+                log.info("[FINDING_ROW] nudge %d/%d  answer=%s  reason=%s",
+                         i + 1, self._max_find,
+                         parsed.get("answer") if parsed else "invalid",
+                         parsed.get("reason", "") if parsed else "")
+                if self._is_yes(parsed):
                     found = True
                     break
         if not found:
@@ -394,17 +422,19 @@ class RowChangeStrategy(NavigationStrategy):
             frame = self._latest_frame(state)
             if frame is None:
                 continue
-            answer = self._qwen_query(frame, _PROMPT_ALIGNED)
-            log.info("[ALIGNING] step %d/%d  Qwen: %r", i + 1, self._max_align, answer)
-            if not answer:
+            parsed = self._qwen_query(frame, _PROMPT_ALIGNED)
+            if not self._is_valid(parsed):
+                log.info("[ALIGNING] step %d/%d  invalid response — retrying", i + 1, self._max_align)
                 continue
-            upper = answer.upper()
-            if "ALIGNED" in upper:
+            answer = parsed.get("answer", "").upper()
+            log.info("[ALIGNING] step %d/%d  answer=%s  reason=%s",
+                     i + 1, self._max_align, answer, parsed.get("reason", ""))
+            if "ALIGNED" in answer:
                 log.info("[ALIGNING] aligned — resuming row following")
                 break
-            elif "FORWARD" in upper:
+            elif "FORWARD" in answer:
                 self._drive_distance(rover_ctrl, self._nudge_mm, self._nudge_vel)
-            elif "BACKWARD" in upper:
+            elif "BACKWARD" in answer:
                 self._drive_distance(rover_ctrl, self._nudge_mm, -self._nudge_vel)
         else:
             log.warning("[ALIGNING] could not align after %d nudges — resuming anyway",
@@ -437,17 +467,26 @@ class RowChangeStrategy(NavigationStrategy):
 
     # ── Qwen helpers ──────────────────────────────────────────────────────────
 
-    def _qwen_query(self, frame: np.ndarray, prompt: str) -> str | None:
+    def _qwen_query(self, frame: np.ndarray, prompt: str) -> dict | None:
+        """Send frame+prompt to Qwen, return parsed JSON dict or None."""
         ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, _JPEG_QUALITY])
         if not ok:
             return None
-        return self._qwen.query(buf.tobytes(), prompt)
+        raw = self._qwen.query(buf.tobytes(), prompt)
+        if not raw:
+            return None
+        return _parse_json(raw)
 
     @staticmethod
-    def _is_yes(answer: str | None) -> bool:
-        if not answer:
+    def _is_yes(parsed: dict | None) -> bool:
+        if not parsed:
             return False
-        return "YES" in answer.upper()
+        return parsed.get("answer", "").upper() == "YES"
+
+    @staticmethod
+    def _is_valid(parsed: dict | None) -> bool:
+        """Return True if the model gave a parseable answer (not empty/garbled)."""
+        return parsed is not None and "answer" in parsed
 
     @staticmethod
     def _latest_frame(state: AgentState) -> np.ndarray | None:
