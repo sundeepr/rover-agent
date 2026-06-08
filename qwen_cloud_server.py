@@ -133,7 +133,8 @@ class InferenceEngine:
 
         t0 = time.time()
 
-        pil_imgs = [PIL_Image.open(io.BytesIO(f)).convert("RGB") for f in frames]
+        pil_imgs = [PIL_Image.open(io.BytesIO(f)).convert("RGB").resize((320, 240), PIL_Image.LANCZOS)
+                    for f in frames]
 
         # Build multi-image content block
         content = []
