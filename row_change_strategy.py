@@ -80,30 +80,35 @@ def _extract_answer(text: str, choices: list[str]) -> tuple[str, str]:
 # ── Qwen prompts ──────────────────────────────────────────────────────────────
 
 _PROMPT_END_OF_ROW = (
-    "Look at this camera image from an agricultural rover driving along a crop row. "
-    "The crop row the rover is currently following appears in the BOTTOM HALF of the image. "
-    "Ignore any crops or fields visible in the top half — those are distant fields. "
-    "Has the rover reached the END of the crop row it is currently on? "
-    "Signs of row end: the bottom half shows bare soil or open space with no more plants, "
-    "the planted area in the bottom half terminates, a headland or turning area is visible. "
-    "Answer YES or NO, then give one sentence reason. Example: YES - bare soil visible ahead."
+    "You are shown consecutive camera frames from an agricultural rover driving along a crop row. "
+    "The frames are ordered oldest to most recent — use the sequence to understand how the scene is changing. "
+    "The crop row the rover is following appears in the BOTTOM HALF of each frame. "
+    "Ignore any crops or fields in the top half — those are distant fields. "
+    "Has the rover reached the END of the crop row based on the progression across the frames? "
+    "Signs of row end: the bottom half transitions to bare soil or open space, "
+    "the planted area terminates, a headland or turning area becomes visible. "
+    "Answer YES or NO, then give one sentence reason describing what you see changing across the frames. "
+    "Example: YES - the bottom half shows decreasing vegetation across the frames, bare soil visible in the last frame."
 )
 
 _PROMPT_OVER_ROW = (
-    "Look at this camera image from an agricultural rover. "
+    "You are shown consecutive camera frames from an agricultural rover. "
+    "The frames are ordered oldest to most recent. "
     "Is the rover currently positioned over or immediately next to a crop row "
-    "(plants or vegetation forming a line visible in the image)? "
-    "Answer YES or NO, then give one sentence reason. Example: YES - crop plants visible below."
+    "(plants or vegetation forming a line visible in the frames)? "
+    "Answer YES or NO, then give one sentence reason. "
+    "Example: YES - crop plants visible beneath the rover in the most recent frame."
 )
 
 _PROMPT_ALIGNED = (
-    "Look at this camera image from an agricultural rover. "
-    "Is the rover centred and aligned along a crop row, ready to drive straight down it? "
+    "You are shown consecutive camera frames from an agricultural rover. "
+    "The frames are ordered oldest to most recent. "
+    "Is the rover now centred and aligned along a crop row, ready to drive straight down it? "
     "Answer ALIGNED, FORWARD, or BACKWARD, then give one sentence reason. "
     "ALIGNED means the rover is on the row. "
     "FORWARD means the row is further ahead. "
     "BACKWARD means the row is behind. "
-    "Example: ALIGNED - crop row visible straight ahead."
+    "Example: ALIGNED - crop row centred and straight in the most recent frame."
 )
 
 
