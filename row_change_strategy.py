@@ -62,9 +62,12 @@ _JPEG_QUALITY = 80
 
 _PROMPT_END_OF_ROW = (
     "Look at this camera image from an agricultural rover driving along a crop row. "
-    "Has the rover reached the END of the crop row? "
-    "Signs of row end: open space or bare soil ahead with no more plants, "
-    "the planted area terminates, a headland or turning area is visible. "
+    "The crop row the rover is currently following appears in the BOTTOM HALF of the image. "
+    "Ignore any crops or fields visible in the top half of the image — those are distant "
+    "fields and not the row being followed. "
+    "Has the rover reached the END of the crop row it is currently on? "
+    "Signs of row end: the bottom half shows bare soil or open space with no more plants, "
+    "the planted area in the bottom half terminates, a headland or turning area is visible. "
     "Do not write code. Reply with only the single word YES or NO."
 )
 
