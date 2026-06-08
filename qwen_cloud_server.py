@@ -168,7 +168,8 @@ class InferenceEngine:
             generated_ids = self._model.generate(
                 **inputs,
                 max_new_tokens=self._max_new_tokens,
-                do_sample=False,   # greedy — most reliable for short structured answers
+                do_sample=False,
+                temperature=None,  # suppress warning from model's generation_config.json
             )
 
         # Trim prompt tokens — only decode the new tokens
