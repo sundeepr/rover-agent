@@ -136,6 +136,7 @@ def agent_loop(
     device,
     interval: float,
     rover_ctrl=None,
+    cam_controls: dict | None = None,
 ) -> None:
     """
     Camera capture loop — runs on a daemon thread at ~30 fps.
@@ -152,81 +153,26 @@ def agent_loop(
 
     device may be an int index, a /dev/ path, or a ws:// WebSocket URL.
     WebSocket URLs are handled via WebSocketFrameSource (camera_ws_server.py).
+    cam_controls is applied via v4l2-ctl for local devices (exposure, etc.).
     """
-    from frame_source import open_frame_source, WebSocketFrameSource
+    from frame_source import open_frame_source
 
-    is_ws = isinstance(device, str) and device.startswith(("ws://", "wss://"))
+    src = open_frame_source(device, "front", cam_controls=cam_controls, fps=10)
+    if src is None:
+        log.error("Could not open front camera: %s", device)
+        return
 
-    if is_ws:
-        src = open_frame_source(device, "front")
-        if src is None:
-            log.error("Could not open WebSocket camera: %s", device)
-            return
-        log.info("Front camera: WebSocket stream %s", device)
-        # Wait up to 15 s for the first frame to arrive
-        for _ in range(150):
-            if src.read() is not None:
-                break
-            time.sleep(0.1)
-        else:
-            log.error("WebSocket camera %s: no frame after 15 s", device)
-            src.release()
-            return
-
-        def _read_frame():
-            return src.read()
-
-        def _release():
-            src.release()
-
+    # Wait up to 15 s for first frame (WebSocket streams need connect time)
+    log.info("Waiting for front camera first frame…")
+    for _ in range(150):
+        if src.read() is not None:
+            break
+        time.sleep(0.1)
     else:
-        # On Jetson, each USB camera creates two /dev/videoN nodes (capture +
-        # metadata).  The metadata node opens successfully but cap.read() always
-        # returns False.  We try the V4L2 backend explicitly and use warmup reads
-        # to let the driver stabilise before entering the main loop.
-        cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
-        if not cap.isOpened():
-            log.error("Could not open camera at device %s — trying default backend", device)
-            cap = cv2.VideoCapture(device)
-        if not cap.isOpened():
-            log.error("Could not open camera at device %s", device)
-            return
-
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        cap.set(cv2.CAP_PROP_FPS, 10)
-        actual_fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
-        fourcc_str = "".join(chr((actual_fourcc >> (8 * i)) & 0xFF) for i in range(4))
-        actual_fps = cap.get(cv2.CAP_PROP_FPS)
-        log.info("Camera opened: %dx%d  fourcc=%s  fps=%.0f",
-                 int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-                 int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-                 fourcc_str, actual_fps)
-
-        # Warmup — Jetson USB cameras often need several reads before the first
-        # valid frame arrives.  Discard up to 30 frames silently.
-        log.info("Camera warmup (device %s)…", device)
-        for _w in range(30):
-            ret, _ = cap.read()
-            if ret:
-                break
-            time.sleep(0.05)
-        else:
-            log.warning(
-                "Camera device %s: no frame after 30 warmup reads.\n"
-                "  On Jetson, even-numbered /dev/videoN nodes are capture nodes;\n"
-                "  odd-numbered ones are metadata-only and never produce frames.",
-                device,
-            )
-            cap.release()
-            return
-
-        def _read_frame():
-            ret, f = cap.read()
-            return f if ret else None
-
-        def _release():
-            cap.release()
+        log.error("Front camera %s: no frame after 15 s", device)
+        src.release()
+        return
+    log.info("Front camera ready: %s", device)
 
     captures_dir = Path("captures")
     captures_dir.mkdir(exist_ok=True)
@@ -245,7 +191,7 @@ def agent_loop(
              effective_interval, strategy.name, interval)
 
     while True:
-        frame = _read_frame()
+        frame = src.read()
         if frame is None:
             _consecutive_failures += 1
             if _consecutive_failures == 1:
@@ -293,7 +239,7 @@ def agent_loop(
 
         time.sleep(0.033)   # ~30 fps
 
-    _release()
+    src.release()
     log.info("Camera released")
 
 
@@ -798,6 +744,7 @@ def main():
         threading.Thread(
             target=agent_loop,
             args=(state, strategy, args.device, args.interval, rover_ctrl),
+            kwargs={"cam_controls": _build_cam_controls(args)},
             daemon=True,
         ).start()
     else:
