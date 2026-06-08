@@ -99,7 +99,7 @@ class InferenceEngine:
     def load(self) -> None:
         """Load model and processor.  Blocks until ready (~30 s on GPU)."""
         import torch
-        from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
+        from transformers import AutoProcessor, AutoModelForVision2Seq
 
         log.info("Loading Qwen2.5-VL from %s …", self._model_path)
         log.info("device_map=%s", self._device_map)
@@ -109,7 +109,7 @@ class InferenceEngine:
             trust_remote_code=True,
         )
 
-        self._model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        self._model = AutoModelForVision2Seq.from_pretrained(
             str(self._model_path),
             torch_dtype=torch.float16,
             device_map=self._device_map,
