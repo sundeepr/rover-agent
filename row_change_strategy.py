@@ -61,26 +61,27 @@ _JPEG_QUALITY = 80
 # ── Qwen prompts ──────────────────────────────────────────────────────────────
 
 _PROMPT_END_OF_ROW = (
-    "Look at this image from a forward-facing camera on an agricultural rover "
-    "driving along a crop row. Has the rover reached the END of the crop row? "
-    "Signs of row end: open sky or bare soil ahead with no more plants, "
-    "the row of crops terminates, headland or turning area visible. "
-    "Answer with only YES or NO."
+    "Look at this camera image from an agricultural rover driving along a crop row. "
+    "Has the rover reached the END of the crop row? "
+    "Signs of row end: open space or bare soil ahead with no more plants, "
+    "the planted area terminates, a headland or turning area is visible. "
+    "Do not write code. Reply with only the single word YES or NO."
 )
 
 _PROMPT_OVER_ROW = (
-    "Look at this image from a downward or forward-facing camera on an agricultural "
-    "rover. Is the rover currently positioned OVER or immediately next to a crop row "
-    "(plants/vegetation forming a line visible beneath or directly ahead)? "
-    "Answer with only YES or NO."
+    "Look at this camera image from an agricultural rover. "
+    "Is the rover currently positioned over or immediately next to a crop row? "
+    "A crop row means plants or vegetation forming a line visible in the image. "
+    "Do not write code. Reply with only the single word YES or NO."
 )
 
 _PROMPT_ALIGNED = (
-    "Look at this image from a forward-facing camera on an agricultural rover. "
-    "Is the rover well-centred and aligned along a crop row, ready to drive "
-    "straight down it? "
-    "Answer with exactly one word: ALIGNED, FORWARD (row is further ahead), "
-    "or BACKWARD (row is behind the rover)."
+    "Look at this camera image from an agricultural rover. "
+    "Is the rover centred and aligned along a crop row, ready to drive straight down it? "
+    "Do not write code. Reply with exactly one of these words: "
+    "ALIGNED (rover is on the row), "
+    "FORWARD (the row is further ahead of the rover), "
+    "BACKWARD (the row is behind the rover)."
 )
 
 

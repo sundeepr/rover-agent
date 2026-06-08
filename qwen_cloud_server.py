@@ -57,14 +57,14 @@ from pathlib import Path
 log = logging.getLogger("qwen_cloud_server")
 
 _DEFAULT_SYSTEM_PROMPT = (
-    "You are a navigation assistant for an autonomous agricultural rover. "
-    "You observe the rover's camera feed and respond with concise, structured "
-    "decisions that the rover's control software will parse directly. "
-    "Always respond in the format requested by the instruction."
+    "You are a visual assistant for an agricultural rover. "
+    "Look at the image and answer the question concisely. "
+    "Do not write code. Do not explain your reasoning. "
+    "Reply with only the exact word or words requested."
 )
 
 _DEFAULT_MAX_NEW_TOKENS = 256
-_DEFAULT_TEMPERATURE    = 0.1    # near-deterministic for consistent rover actions
+_DEFAULT_TEMPERATURE    = 0.0    # 0 = greedy decoding (do_sample=False)
 
 
 # ── Inference engine ──────────────────────────────────────────────────────────
