@@ -119,11 +119,11 @@ class InferenceEngine:
         log.info("Qwen2.5-VL loaded — %d parameters",
                  sum(p.numel() for p in self._model.parameters()))
 
-    def infer(self, frame_jpeg: bytes, instruction: str) -> dict:
+    def infer(self, frames: "list[bytes]", instruction: str) -> dict:
         """
         Run one inference step (blocking).
 
-        frame_jpeg  : current camera frame as JPEG bytes.
+        frames      : list of JPEG bytes, oldest→newest.  Usually 1–3 frames.
         instruction : task-specific text instruction.
 
         Returns {"text": str, "elapsed": float}.
@@ -133,20 +133,32 @@ class InferenceEngine:
 
         t0 = time.time()
 
-        pil_img = PIL_Image.open(io.BytesIO(frame_jpeg)).convert("RGB")
+        pil_imgs = [PIL_Image.open(io.BytesIO(f)).convert("RGB") for f in frames]
+
+        # Build multi-image content block
+        content = []
+        for idx, img in enumerate(pil_imgs):
+            if len(pil_imgs) > 1:
+                label = f"Frame {idx + 1} of {len(pil_imgs)}" + (
+                    " (oldest)" if idx == 0
+                    else " (most recent)" if idx == len(pil_imgs) - 1
+                    else "")
+                content.append({"type": "text", "text": label})
+            content.append({"type": "image", "image": img})
+
+        # Add context hint + instruction after the images
+        if len(pil_imgs) > 1:
+            content.append({"type": "text", "text": (
+                f"The {len(pil_imgs)} frames above are consecutive camera images "
+                f"from the rover (oldest to most recent). "
+                f"Use the sequence for context. {instruction}"
+            )})
+        else:
+            content.append({"type": "text", "text": instruction})
 
         messages = [
-            {
-                "role": "system",
-                "content": self._system_prompt,
-            },
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "image": pil_img},
-                    {"type": "text",  "text":  instruction},
-                ],
-            },
+            {"role": "system", "content": self._system_prompt},
+            {"role": "user",   "content": content},
         ]
 
         # Build prompt text from the chat template
@@ -156,10 +168,10 @@ class InferenceEngine:
             add_generation_prompt=True,
         )
 
-        # Encode inputs — pass PIL image directly (works without qwen-vl-utils)
+        # Encode inputs — pass all PIL images
         inputs = self._processor(
             text=[text],
-            images=[pil_img],
+            images=pil_imgs,
             padding=True,
             return_tensors="pt",
         ).to(self._model.device)
@@ -203,9 +215,13 @@ def _strip_markdown(text: str) -> str:
 class ConnectionSession:
     """Manages one WebSocket client connection."""
 
-    def __init__(self, engine: InferenceEngine, loop: asyncio.AbstractEventLoop):
-        self._engine = engine
-        self._loop   = loop
+    def __init__(self, engine: InferenceEngine, loop: asyncio.AbstractEventLoop,
+                 context_frames: int = 3):
+        self._engine  = engine
+        self._loop    = loop
+        from collections import deque
+        self._frame_buffer: "deque[bytes]" = deque(maxlen=context_frames)
+        log.info("Frame context buffer: %d frames per query", context_frames)
 
     async def handle(self, websocket) -> None:
         addr = getattr(websocket, "remote_address", "?")
@@ -248,12 +264,14 @@ class ConnectionSession:
                 return
 
             frame_bytes = base64.b64decode(frame_b64)
+            self._frame_buffer.append(frame_bytes)
+            frames = list(self._frame_buffer)   # oldest → newest
             try:
                 result = await self._loop.run_in_executor(
-                    None, self._engine.infer, frame_bytes, instruction
+                    None, self._engine.infer, frames, instruction
                 )
                 await websocket.send(json.dumps({"type": "response", **result}))
-                log.info("Infer OK  elapsed=%.2fs", result["elapsed"])
+                log.info("Infer OK  elapsed=%.2fs  frames=%d", result["elapsed"], len(frames))
                 log.info("  PROMPT  : %s", instruction)
                 log.info("  RESPONSE: %s", result["text"])
             except Exception as e:
@@ -268,13 +286,14 @@ class ConnectionSession:
 
 # ── Server ────────────────────────────────────────────────────────────────────
 
-async def _serve(engine: InferenceEngine, host: str, port: int) -> None:
+async def _serve(engine: InferenceEngine, host: str, port: int,
+                 context_frames: int = 3) -> None:
     import websockets
 
     loop = asyncio.get_running_loop()
 
     async def _handler(ws):
-        session = ConnectionSession(engine, loop)
+        session = ConnectionSession(engine, loop, context_frames=context_frames)
         await session.handle(ws)
 
     async with websockets.serve(_handler, host, port,
@@ -308,6 +327,10 @@ def main() -> None:
                              "default: auto)")
     parser.add_argument("--system-prompt", default=None, metavar="TEXT",
                         help="Override the default system prompt")
+    parser.add_argument("--context-frames", default=3, type=int, metavar="N",
+                        help="Number of consecutive frames to buffer and send to the "
+                             "model per query for temporal context (default: 3). "
+                             "Use 1 to disable buffering.")
     args = parser.parse_args()
 
     engine = InferenceEngine(
@@ -322,7 +345,8 @@ def main() -> None:
 
     engine.load()
 
-    asyncio.run(_serve(engine, args.host, args.port))
+    asyncio.run(_serve(engine, args.host, args.port,
+                       context_frames=args.context_frames))
 
 
 if __name__ == "__main__":
