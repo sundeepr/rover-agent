@@ -241,12 +241,9 @@ class ConnectionSession:
                     None, self._engine.infer, frame_bytes, instruction
                 )
                 await websocket.send(json.dumps({"type": "response", **result}))
-                log.info(
-                    "Infer OK  elapsed=%.2fs  instruction=%r  response=%r",
-                    result["elapsed"],
-                    instruction[:80],
-                    result["text"][:120],
-                )
+                log.info("Infer OK  elapsed=%.2fs", result["elapsed"])
+                log.info("  PROMPT  : %s", instruction)
+                log.info("  RESPONSE: %s", result["text"])
             except Exception as e:
                 log.error("Inference error: %s", e, exc_info=True)
                 await websocket.send(json.dumps(
