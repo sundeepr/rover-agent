@@ -458,6 +458,30 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
             max_lin_mm_s=args.omnivla_velocity,
             icr_offset_m=_geo["icr_offset_mm"] / 1000.0,
         )
+    if name == "crop_row":
+        from crop_row_strategy import CropRowStrategy
+        return CropRowStrategy(
+            left_device       = args.left_cam,
+            forward_vel       = args.crop_guard_vel,
+            exg_threshold     = args.exg_threshold,
+            exg_min_area      = args.exg_min_area,
+            exg_density_pct   = args.exg_density_pct,
+            veg_index         = args.veg_index,
+            row_end_frames    = args.row_end_frames,
+            overshoot_s       = args.overshoot_s,
+            turn_90_s         = args.turn_90_duration,
+            inter_row_s       = args.inter_row_s,
+            turn_direction    = args.turn_direction,
+            rock_fwd_s        = args.rock_fwd_s,
+            rock_bwd_s        = args.rock_bwd_s,
+            rock_max_cycles   = args.rock_max_cycles,
+            balance_threshold = args.balance_threshold,
+            balance_frames    = args.balance_frames,
+            align_fwd_vel     = args.nudge_vel,
+            clahe             = args.clahe,
+            clahe_clip        = args.clahe_clip,
+            cam_controls      = _build_cam_controls(args),
+        )
     if name == "row_change":
         from row_change_strategy import RowChangeStrategy
         return RowChangeStrategy(
@@ -520,7 +544,8 @@ def main():
                         choices=["omnivla_full", "cloud_omnivla", "bev_omnivla",
                                  "omnivla", "line_follow", "plant_center",
                                  "boundary_guard", "teleop", "crop_guard",
-                                 "wheel_guard", "crop_spray", "row_change"],
+                                 "wheel_guard", "crop_spray", "row_change",
+                                 "crop_row"],
                         help="Navigation strategy (default: omnivla_full)")
     parser.add_argument("--left-cam",   type=_device, default=1,
                         metavar="INDEX|PATH",
@@ -611,6 +636,42 @@ def main():
                         metavar="N",
                         help="Consecutive YES answers from Qwen before triggering row change "
                              "(default 2)")
+    # ── crop_row strategy args ─────────────────────────────────────────────
+    parser.add_argument("--row-end-frames", type=int, default=10,
+                        metavar="N",
+                        help="Consecutive 20 Hz frames with zero left-cam EXG before "
+                             "row-end is declared (crop_row, default 10 ≈ 0.5 s)")
+    parser.add_argument("--overshoot-s", type=float, default=1.5,
+                        metavar="SECS",
+                        help="Seconds to drive forward past row-end before first 90° turn "
+                             "(crop_row, default 1.5)")
+    parser.add_argument("--inter-row-s", type=float, default=2.0,
+                        metavar="SECS",
+                        help="Seconds to drive across the inter-row gap between the two "
+                             "90° headland turns (crop_row, default 2.0)")
+    parser.add_argument("--turn-direction", type=str, default="right",
+                        choices=["right", "left"],
+                        help="Direction of both headland 90° turns (crop_row, default right)")
+    parser.add_argument("--rock-fwd-s", type=float, default=0.4,
+                        metavar="SECS",
+                        help="Duration of each forward burst during row-alignment rocking "
+                             "(crop_row, default 0.4)")
+    parser.add_argument("--rock-bwd-s", type=float, default=0.4,
+                        metavar="SECS",
+                        help="Duration of each backward burst during row-alignment rocking "
+                             "(crop_row, default 0.4)")
+    parser.add_argument("--rock-max-cycles", type=int, default=20,
+                        metavar="N",
+                        help="Maximum rock cycles before proceeding regardless "
+                             "(crop_row, default 20)")
+    parser.add_argument("--balance-threshold", type=float, default=15.0,
+                        metavar="EXG",
+                        help="Front-cam EXG mean difference (0–255) below which "
+                             "left/right alignment is declared (crop_row, default 15)")
+    parser.add_argument("--balance-frames", type=int, default=5,
+                        metavar="N",
+                        help="Consecutive balanced readings required to exit rocking "
+                             "(crop_row, default 5)")
     parser.add_argument("--omnivla-weights", type=str, default=None,
                         metavar="PATH",
                         help="Path to custom OmniVLA-edge weights (.pth). "
@@ -704,7 +765,7 @@ def main():
     # If a goal was given on the CLI, apply it immediately so the agent
     # starts navigating without waiting for web chat input.
     _NO_GOAL_STRATEGIES = ("line_follow", "plant_center", "boundary_guard", "teleop",
-                           "wheel_guard", "crop_spray", "row_change")
+                           "wheel_guard", "crop_spray", "row_change", "crop_row")
     if args.goal and args.strategy not in _NO_GOAL_STRATEGIES:
         strategy.set_goal(args.goal)
         with state.result_lock:
