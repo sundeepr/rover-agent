@@ -51,10 +51,28 @@ class InferenceEngine:
         self._tokenizer  = None
 
     def load(self) -> None:
+        import shutil
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         log.info("Loading Moondream2 from %s …", self._model_path)
+
+        # transformers looks for the model's custom Python files in its modules
+        # cache (~/.cache/huggingface/modules/transformers_modules/<name>/).
+        # When loading from a local path the cache is not auto-populated, so
+        # copy the .py files there before loading.
+        cache_dir = (Path.home() / ".cache" / "huggingface" / "modules"
+                     / "transformers_modules" / self._model_path.name)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        copied = []
+        for py_file in self._model_path.glob("*.py"):
+            dest = cache_dir / py_file.name
+            if not dest.exists() or py_file.stat().st_mtime > dest.stat().st_mtime:
+                shutil.copy2(py_file, dest)
+                copied.append(py_file.name)
+        if copied:
+            log.info("Copied model code to HF cache: %s", ", ".join(copied))
+
         self._tokenizer = AutoTokenizer.from_pretrained(
             str(self._model_path), trust_remote_code=True)
         self._model = AutoModelForCausalLM.from_pretrained(
