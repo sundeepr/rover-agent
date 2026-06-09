@@ -78,9 +78,6 @@ _STEER_LEFT    = +800   # gentle arc left   (positive = left turn)
 _SPIN_RIGHT    =  1     # tank spin clockwise
 _SPIN_LEFT     = -1     # tank spin counter-clockwise
 
-# EXG threshold for the full-frame vegetation check (lower than wheel-zone
-# threshold to catch even sparse plant material at row edges)
-_EXG_FRAME_THRESHOLD_FACTOR = 0.3   # fraction of exg_threshold
 
 
 class _Phase(Enum):
@@ -510,10 +507,7 @@ class CropRowStrategy(NavigationStrategy):
                         veg_index=self._veg_index,
                         clahe=self._clahe, clahe_clip=self._clahe_clip,
                     )
-                    # Full-frame EXG check: any plant material anywhere in cam
-                    vi_mean = float(_veg_index(lf, self._veg_index).mean())
-                    exg_any = (vi_mean > self._exg_threshold * _EXG_FRAME_THRESHOLD_FACTOR
-                               or tl or wl)
+                    exg_any = tl or wl
                 else:
                     tl = wl = exg_any = False
                     lvis = self._blank_vis("LEFT CAM MISSING")
