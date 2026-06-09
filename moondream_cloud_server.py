@@ -64,14 +64,20 @@ class InferenceEngine:
         cache_dir = (Path.home() / ".cache" / "huggingface" / "modules"
                      / "transformers_modules" / self._model_path.name)
         cache_dir.mkdir(parents=True, exist_ok=True)
+        _FUTURE = "from __future__ import annotations\n"
         copied = []
         for py_file in self._model_path.glob("*.py"):
             dest = cache_dir / py_file.name
             if not dest.exists() or py_file.stat().st_mtime > dest.stat().st_mtime:
-                shutil.copy2(py_file, dest)
+                src_text = py_file.read_text(encoding="utf-8")
+                # Inject __future__ annotation import for Python 3.8 compatibility.
+                # tuple[x, y] / list[x] / dict[x, y] syntax requires 3.9+ without it.
+                if _FUTURE not in src_text:
+                    src_text = _FUTURE + src_text
+                dest.write_text(src_text, encoding="utf-8")
                 copied.append(py_file.name)
         if copied:
-            log.info("Copied model code to HF cache: %s", ", ".join(copied))
+            log.info("Copied+patched model code to HF cache: %s", ", ".join(copied))
 
         self._tokenizer = AutoTokenizer.from_pretrained(
             str(self._model_path), trust_remote_code=True)
