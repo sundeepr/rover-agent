@@ -1,61 +1,45 @@
 """
 CropRowStrategy — autonomous crop row following with headland turn and realignment.
 
-Uses the left wheel camera to follow a crop row (EXG tracks plants beside the
-left front wheel).  When the row ends (EXG drops to zero), the rover executes a
-headland turn, then uses the front camera to realign with the next row.
+Uses the left wheel camera to follow a crop row via optical flow — plant leaves
+create chaotic residual motion on top of the smooth background camera translation.
+When the row ends the residual flow drops to near zero.  The rover then executes
+a headland turn and realigns with the next row using front-camera EXG balance.
 
 Camera layout
 ─────────────
-  Front camera  (--device N)     : forward-facing; used during alignment phase
+  Front camera  (--device N)     : forward-facing; used during alignment rocking
                                    to balance green on left vs right side
   Left wheel cam (--left-cam N)  : looks down at the left front wheel;
-                                   bottom half = wheel zone (trampling)
-                                   top-right   = look-ahead (plants approaching)
+                                   optical flow residual drives all row detection
+
+Optical flow detection
+──────────────────────
+  Each frame pair → Farneback dense flow → subtract median (global camera motion)
+  → residual magnitude = plant leaf motion.
+
+  Zones on the residual magnitude map (same layout as EXG zones):
+    wheel zone    : bottom half — high residual → wheel is over plants → steer right
+    look-ahead    : top-right   — high residual → plants approaching → go straight
+    full frame    : any residual above threshold → row is present
 
 State machine
 ─────────────
-  FOLLOWING     — left-cam EXG tracks row; steer to keep plants in look-ahead zone
+  FOLLOWING     — optical flow residual tracks row; steer by zone balance
   OVERSHOOT     — drive forward past end-of-row (overshoot_s seconds)
   TURN_1        — 90° spin turn (turn_90_s seconds)
   INTER_ROW     — drive forward across row gap (inter_row_s seconds)
   TURN_2        — 90° spin in same direction (turn_90_s seconds)
   ROCK_FWD      — rock forward; measure front-cam EXG balance
   ROCK_BWD      — rock backward (completes one rock cycle)
-  ROCK_TURN     — brief correction turn based on front-cam EXG imbalance
-  ALIGN_FORWARD — creep forward until left-cam detects the new row → FOLLOWING
-
-Row following
-─────────────
-  trampling (plants under wheel)  → steer right (move wheel away from row)
-  warn only (plants in look-ahead) → go straight (wheel is alongside row — correct)
-  no EXG anywhere                 → steer left  (drifted away; find row again)
-
-Row-end detection
-─────────────────
-  Counts consecutive 20 Hz cycles where the entire left-cam frame has no
-  vegetation (row_end_frames, default 10 ≈ 0.5 s).
-
-Headland turn
-─────────────
-  After OVERSHOOT the rover makes two 90° spins in the same direction
-  separated by an inter-row straight drive.  With turn_direction="right":
-    OVERSHOOT → spin right → drive forward → spin right → alignment phase.
-
-Alignment rocking
-─────────────────
-  The front camera frame is split into three vertical thirds.  The rover
-  rocks forward / backward in short bursts while a proportional correction
-  turn is applied after each backward stroke.  Alignment is declared when
-  |left_exg − right_exg| < balance_threshold for balance_frames
-  consecutive readings.
+  ALIGN_FORWARD — creep forward until left-cam flow detects the new row → FOLLOWING
 
 Usage
 ─────
   python rover_agent.py --strategy crop_row \\
       --rover atlas --atlas-port /dev/ttyACM0 \\
       --left-cam /dev/cam-left \\
-      --turn-90-s 4.5 --inter-row-s 2.0 --overshoot-s 1.5
+      --flow-threshold 1.5 --turn-90-duration 4.5
 """
 
 import logging
@@ -67,7 +51,7 @@ import cv2
 import numpy as np
 
 from navigation_strategy import AgentState, NavigationStrategy
-from crop_guard_strategy import _process_wheel_frame, _veg_index, _exg_mask, _vegetation_area
+from crop_guard_strategy import _veg_index   # still used for front-cam EXG balance
 from frame_source import open_frame_source, FrameSource
 
 log = logging.getLogger("rover.crop_row")
@@ -93,8 +77,8 @@ class _Phase(Enum):
 
 class CropRowStrategy(NavigationStrategy):
     """
-    Follows a crop row with the left wheel camera, turns at the headland,
-    and realigns with the next row using the front camera.
+    Follows a crop row with the left wheel camera via optical flow, turns at
+    the headland, and realigns with the next row using front-camera EXG balance.
 
     Parameters
     ----------
@@ -102,43 +86,36 @@ class CropRowStrategy(NavigationStrategy):
         Left wheel camera device index or path (or ws:// URL).
     forward_vel : int
         Normal forward speed in mm/s.
-    exg_threshold : int
-        EXG pixel threshold for wheel-zone trampling / look-ahead detection.
-    exg_min_area : int
-        Minimum vegetation blob area (pixels) before triggering a detection.
-    exg_density_pct : float
-        Minimum % of zone pixels above threshold before declaring detection.
-    veg_index : str
-        Vegetation index to use: "exg", "ngrdi", "vari", "exgnorm".
+    flow_threshold : float
+        Residual optical flow magnitude (pixels/frame) above which plants are
+        detected.  Residual = raw flow minus median (global camera translation).
+        Start with 1.0–2.0 and tune from the LEFT CAM FLOW diagnostic log.
     row_end_frames : int
-        Consecutive 20 Hz cycles without any EXG before row-end is declared.
+        Consecutive 20 Hz cycles with flow below threshold before row-end.
     overshoot_s : float
         Seconds to continue driving after row-end before first 90° turn.
     turn_90_s : float
-        Seconds for a 90° tank spin.  Tune to match your rover's actual
-        rotation rate.  Atlas-1 at DRIVE_SPEED_PCT=60 ≈ 4.25 s.
+        Seconds for a 90° tank spin.  Atlas-1 at DRIVE_SPEED_PCT=60 ≈ 4.25 s.
     inter_row_s : float
         Seconds to drive forward between the two 90° headland turns.
     turn_direction : str
         Direction of both headland turns: "right" or "left".
     rock_fwd_s : float
-        Duration of each forward rock burst during alignment.
+        Duration of each forward rock burst during front-cam alignment.
     rock_bwd_s : float
         Duration of each backward rock burst during alignment.
-    rock_turn_s : float
-        Duration of the correction spin after each rock cycle.
     rock_max_cycles : int
-        Maximum rock cycles before giving up and proceeding to ALIGN_FORWARD.
+        Maximum rock cycles before proceeding to ALIGN_FORWARD regardless.
     balance_threshold : float
         Front-cam EXG mean difference (0–255) below which alignment is declared.
     balance_frames : int
         Consecutive balanced readings required to exit rocking.
     align_fwd_vel : int
         Forward speed (mm/s) while creeping toward the new row.
-    clahe : bool
-        Apply CLAHE to wheel-cam frames to reduce bright-sun washout.
-    clahe_clip : float
-        CLAHE clip limit (default 2.0).
+    veg_index : str
+        Vegetation index for front-cam alignment only: "exg", "ngrdi", etc.
+    exg_threshold : int
+        EXG threshold for front-cam alignment measurement only.
     cam_controls : dict | None
         V4L2 camera control overrides passed to open_frame_source().
     """
@@ -150,10 +127,7 @@ class CropRowStrategy(NavigationStrategy):
         self,
         left_device              = 1,
         forward_vel:      int    = 35,
-        exg_threshold:    int    = 60,
-        exg_min_area:     int    = 500,
-        exg_density_pct:  float  = 8.0,
-        veg_index:        str    = "ngrdi",
+        flow_threshold:   float  = 1.5,
         row_end_frames:   int    = 10,
         overshoot_s:      float  = 1.5,
         turn_90_s:        float  = 4.5,
@@ -165,17 +139,14 @@ class CropRowStrategy(NavigationStrategy):
         balance_threshold: float = 15.0,
         balance_frames:   int    = 5,
         align_fwd_vel:    int    = 20,
-        clahe:            bool   = False,
-        clahe_clip:       float  = 2.0,
+        veg_index:        str    = "exg",
+        exg_threshold:    int    = 30,
         cam_controls:     dict | None = None,
     ) -> None:
 
         self._left_device       = left_device
         self._forward_vel       = forward_vel
-        self._exg_threshold     = exg_threshold
-        self._exg_min_area      = exg_min_area
-        self._exg_density_pct   = exg_density_pct
-        self._veg_index         = veg_index
+        self._flow_threshold    = flow_threshold
         self._row_end_frames    = row_end_frames
         self._overshoot_s       = overshoot_s
         self._turn_90_s         = turn_90_s
@@ -187,8 +158,8 @@ class CropRowStrategy(NavigationStrategy):
         self._balance_threshold = balance_threshold
         self._balance_frames    = balance_frames
         self._align_fwd_vel     = align_fwd_vel
-        self._clahe             = clahe
-        self._clahe_clip        = clahe_clip
+        self._veg_index         = veg_index
+        self._exg_threshold     = exg_threshold
         self._cam_controls      = cam_controls or {}
         self._recorder          = None
 
@@ -510,6 +481,8 @@ class CropRowStrategy(NavigationStrategy):
             self._left_device, "left", self._cam_controls
         )
 
+        prev_gray: np.ndarray | None = None
+
         while self._running:
             try:
                 lf = self._left_src.read() if self._left_src else None
@@ -522,48 +495,81 @@ class CropRowStrategy(NavigationStrategy):
                 if lf is not None and self._recorder:
                     self._recorder.record("left_wheel", lf, fps=10)
 
-                if lf is not None:
-                    tl, wl, lvis = _process_wheel_frame(
-                        lf, "left",
-                        self._exg_threshold, self._exg_min_area,
-                        self._exg_density_pct,
-                        verbose=True, fps=fps,
-                        veg_index=self._veg_index,
-                        clahe=self._clahe, clahe_clip=self._clahe_clip,
-                    )
-                    # Full-frame EXG check — blob area only (no density requirement).
-                    # Density is too strict on a full frame that includes sky/soil;
-                    # blob area alone confirms real plant material is visible.
-                    full_mask = _exg_mask(lf, self._exg_threshold, self._veg_index)
-                    full_area = _vegetation_area(full_mask, self._exg_min_area)
-                    vi_map    = _veg_index(lf, self._veg_index).astype(np.float32)
-                    full_pct  = float((vi_map > self._exg_threshold).mean() * 100)
-                    exg_any   = full_area > 0
+                if lf is not None and prev_gray is not None:
+                    gray = cv2.cvtColor(lf, cv2.COLOR_BGR2GRAY)
 
-                    # Periodic diagnostic so EXG values are visible in INFO logs
+                    # Dense optical flow (Farneback)
+                    flow = cv2.calcOpticalFlowFarneback(
+                        prev_gray, gray, None,
+                        pyr_scale=0.5, levels=3, winsize=15,
+                        iterations=3, poly_n=5, poly_sigma=1.2, flags=0,
+                    )
+
+                    # Subtract median to remove global camera translation —
+                    # residual = local leaf/plant motion on top of camera motion
+                    med_x = float(np.median(flow[..., 0]))
+                    med_y = float(np.median(flow[..., 1]))
+                    res_x = flow[..., 0] - med_x
+                    res_y = flow[..., 1] - med_y
+                    res_mag, _ = cv2.cartToPolar(res_x, res_y)
+
+                    h, w = res_mag.shape
+                    # Zone magnitudes (same spatial layout as EXG zones)
+                    wheel_mean    = float(res_mag[h // 2:, :].mean())       # bottom half
+                    lookahead_mean = float(res_mag[:h // 2, w // 2:].mean()) # top-right
+                    full_mean     = float(res_mag.mean())
+
+                    thr  = self._flow_threshold
+                    tl      = wheel_mean    > thr        # plants under wheel
+                    wl      = lookahead_mean > thr * 0.7 # plants approaching
+                    flow_any = full_mean    > thr * 0.5  # any plant motion in frame
+
+                    # Diagnostic (1 Hz)
                     if not hasattr(self, "_diag_t"):
                         self._diag_t = 0.0
                     if now - self._diag_t >= 1.0:
                         self._diag_t = now
                         log.info(
-                            "LEFT CAM EXG | area=%d  pct=%.1f%%  thr=%d  "
-                            "tl=%s  wl=%s  exg_any=%s  plants_seen=%s",
-                            full_area, full_pct, self._exg_threshold,
-                            tl, wl, exg_any, self._plants_seen,
+                            "LEFT CAM FLOW | full=%.2f  wheel=%.2f  ahead=%.2f  "
+                            "thr=%.1f  tl=%s  wl=%s  flow=%s  plants_seen=%s",
+                            full_mean, wheel_mean, lookahead_mean, thr,
+                            tl, wl, flow_any, self._plants_seen,
                         )
 
-                    # Overlay the full-frame EXG mask on the display frame
-                    # (bright green tint where vegetation is detected)
-                    mask_rgb         = np.zeros_like(lvis)
-                    mask_rgb[full_mask > 0] = (0, 255, 60)
-                    lvis = cv2.addWeighted(lvis, 0.7, mask_rgb, 0.3, 0)
-                    label = f"EXG area={full_area} pct={full_pct:.1f}%"
-                    col   = (0, 220, 80) if exg_any else (60, 60, 200)
-                    cv2.putText(lvis, label, (8, 44),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.42, col, 1)
+                    # Visualisation — flow magnitude heatmap overlaid on raw frame
+                    mag_norm = np.clip(res_mag * (255.0 / max(thr * 4, 0.1)),
+                                       0, 255).astype(np.uint8)
+                    heat     = cv2.applyColorMap(mag_norm, cv2.COLORMAP_JET)
+                    lvis     = cv2.addWeighted(lf, 0.55, heat, 0.45, 0)
+
+                    # Zone boundary lines
+                    cv2.line(lvis, (0, h // 2), (w, h // 2),
+                             (0, 0, 200) if tl else (0, 200, 220), 2)
+                    cv2.line(lvis, (w // 2, 0), (w // 2, h // 2),
+                             (0, 0, 200) if wl else (0, 200, 80), 1)
+
+                    label = (f"flow full={full_mean:.1f} wheel={wheel_mean:.1f} "
+                             f"ahead={lookahead_mean:.1f}  thr={thr:.1f}")
+                    col   = (0, 220, 80) if flow_any else (60, 60, 200)
+                    cv2.putText(lvis, label, (8, h - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.38, col, 1)
+                    border_col = (0, 0, 200) if tl else (0, 220, 80) if flow_any else (80, 80, 80)
+                    cv2.rectangle(lvis, (0, 0), (w - 1, h - 1), border_col, 4)
+
+                    prev_gray = gray
+
+                elif lf is not None:
+                    # First frame — no previous to compare; just initialise
+                    prev_gray = cv2.cvtColor(lf, cv2.COLOR_BGR2GRAY)
+                    tl = wl = flow_any = False
+                    lvis = lf.copy()
+                    cv2.putText(lvis, "FLOW INIT", (8, 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 0), 1)
                 else:
-                    tl = wl = exg_any = False
+                    tl = wl = flow_any = False
                     lvis = self._blank_vis("LEFT CAM MISSING")
+
+                exg_any = flow_any  # shared name used by state machine
 
                 with self._trample_lock:
                     self._trample_left     = tl

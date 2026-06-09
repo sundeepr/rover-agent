@@ -463,10 +463,7 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
         return CropRowStrategy(
             left_device       = args.left_cam,
             forward_vel       = args.crop_guard_vel,
-            exg_threshold     = args.exg_threshold,
-            exg_min_area      = args.exg_min_area,
-            exg_density_pct   = args.exg_density_pct,
-            veg_index         = args.veg_index,
+            flow_threshold    = args.flow_threshold,
             row_end_frames    = args.row_end_frames,
             overshoot_s       = args.overshoot_s,
             turn_90_s         = args.turn_90_duration,
@@ -478,8 +475,8 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
             balance_threshold = args.balance_threshold,
             balance_frames    = args.balance_frames,
             align_fwd_vel     = args.nudge_vel,
-            clahe             = args.clahe,
-            clahe_clip        = args.clahe_clip,
+            veg_index         = args.veg_index,
+            exg_threshold     = args.exg_threshold,
             cam_controls      = _build_cam_controls(args),
         )
     if name == "row_change":
@@ -637,6 +634,12 @@ def main():
                         help="Consecutive YES answers from Qwen before triggering row change "
                              "(default 2)")
     # ── crop_row strategy args ─────────────────────────────────────────────
+    parser.add_argument("--flow-threshold", type=float, default=1.5,
+                        metavar="PX",
+                        help="Residual optical flow magnitude (px/frame) above which "
+                             "plant leaf motion is detected (crop_row, default 1.5). "
+                             "Tune from LEFT CAM FLOW log: raise if false positives on "
+                             "soil, lower if plants are missed.")
     parser.add_argument("--row-end-frames", type=int, default=10,
                         metavar="N",
                         help="Consecutive 20 Hz frames with zero left-cam EXG before "
