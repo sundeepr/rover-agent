@@ -287,6 +287,14 @@ class CropRowStrategy(NavigationStrategy):
         operator_active = (state.operator_control is not None
                            and state.operator_until > time.time())
 
+        # Don't start until the left camera is open and producing frames
+        left_cam_ready = self._left_src is not None and self._left_src.is_open()
+        if not left_cam_ready:
+            if rover_ctrl:
+                rover_ctrl.drive_raw(0, 0x8000)
+            log.debug("Waiting for left cam…")
+            return
+
         with self._phase_lock:
             phase       = self._phase
             phase_start = self._phase_start
