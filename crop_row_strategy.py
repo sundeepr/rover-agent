@@ -67,7 +67,7 @@ import cv2
 import numpy as np
 
 from navigation_strategy import AgentState, NavigationStrategy
-from crop_guard_strategy import _process_wheel_frame, _veg_index
+from crop_guard_strategy import _process_wheel_frame, _veg_index, _exg_mask, _vegetation_area
 from frame_source import open_frame_source, FrameSource
 
 log = logging.getLogger("rover.crop_row")
@@ -214,6 +214,9 @@ class CropRowStrategy(NavigationStrategy):
         self._balance_count    = 0
         self._rock_cycles    = 0
         self._last_imbalance = 0.0
+        # Set True once the full-frame EXG mask confirms plants are present.
+        # Prevents row-end counting and forward motion before the row is confirmed.
+        self._plants_seen    = False
 
         self._fps_times: list[float] = []
 
@@ -244,6 +247,7 @@ class CropRowStrategy(NavigationStrategy):
             self._phase_start = time.time()
         self._row_end_count = 0
         self._balance_count = 0
+        self._plants_seen   = False
 
     def cameras_ready(self) -> tuple[bool, bool, bool]:
         left_ok = self._left_src is not None and self._left_src.is_open()
@@ -402,6 +406,7 @@ class CropRowStrategy(NavigationStrategy):
             if exg_any:
                 log.info("Left-cam EXG detected → FOLLOWING")
                 self._row_end_count = 0
+                self._plants_seen   = True   # already on row — count from first loss
                 self._enter(_Phase.FOLLOWING)
 
         self._update_result(state, phase, fl, fr, tramp_l, warn_l, exg_any)
@@ -414,31 +419,42 @@ class CropRowStrategy(NavigationStrategy):
         """
         Steer based on left-wheel-cam plant presence, detect row end.
 
-        Desired state: plants visible in look-ahead zone (warn_l=True),
-        NOT under the wheel (tramp_l=False) → go straight.
+        The full-frame EXG mask drives all decisions:
+          exg_any=True  → plants confirmed; drive with zone-based steering correction
+          exg_any=False, never seen yet → hold still; wait for plants to appear
+          exg_any=False, was following  → row end; drive straight and count frames
         """
-        if rover_ctrl:
-            if tramp_l:
-                # Wheel on plants → steer right to move wheel away from row
-                rover_ctrl.drive_raw(self._forward_vel, _STEER_RIGHT)
-            elif warn_l:
-                # Plants approaching but not under wheel → aligned → straight
-                rover_ctrl.drive_raw(self._forward_vel, 0x8000)
-            else:
-                # No plants in any zone → drifted left → steer toward row
-                rover_ctrl.drive_raw(self._forward_vel, _STEER_LEFT)
+        if exg_any:
+            # Plants confirmed in frame — drive with zone-based steering
+            self._plants_seen   = True
+            self._row_end_count = 0
+            if rover_ctrl:
+                if tramp_l:
+                    # Wheel on plants → steer right to move wheel away from row
+                    rover_ctrl.drive_raw(self._forward_vel, _STEER_RIGHT)
+                elif warn_l:
+                    # Plants in look-ahead, not under wheel → aligned → straight
+                    rover_ctrl.drive_raw(self._forward_vel, 0x8000)
+                else:
+                    # Full-frame EXG present but not in zones yet → steer left
+                    rover_ctrl.drive_raw(self._forward_vel, _STEER_LEFT)
 
-        # Row-end: no EXG anywhere in left cam for N consecutive cycles
-        if not exg_any:
+        elif self._plants_seen:
+            # Was following, now no EXG → row end; keep driving straight while counting
             self._row_end_count += 1
-        else:
-            self._row_end_count = 0
+            if rover_ctrl:
+                rover_ctrl.drive_raw(self._forward_vel, 0x8000)
+            if self._row_end_count >= self._row_end_frames:
+                log.info("Row end detected (%d no-EXG frames) → OVERSHOOT",
+                         self._row_end_count)
+                self._row_end_count = 0
+                self._enter(_Phase.OVERSHOOT)
 
-        if self._row_end_count >= self._row_end_frames:
-            log.info("Row end detected (%d no-EXG frames) → OVERSHOOT",
-                     self._row_end_count)
-            self._row_end_count = 0
-            self._enter(_Phase.OVERSHOOT)
+        else:
+            # Plants not yet seen — hold still until EXG confirms we are at the row
+            log.debug("Waiting for EXG confirmation before driving…")
+            if rover_ctrl:
+                rover_ctrl.drive_raw(0, 0x8000)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -515,7 +531,24 @@ class CropRowStrategy(NavigationStrategy):
                         veg_index=self._veg_index,
                         clahe=self._clahe, clahe_clip=self._clahe_clip,
                     )
-                    exg_any = tl or wl
+                    # Full-frame EXG check — same blob-area + density logic as the
+                    # zone checks, applied to the entire frame so plants at any
+                    # position are detected (not just the wheel/look-ahead zones).
+                    full_mask = _exg_mask(lf, self._exg_threshold, self._veg_index)
+                    full_area = _vegetation_area(full_mask, self._exg_min_area)
+                    vi_map    = _veg_index(lf, self._veg_index).astype(np.float32)
+                    full_pct  = float((vi_map > self._exg_threshold).mean() * 100)
+                    exg_any   = full_area > 0 and full_pct >= self._exg_density_pct
+
+                    # Overlay the full-frame EXG mask on the display frame
+                    # (bright green tint where vegetation is detected)
+                    mask_rgb         = np.zeros_like(lvis)
+                    mask_rgb[full_mask > 0] = (0, 255, 60)
+                    lvis = cv2.addWeighted(lvis, 0.7, mask_rgb, 0.3, 0)
+                    label = f"EXG area={full_area} pct={full_pct:.1f}%"
+                    col   = (0, 220, 80) if exg_any else (60, 60, 200)
+                    cv2.putText(lvis, label, (8, 44),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.42, col, 1)
                 else:
                     tl = wl = exg_any = False
                     lvis = self._blank_vis("LEFT CAM MISSING")
