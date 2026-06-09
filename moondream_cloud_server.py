@@ -40,6 +40,46 @@ log = logging.getLogger("moondream_cloud_server")
 _INFER_W, _INFER_H = 320, 240   # resize before inference
 
 
+def _patch_py38(src: str) -> str:
+    """
+    Rewrite Python 3.9+ built-in generic type hints to typing equivalents
+    so the model's custom code runs on Python 3.8.
+
+    Handles:
+      tuple[...]  → Tuple[...]
+      list[...]   → List[...]
+      dict[...]   → Dict[...]
+      set[...]    → Set[...]
+      X | Y       → Union[X, Y]   (simple two-type unions only)
+    """
+    import re
+
+    # Replace built-in generics with typing equivalents
+    src = re.sub(r'\btuple\[', 'Tuple[', src)
+    src = re.sub(r'\blist\[',  'List[',  src)
+    src = re.sub(r'\bdict\[',  'Dict[',  src)
+    src = re.sub(r'\bset\[',   'Set[',   src)
+
+    # Replace X | None with Optional[X] in annotations (simple cases)
+    src = re.sub(r'(\w[\w\[\], ]*)\s*\|\s*None', r'Optional[\1]', src)
+
+    # Inject typing imports after the last existing import line (or at top)
+    typing_import = (
+        "from typing import Tuple, List, Dict, Set, Optional, Union, Any\n"
+    )
+    if "from typing import" in src or "import typing" in src:
+        # Append to the existing typing import line
+        src = re.sub(
+            r'(from typing import [^\n]+)',
+            lambda m: m.group(0) + "\n" + typing_import,
+            src, count=1,
+        )
+    else:
+        src = typing_import + src
+
+    return src
+
+
 # ── Inference engine ──────────────────────────────────────────────────────────
 
 class InferenceEngine:
@@ -64,17 +104,13 @@ class InferenceEngine:
         cache_dir = (Path.home() / ".cache" / "huggingface" / "modules"
                      / "transformers_modules" / self._model_path.name)
         cache_dir.mkdir(parents=True, exist_ok=True)
-        _FUTURE = "from __future__ import annotations\n"
         copied = []
         for py_file in self._model_path.glob("*.py"):
             dest = cache_dir / py_file.name
             if not dest.exists() or py_file.stat().st_mtime > dest.stat().st_mtime:
                 src_text = py_file.read_text(encoding="utf-8")
-                # Inject __future__ annotation import for Python 3.8 compatibility.
-                # tuple[x, y] / list[x] / dict[x, y] syntax requires 3.9+ without it.
-                if _FUTURE not in src_text:
-                    src_text = _FUTURE + src_text
-                dest.write_text(src_text, encoding="utf-8")
+                patched  = _patch_py38(src_text)
+                dest.write_text(patched, encoding="utf-8")
                 copied.append(py_file.name)
         if copied:
             log.info("Copied+patched model code to HF cache: %s", ", ".join(copied))
