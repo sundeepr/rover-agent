@@ -531,14 +531,26 @@ class CropRowStrategy(NavigationStrategy):
                         veg_index=self._veg_index,
                         clahe=self._clahe, clahe_clip=self._clahe_clip,
                     )
-                    # Full-frame EXG check — same blob-area + density logic as the
-                    # zone checks, applied to the entire frame so plants at any
-                    # position are detected (not just the wheel/look-ahead zones).
+                    # Full-frame EXG check — blob area only (no density requirement).
+                    # Density is too strict on a full frame that includes sky/soil;
+                    # blob area alone confirms real plant material is visible.
                     full_mask = _exg_mask(lf, self._exg_threshold, self._veg_index)
                     full_area = _vegetation_area(full_mask, self._exg_min_area)
                     vi_map    = _veg_index(lf, self._veg_index).astype(np.float32)
                     full_pct  = float((vi_map > self._exg_threshold).mean() * 100)
-                    exg_any   = full_area > 0 and full_pct >= self._exg_density_pct
+                    exg_any   = full_area > 0
+
+                    # Periodic diagnostic so EXG values are visible in INFO logs
+                    if not hasattr(self, "_diag_t"):
+                        self._diag_t = 0.0
+                    if now - self._diag_t >= 1.0:
+                        self._diag_t = now
+                        log.info(
+                            "LEFT CAM EXG | area=%d  pct=%.1f%%  thr=%d  "
+                            "tl=%s  wl=%s  exg_any=%s  plants_seen=%s",
+                            full_area, full_pct, self._exg_threshold,
+                            tl, wl, exg_any, self._plants_seen,
+                        )
 
                     # Overlay the full-frame EXG mask on the display frame
                     # (bright green tint where vegetation is detected)
