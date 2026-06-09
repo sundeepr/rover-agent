@@ -44,38 +44,17 @@ def _patch_py38(src: str) -> str:
     """
     Rewrite Python 3.9+ built-in generic type hints to typing equivalents
     so the model's custom code runs on Python 3.8.
-
-    Handles:
-      tuple[...]  → Tuple[...]
-      list[...]   → List[...]
-      dict[...]   → Dict[...]
-      set[...]    → Set[...]
-      X | Y       → Union[X, Y]   (simple two-type unions only)
+    Uses plain str.replace() — no regex, no word-boundary issues.
     """
-    import re
+    # Prepend typing imports unconditionally (duplicate imports are harmless)
+    typing_line = "from typing import Tuple, List, Dict, Set, Optional, Union, Any, Callable\n"
+    src = typing_line + src
 
-    # Replace built-in generics with typing equivalents
-    src = re.sub(r'\btuple\[', 'Tuple[', src)
-    src = re.sub(r'\blist\[',  'List[',  src)
-    src = re.sub(r'\bdict\[',  'Dict[',  src)
-    src = re.sub(r'\bset\[',   'Set[',   src)
-
-    # Replace X | None with Optional[X] in annotations (simple cases)
-    src = re.sub(r'(\w[\w\[\], ]*)\s*\|\s*None', r'Optional[\1]', src)
-
-    # Inject typing imports after the last existing import line (or at top)
-    typing_import = (
-        "from typing import Tuple, List, Dict, Set, Optional, Union, Any\n"
-    )
-    if "from typing import" in src or "import typing" in src:
-        # Append to the existing typing import line
-        src = re.sub(
-            r'(from typing import [^\n]+)',
-            lambda m: m.group(0) + "\n" + typing_import,
-            src, count=1,
-        )
-    else:
-        src = typing_import + src
+    # Replace built-in generics — plain replace, case-sensitive
+    src = src.replace("tuple[", "Tuple[")
+    src = src.replace("list[",  "List[")
+    src = src.replace("dict[",  "Dict[")
+    src = src.replace("set[",   "Set[")
 
     return src
 
@@ -114,6 +93,12 @@ class InferenceEngine:
                 copied.append(py_file.name)
         if copied:
             log.info("Copied+patched model code to HF cache: %s", ", ".join(copied))
+            # Verify the critical file was patched correctly
+            check = cache_dir / "image_crops.py"
+            if check.exists():
+                lines = check.read_text(encoding="utf-8").splitlines()
+                log.info("image_crops.py line 20 (patched): %s",
+                         lines[19] if len(lines) > 19 else "(file too short)")
 
         self._tokenizer = AutoTokenizer.from_pretrained(
             str(self._model_path), trust_remote_code=True)
