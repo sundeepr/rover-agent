@@ -1,21 +1,27 @@
 #!/usr/bin/env python3
 """
-CP Plus RTSP stream viewer — cv2 only, no external ffmpeg required.
+CP Plus IP camera RTSP viewer — ONVIF discovery + cv2 display.
 
-Sets OPENCV_FFMPEG_CAPTURE_OPTIONS to force TCP transport and longer
-timeouts before opening the stream, which resolves the 401 auth issue
-seen with OpenCV's default UDP RTSP handling on CP Plus cameras.
+Uses ONVIF to ask the camera for its own stream URI (the only reliable
+way to get the correct URL for a direct IP camera).  Falls back to a
+list of common CP Plus / generic ONVIF RTSP URL patterns if the library
+is not installed.
+
+Install the ONVIF library once:
+    pip install onvif-zeep
 
 Usage:
     python experimental/cpplus_stream.py
-    python experimental/cpplus_stream.py --ip 192.168.1.100 --channel 2
-    python experimental/cpplus_stream.py --sub          # sub-stream (lower res)
-    python experimental/cpplus_stream.py --save out.avi # also save to file
+    python experimental/cpplus_stream.py --ip 192.168.1.100 --onvif-port 80
+    python experimental/cpplus_stream.py --profile 1   # use second profile
+    python experimental/cpplus_stream.py --sub         # request sub-stream
+    python experimental/cpplus_stream.py --save out.avi
 
 Controls:
     q / Esc  — quit
-    s        — save snapshot to cpplus_snapshot_<timestamp>.jpg
+    s        — snapshot to cpplus_snapshot_<timestamp>.jpg
     f        — toggle fullscreen
+    p        — print all discovered ONVIF profiles to console
 """
 
 import argparse
@@ -24,27 +30,98 @@ import time
 from datetime import datetime
 
 import cv2
-import numpy as np
 
-# Force TCP transport BEFORE any VideoCapture is created.
-# This resolves the 401 Unauthorized seen with UDP on many CP Plus cameras.
+# Force TCP RTSP transport before any VideoCapture is created
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
     "rtsp_transport;tcp|timeout;10000000"
 )
 
+IP       = "192.168.1.100"
+USER     = "admin"
+PASSWORD = "Cam3ra_1234"
 
-def _build_urls(ip: str, user: str, password: str,
-                channel: int, sub: bool) -> list[str]:
-    subtype = 1 if sub else 0
-    sub_str = "sub" if sub else "main"
+
+# ── ONVIF discovery ───────────────────────────────────────────────────────────
+
+def onvif_get_stream_uri(ip: str, user: str, password: str,
+                         onvif_port: int, profile_index: int,
+                         sub: bool) -> tuple[str, list]:
+    """
+    Connect to the camera via ONVIF and retrieve the RTSP stream URI.
+
+    Returns (stream_uri, profiles_list).
+    Raises ImportError if onvif-zeep is not installed.
+    Raises RuntimeError on connection / auth failure.
+    """
+    try:
+        from onvif import ONVIFCamera
+    except ImportError:
+        raise ImportError(
+            "onvif-zeep not installed.\n"
+            "Run:  pip install onvif-zeep\n"
+            "Then re-run this script."
+        )
+
+    print(f"ONVIF: connecting to {ip}:{onvif_port} as {user}…")
+    try:
+        cam = ONVIFCamera(ip, onvif_port, user, password)
+    except Exception as exc:
+        raise RuntimeError(f"ONVIF connection failed: {exc}")
+
+    media    = cam.create_media_service()
+    profiles = media.GetProfiles()
+    if not profiles:
+        raise RuntimeError("ONVIF: camera returned no media profiles")
+
+    print(f"ONVIF: found {len(profiles)} profile(s):")
+    for i, p in enumerate(profiles):
+        enc = getattr(getattr(p, "VideoEncoderConfiguration", None),
+                      "Encoding", "?")
+        res = getattr(getattr(p, "VideoEncoderConfiguration", None),
+                      "Resolution", None)
+        res_str = f"{res.Width}x{res.Height}" if res else "?"
+        print(f"  [{i}] {p.Name}  token={p.token}  enc={enc}  res={res_str}")
+
+    idx   = min(profile_index, len(profiles) - 1)
+    token = profiles[idx].token
+    print(f"ONVIF: requesting stream URI for profile [{idx}] token={token}")
+
+    req = media.create_type("GetStreamUri")
+    req.ProfileToken = token
+    req.StreamSetup  = {
+        "Stream":    "RTP-Unicast",
+        "Transport": {"Protocol": "RTSP"},
+    }
+    uri_resp = media.GetStreamUri(req)
+    uri      = uri_resp.Uri
+
+    # Inject credentials into the URI if the camera returns a bare URL
+    if "@" not in uri:
+        proto, rest = uri.split("://", 1)
+        uri = f"{proto}://{user}:{password}@{rest}"
+    else:
+        # Replace whatever credentials the camera put in with ours
+        proto, rest = uri.split("://", 1)
+        _, host_path = rest.split("@", 1)
+        uri = f"{proto}://{user}:{password}@{host_path}"
+
+    return uri, profiles
+
+
+# ── Fallback URL list (direct IP camera patterns, not NVR) ───────────────────
+
+def _fallback_urls(ip: str, user: str, password: str, sub: bool) -> list[str]:
+    s = "2" if sub else "1"
     return [
-        f"rtsp://{user}:{password}@{ip}:554/cam/realmonitor"
-        f"?channel={channel}&subtype={subtype}",
-        f"rtsp://{user}:{password}@{ip}:554/h264/ch{channel}/{sub_str}/av_stream",
-        f"rtsp://{user}:{password}@{ip}/stream{channel}",
-        f"rtsp://{user}:{password}@{ip}:554/Streaming/Channels/{channel}01",
+        f"rtsp://{user}:{password}@{ip}:554/onvif{s}",
+        f"rtsp://{user}:{password}@{ip}:554/stream{s}",
+        f"rtsp://{user}:{password}@{ip}:554/live/ch0{'1' if not sub else '2'}/0",
+        f"rtsp://{user}:{password}@{ip}/h264Preview_01_{'main' if not sub else 'sub'}",
+        f"rtsp://{user}:{password}@{ip}:554/ch01.264",
     ]
 
+
+# ── Stream helpers ────────────────────────────────────────────────────────────
 
 def _mask(url: str) -> str:
     try:
@@ -55,55 +132,102 @@ def _mask(url: str) -> str:
         return url
 
 
-def try_connect(urls: list[str]) -> tuple[cv2.VideoCapture, str, int, int, float]:
+def open_capture(url: str) -> tuple[cv2.VideoCapture, int, int, float]:
+    """Open RTSP URL with cv2; return (cap, width, height, fps)."""
+    cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+    if not cap.isOpened():
+        raise RuntimeError("VideoCapture could not open URL")
+    for _ in range(5):
+        ret, frame = cap.read()
+        if ret and frame is not None:
+            h, w = frame.shape[:2]
+            fps  = cap.get(cv2.CAP_PROP_FPS) or 25.0
+            return cap, w, h, fps
+    cap.release()
+    raise RuntimeError("Stream opened but no frames received")
+
+
+def try_urls(urls: list[str]) -> tuple[cv2.VideoCapture, str, int, int, float]:
     for url in urls:
         safe = _mask(url)
         print(f"Trying: {safe}")
-        cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-        if not cap.isOpened():
-            print(f"  Could not open")
-            cap.release()
-            continue
-        # Read a few frames — first frame sometimes fails even when open
-        for _ in range(5):
-            ret, frame = cap.read()
-            if ret and frame is not None:
-                h, w = frame.shape[:2]
-                fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-                print(f"  Connected: {w}x{h} @ {fps:.1f} fps")
-                return cap, url, w, h, fps
-        print(f"  Opened but no frames received")
-        cap.release()
-
+        try:
+            cap, w, h, fps = open_capture(url)
+            print(f"  Connected: {w}x{h} @ {fps:.1f} fps")
+            return cap, url, w, h, fps
+        except RuntimeError as e:
+            print(f"  Failed: {e}")
     raise RuntimeError(
-        "Could not connect to camera on any URL.\n"
-        "  • Verify the camera is reachable: ping 192.168.1.100\n"
-        "  • Log in to the camera web UI and confirm the credentials\n"
-        "  • Try --url with the exact RTSP URL from the camera's RTSP settings"
+        "Could not connect on any URL.\n"
+        "  • Confirm camera reachable: ping 192.168.1.100\n"
+        "  • Log into the camera web UI and check RTSP / ONVIF settings\n"
+        "  • Run with --url to specify the exact RTSP URL\n"
+        "  • Install onvif-zeep for automatic URL discovery: pip install onvif-zeep"
     )
 
 
+# ── Main ──────────────────────────────────────────────────────────────────────
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="CP Plus RTSP stream viewer")
-    parser.add_argument("--ip",       default="192.168.1.100")
-    parser.add_argument("--user",     default="admin")
-    parser.add_argument("--password", default="Cam3ra_1234")
-    parser.add_argument("--channel",  type=int, default=1)
-    parser.add_argument("--sub",      action="store_true",
-                        help="Use sub-stream (lower resolution)")
-    parser.add_argument("--save",     type=str, default=None, metavar="FILE",
-                        help="Also record to a video file (e.g. out.avi)")
-    parser.add_argument("--url",      type=str, default=None,
-                        help="Override with a specific RTSP URL")
+    parser = argparse.ArgumentParser(description="CP Plus IP camera RTSP viewer")
+    parser.add_argument("--ip",         default=IP)
+    parser.add_argument("--user",       default=USER)
+    parser.add_argument("--password",   default=PASSWORD)
+    parser.add_argument("--onvif-port", type=int, default=80,
+                        help="ONVIF HTTP port (try 80, 8080, or 8899, default 80)")
+    parser.add_argument("--profile",    type=int, default=0,
+                        help="ONVIF profile index to stream (default 0 = main)")
+    parser.add_argument("--sub",        action="store_true",
+                        help="Request sub-stream / second profile")
+    parser.add_argument("--save",       type=str, default=None, metavar="FILE")
+    parser.add_argument("--url",        type=str, default=None,
+                        help="Skip discovery and use this RTSP URL directly")
     args = parser.parse_args()
 
-    urls = ([args.url] if args.url
-            else _build_urls(args.ip, args.user, args.password,
-                             args.channel, args.sub))
+    profile_idx = args.profile if not args.sub else max(args.profile, 1)
 
-    print("Connecting to CP Plus camera…")
-    cap, active_url, width, height, fps = try_connect(urls)
+    # ── 1. Try ONVIF discovery ────────────────────────────────────────────────
+    stream_url = args.url
+    if not stream_url:
+        try:
+            stream_url, _ = onvif_get_stream_uri(
+                args.ip, args.user, args.password,
+                args.onvif_port, profile_idx, args.sub,
+            )
+            print(f"ONVIF stream URI: {_mask(stream_url)}")
+        except ImportError as e:
+            print(f"\n{e}\n")
+            print("Falling back to common CP Plus direct-camera URL patterns…")
+        except RuntimeError as e:
+            print(f"ONVIF failed ({e}) — trying fallback URLs…")
 
+    # ── 2. Open capture ───────────────────────────────────────────────────────
+    if stream_url:
+        print(f"Opening: {_mask(stream_url)}")
+        try:
+            cap, active_url, width, height, fps = (
+                *open_capture(stream_url),
+            )
+            active_url = stream_url
+            width, height, fps = cap.get(cv2.CAP_PROP_FRAME_WIDTH) or width, \
+                                  cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or height, \
+                                  cap.get(cv2.CAP_PROP_FPS) or fps
+            # Re-read first frame to get true dims
+            ret, frame0 = cap.read()
+            if ret and frame0 is not None:
+                height, width = frame0.shape[:2]
+        except RuntimeError as e:
+            print(f"Direct URL failed ({e}) — trying fallback patterns…")
+            stream_url = None
+
+    if not stream_url:
+        cap, active_url, width, height, fps = try_urls(
+            _fallback_urls(args.ip, args.user, args.password, args.sub)
+        )
+
+    print(f"Streaming {width}x{height} @ {fps:.1f} fps")
+
+    # ── 3. Display loop ───────────────────────────────────────────────────────
     writer = None
     if args.save:
         fourcc = cv2.VideoWriter_fourcc(*"XVID")
@@ -120,18 +244,21 @@ def main() -> None:
     display_fps = 0.0
     fail_count  = 0
 
-    print("Streaming…  q/Esc=quit  s=snapshot  f=fullscreen")
+    print("q/Esc=quit  s=snapshot  f=fullscreen")
 
     while True:
         ret, frame = cap.read()
 
         if not ret or frame is None:
             fail_count += 1
-            if fail_count > 10:
-                print("Too many read failures — reconnecting…")
+            if fail_count > 15:
+                print("Reconnecting…")
                 cap.release()
                 time.sleep(2.0)
-                cap, active_url, width, height, fps = try_connect(urls)
+                try:
+                    cap, _, width, height, fps = try_urls([active_url])
+                except RuntimeError:
+                    break
                 fail_count = 0
             continue
         fail_count = 0
@@ -143,17 +270,17 @@ def main() -> None:
             frame_count = 0
             t0 = time.time()
 
+        h, w = frame.shape[:2]
         ts = datetime.now().strftime("%Y-%m-%d  %H:%M:%S")
         cv2.putText(frame, ts,
-                    (10, height - 30), cv2.FONT_HERSHEY_SIMPLEX,
+                    (10, h - 30), cv2.FONT_HERSHEY_SIMPLEX,
                     0.55, (200, 200, 200), 1, cv2.LINE_AA)
         cv2.putText(frame, f"{display_fps:.1f} fps",
-                    (10, height - 10), cv2.FONT_HERSHEY_SIMPLEX,
+                    (10, h - 10), cv2.FONT_HERSHEY_SIMPLEX,
                     0.45, (160, 160, 160), 1, cv2.LINE_AA)
 
         if writer:
             writer.write(frame)
-
         cv2.imshow(win, frame)
 
         key = cv2.waitKey(1) & 0xFF
@@ -162,7 +289,7 @@ def main() -> None:
         elif key == ord("s"):
             fname = f"cpplus_snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
             cv2.imwrite(fname, frame)
-            print(f"Snapshot saved: {fname}")
+            print(f"Snapshot: {fname}")
         elif key == ord("f"):
             fullscreen = not fullscreen
             cv2.setWindowProperty(
