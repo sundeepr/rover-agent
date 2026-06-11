@@ -62,32 +62,28 @@ def onvif_get_stream_uri(ip: str, user: str, password: str,
             "Then re-run this script."
         )
 
+    # Disable SSL verification globally — the camera uses a self-signed cert
+    # and the onvif-zeep library fetches WSDL over HTTPS internally, ignoring
+    # any per-session verify=False we pass in.
+    import ssl
+    import requests
     import urllib3
+
+    ssl._create_default_https_context = ssl._create_unverified_context
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+    # Monkey-patch requests.Session.send so every request skips verification
+    _orig_send = requests.Session.send
+    def _send_no_verify(self, request, **kwargs):
+        kwargs["verify"] = False
+        return _orig_send(self, request, **kwargs)
+    requests.Session.send = _send_no_verify
+
     print(f"ONVIF: connecting to {ip}:{onvif_port} as {user}…")
-    cam = None
-    for encrypt in (False, True):
-        try:
-            if encrypt:
-                # HTTPS with self-signed cert — disable SSL verification
-                import requests
-                from zeep.transports import Transport
-                session = requests.Session()
-                session.verify = False
-                transport = Transport(session=session)
-                cam = ONVIFCamera(ip, onvif_port, user, password,
-                                  encrypt=True, transport=transport)
-            else:
-                # Plain HTTP — most reliable for local cameras
-                cam = ONVIFCamera(ip, onvif_port, user, password,
-                                  encrypt=False)
-            break
-        except Exception as exc:
-            last_exc = exc
-            continue
-    if cam is None:
-        raise RuntimeError(f"ONVIF connection failed: {last_exc}")
+    try:
+        cam = ONVIFCamera(ip, onvif_port, user, password, encrypt=False)
+    except Exception as exc:
+        raise RuntimeError(f"ONVIF connection failed: {exc}")
 
     media    = cam.create_media_service()
     profiles = media.GetProfiles()
