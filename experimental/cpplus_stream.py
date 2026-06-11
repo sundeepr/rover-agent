@@ -62,11 +62,32 @@ def onvif_get_stream_uri(ip: str, user: str, password: str,
             "Then re-run this script."
         )
 
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
     print(f"ONVIF: connecting to {ip}:{onvif_port} as {user}…")
-    try:
-        cam = ONVIFCamera(ip, onvif_port, user, password)
-    except Exception as exc:
-        raise RuntimeError(f"ONVIF connection failed: {exc}")
+    cam = None
+    for encrypt in (False, True):
+        try:
+            if encrypt:
+                # HTTPS with self-signed cert — disable SSL verification
+                import requests
+                from zeep.transports import Transport
+                session = requests.Session()
+                session.verify = False
+                transport = Transport(session=session)
+                cam = ONVIFCamera(ip, onvif_port, user, password,
+                                  encrypt=True, transport=transport)
+            else:
+                # Plain HTTP — most reliable for local cameras
+                cam = ONVIFCamera(ip, onvif_port, user, password,
+                                  encrypt=False)
+            break
+        except Exception as exc:
+            last_exc = exc
+            continue
+    if cam is None:
+        raise RuntimeError(f"ONVIF connection failed: {last_exc}")
 
     media    = cam.create_media_service()
     profiles = media.GetProfiles()
