@@ -81,14 +81,13 @@ def onvif_get_stream_uri(ip: str, user: str, password: str,
 
     print(f"ONVIF: connecting to {ip}:{onvif_port} as {user}…")
     try:
-        cam = ONVIFCamera(ip, onvif_port, user, password, encrypt=False)
+        cam      = ONVIFCamera(ip, onvif_port, user, password, encrypt=False)
+        media    = cam.create_media_service()
+        profiles = media.GetProfiles()
+        if not profiles:
+            raise RuntimeError("ONVIF: camera returned no media profiles")
     except Exception as exc:
-        raise RuntimeError(f"ONVIF connection failed: {exc}")
-
-    media    = cam.create_media_service()
-    profiles = media.GetProfiles()
-    if not profiles:
-        raise RuntimeError("ONVIF: camera returned no media profiles")
+        raise RuntimeError(f"ONVIF failed: {exc}")
 
     print(f"ONVIF: found {len(profiles)} profile(s):")
     for i, p in enumerate(profiles):
@@ -130,11 +129,14 @@ def onvif_get_stream_uri(ip: str, user: str, password: str,
 def _fallback_urls(ip: str, user: str, password: str, sub: bool) -> list[str]:
     s = "2" if sub else "1"
     return [
+        # Root path — confirmed working on CP Plus direct IP cameras
+        f"rtsp://{user}:{password}@{ip}:554/",
         f"rtsp://{user}:{password}@{ip}:554/onvif{s}",
         f"rtsp://{user}:{password}@{ip}:554/stream{s}",
-        f"rtsp://{user}:{password}@{ip}:554/live/ch0{'1' if not sub else '2'}/0",
-        f"rtsp://{user}:{password}@{ip}/h264Preview_01_{'main' if not sub else 'sub'}",
-        f"rtsp://{user}:{password}@{ip}:554/ch01.264",
+        f"rtsp://{user}:{password}@{ip}:554/live",
+        f"rtsp://{user}:{password}@{ip}:554/h264/ch1/{'sub' if sub else 'main'}/av_stream",
+        f"rtsp://{user}:{password}@{ip}:554/live/ch0{'2' if sub else '1'}/0",
+        f"rtsp://{user}:{password}@{ip}:554/0/av{s}",
     ]
 
 
@@ -215,7 +217,7 @@ def main() -> None:
         except ImportError as e:
             print(f"\n{e}\n")
             print("Falling back to common CP Plus direct-camera URL patterns…")
-        except RuntimeError as e:
+        except Exception as e:
             print(f"ONVIF failed ({e}) — trying fallback URLs…")
 
     # ── 2. Open capture ───────────────────────────────────────────────────────
