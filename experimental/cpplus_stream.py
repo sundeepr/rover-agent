@@ -139,16 +139,14 @@ def onvif_get_stream_uri(ip: str, user: str, password: str,
 # ── Fallback URL list (direct IP camera patterns, not NVR) ───────────────────
 
 def _fallback_urls(ip: str, user: str, password: str, sub: bool) -> list[str]:
-    s = "2" if sub else "1"
+    subtype = 1 if sub else 0
     return [
-        # Root path — confirmed working on CP Plus direct IP cameras
+        # CP Plus documented format (confirmed working)
+        f"rtsp://{user}:{password}@{ip}:554/video/live?channel=1&subtype={subtype}",
+        # Root path fallback
         f"rtsp://{user}:{password}@{ip}:554/",
-        f"rtsp://{user}:{password}@{ip}:554/onvif{s}",
-        f"rtsp://{user}:{password}@{ip}:554/stream{s}",
-        f"rtsp://{user}:{password}@{ip}:554/live",
-        f"rtsp://{user}:{password}@{ip}:554/h264/ch1/{'sub' if sub else 'main'}/av_stream",
-        f"rtsp://{user}:{password}@{ip}:554/live/ch0{'2' if sub else '1'}/0",
-        f"rtsp://{user}:{password}@{ip}:554/0/av{s}",
+        f"rtsp://{user}:{password}@{ip}:554/onvif{'2' if sub else '1'}",
+        f"rtsp://{user}:{password}@{ip}:554/stream{'2' if sub else '1'}",
     ]
 
 
@@ -270,17 +268,8 @@ def main() -> None:
     if stream_url:
         print(f"Opening: {_mask(stream_url)}")
         try:
-            cap, active_url, width, height, fps = (
-                *open_capture(stream_url),
-            )
+            cap, width, height, fps = open_capture(stream_url)
             active_url = stream_url
-            width, height, fps = cap.get(cv2.CAP_PROP_FRAME_WIDTH) or width, \
-                                  cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or height, \
-                                  cap.get(cv2.CAP_PROP_FPS) or fps
-            # Re-read first frame to get true dims
-            ret, frame0 = cap.read()
-            if ret and frame0 is not None:
-                height, width = frame0.shape[:2]
         except RuntimeError as e:
             print(f"Direct URL failed ({e}) — trying fallback patterns…")
             stream_url = None
