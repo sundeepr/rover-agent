@@ -26,14 +26,26 @@ Controls:
 
 import argparse
 import os
+import threading
 import time
 from datetime import datetime
 
 import cv2
 
-# Force TCP RTSP transport before any VideoCapture is created
+# Low-latency FFmpeg options (must be set before any VideoCapture is created):
+#   nobuffer      — disable stream buffering; deliver frames as soon as decoded
+#   low_delay     — disable H.264 B-frame reorder buffer (biggest single fix)
+#   probesize=32K — stop probing early (default 5 MB causes multi-second startup)
+#   analyzeduration=0 — skip stream analysis phase
+#   framedrop     — drop late frames instead of queuing them
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
-    "rtsp_transport;tcp|timeout;10000000"
+    "rtsp_transport;tcp"
+    "|timeout;5000000"
+    "|fflags;nobuffer"
+    "|flags;low_delay"
+    "|probesize;32768"
+    "|analyzeduration;0"
+    "|framedrop;1"
 )
 
 IP       = "192.168.1.100"
@@ -138,6 +150,40 @@ def _fallback_urls(ip: str, user: str, password: str, sub: bool) -> list[str]:
         f"rtsp://{user}:{password}@{ip}:554/live/ch0{'2' if sub else '1'}/0",
         f"rtsp://{user}:{password}@{ip}:554/0/av{s}",
     ]
+
+
+# ── Threaded frame reader ─────────────────────────────────────────────────────
+
+class LatestFrameReader:
+    """
+    Reads frames from a VideoCapture in a background thread and always
+    exposes the most recent one.  The display thread never waits for a
+    decode — it always gets the freshest frame available, eliminating
+    queue build-up that causes visible latency.
+    """
+
+    def __init__(self, cap: cv2.VideoCapture) -> None:
+        self._cap     = cap
+        self._frame   = None
+        self._lock    = threading.Lock()
+        self._running = True
+        self._t       = threading.Thread(target=self._reader, daemon=True)
+        self._t.start()
+
+    def _reader(self) -> None:
+        while self._running:
+            ret, frame = self._cap.read()
+            if ret and frame is not None:
+                with self._lock:
+                    self._frame = frame
+
+    def read(self) -> tuple[bool, cv2.typing.MatLike | None]:
+        with self._lock:
+            f = self._frame
+        return (f is not None, f)
+
+    def stop(self) -> None:
+        self._running = False
 
 
 # ── Stream helpers ────────────────────────────────────────────────────────────
@@ -257,30 +303,37 @@ def main() -> None:
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(win, min(width, 1280), min(height, 720))
 
+    # Background reader — always holds the freshest decoded frame so the
+    # display thread never blocks waiting for a slow decode.
+    reader = LatestFrameReader(cap)
+
     fullscreen  = False
     frame_count = 0
     t0          = time.time()
     display_fps = 0.0
-    fail_count  = 0
+    no_frame_streak = 0
 
     print("q/Esc=quit  s=snapshot  f=fullscreen")
 
     while True:
-        ret, frame = cap.read()
+        ret, frame = reader.read()
 
         if not ret or frame is None:
-            fail_count += 1
-            if fail_count > 15:
-                print("Reconnecting…")
+            no_frame_streak += 1
+            if no_frame_streak > 100:   # ~1 s with 10 ms sleep
+                print("No frames — reconnecting…")
+                reader.stop()
                 cap.release()
                 time.sleep(2.0)
                 try:
-                    cap, _, width, height, fps = try_urls([active_url])
+                    cap, active_url, width, height, fps = try_urls([active_url])
+                    reader = LatestFrameReader(cap)
+                    no_frame_streak = 0
                 except RuntimeError:
                     break
-                fail_count = 0
+            time.sleep(0.01)
             continue
-        fail_count = 0
+        no_frame_streak = 0
 
         frame_count += 1
         elapsed = time.time() - t0
@@ -316,6 +369,7 @@ def main() -> None:
                 cv2.WINDOW_FULLSCREEN if fullscreen else cv2.WINDOW_NORMAL,
             )
 
+    reader.stop()
     cap.release()
     if writer:
         writer.release()
