@@ -129,7 +129,9 @@ def _check_disk_space(path: Path, min_free_gb: float) -> None:
 class SessionRecorder:
     """Records raw video, annotated video, and LLM/VLM decisions for one run."""
 
-    def __init__(self, fps: float = 30.0) -> None:
+    def __init__(self, fps: float = 30.0,
+                 stale_threshold_s: float = 10.0,
+                 watchdog_interval_s: float = 5.0) -> None:
         cfg = _load_config()
 
         sessions_dir = _resolve_sessions_dir(Path(cfg["sessions_dir"]))
@@ -159,6 +161,20 @@ class SessionRecorder:
         # decisions and events can be correlated with a specific video frame.
         self._frame_idx = 0
 
+        # ── Video watchdog ────────────────────────────────────────────────────
+        # Tracks the last time each active video stream was written to.
+        # The watchdog thread checks periodically and calls _stale_callback
+        # for any stream that has gone silent longer than _stale_threshold_s.
+        self._video_last_write: dict[str, float] = {}   # stream_name → epoch
+        self._stale_threshold_s   = stale_threshold_s
+        self._watchdog_interval_s = watchdog_interval_s
+        self._stale_callback = None        # callable(stream_name) or None
+        self._watchdog_running = True
+        self._watchdog_thread = threading.Thread(
+            target=self._watchdog_loop, daemon=True, name="recorder-watchdog"
+        )
+        self._watchdog_thread.start()
+
         self._decisions_path = self.session_dir / "decisions.jsonl"
         self._decisions_lock = threading.Lock()
         self._decisions_fh = open(self._decisions_path, "a", encoding="utf-8")
@@ -174,6 +190,52 @@ class SessionRecorder:
         self._data_fh = open(self._data_path, "a", encoding="utf-8")
 
         log.info("Session recording started: %s", self.session_dir.resolve())
+
+    # ── Watchdog ───────────────────────────────────────────────────────────────
+
+    def set_stale_callback(self, fn) -> None:
+        """
+        Register a callable invoked when a video stream stops being written.
+
+        fn(stream_name: str) is called once per stale stream per watchdog cycle.
+        Typical use: stop the rover and terminate the session.
+
+        Example:
+            recorder.set_stale_callback(lambda name: agent_stop(f"stream {name} stalled"))
+        """
+        self._stale_callback = fn
+
+    def _watchdog_loop(self) -> None:
+        """Background thread: checks video streams every watchdog_interval_s."""
+        # Allow a generous startup window before first check so streams have
+        # time to initialise (lazy VideoWriter creation on first frame).
+        time.sleep(self._stale_threshold_s + self._watchdog_interval_s)
+
+        while self._watchdog_running:
+            now = time.time()
+            with self._stream_lock:
+                active = dict(self._video_last_write)   # snapshot
+
+            for name, last in active.items():
+                age = now - last
+                if age > self._stale_threshold_s:
+                    log.error(
+                        "WATCHDOG: video stream %r has not been written for %.1f s "
+                        "(threshold %.0f s) — recording may be broken",
+                        name, age, self._stale_threshold_s,
+                    )
+                    self.write_event({
+                        "type":   "watchdog_stale",
+                        "stream": name,
+                        "age_s":  round(age, 1),
+                    })
+                    if self._stale_callback:
+                        try:
+                            self._stale_callback(name)
+                        except Exception as exc:
+                            log.error("Stale callback raised: %s", exc)
+
+            time.sleep(self._watchdog_interval_s)
 
     # ── Video ──────────────────────────────────────────────────────────────────
     # Called from the agent_loop thread — VideoWriters need no locking.
@@ -199,6 +261,7 @@ class SessionRecorder:
                 os._exit(1)
         if self._raw_writer:
             self._raw_writer.write(raw)
+            self._video_last_write["raw"] = time.time()
         self._frame_idx += 1
 
     def record(self, name: str, data, fps: float | None = None) -> None:
@@ -236,6 +299,7 @@ class SessionRecorder:
         writer = self._stream_writers.get(name)
         if writer:
             writer.write(frame)
+            self._video_last_write[name] = time.time()
 
     def _record_jsonl(self, name: str, data) -> None:
         """Append one JSON record to <name>.jsonl (must be called under _stream_lock)."""
@@ -264,6 +328,7 @@ class SessionRecorder:
                 self._down_writer = None
         if self._down_writer:
             self._down_writer.write(frame)
+            self._video_last_write["down"] = time.time()
 
     def write_wheel_frame(self, frame: np.ndarray, side: str) -> None:
         """Write one wheel camera frame — delegates to the generic record() API."""
@@ -318,6 +383,7 @@ class SessionRecorder:
 
     def close(self) -> None:
         """Release video writers and close all log files."""
+        self._watchdog_running = False
         if self._raw_writer:
             self._raw_writer.release()
             self._raw_writer = None

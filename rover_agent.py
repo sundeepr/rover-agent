@@ -765,6 +765,14 @@ def main():
     if hasattr(strategy, "set_recorder"):
         strategy.set_recorder(state.recorder)
 
+    def _on_stale_stream(stream_name: str) -> None:
+        """Called by the recorder watchdog when a video stream stops writing."""
+        log.error("STOPPING SESSION — video stream %r stalled", stream_name)
+        state.paused.set()   # stop rover commands immediately
+        raise SystemExit(f"Recording watchdog: stream '{stream_name}' stalled")
+
+    state.recorder.set_stale_callback(_on_stale_stream)
+
     # If a goal was given on the CLI, apply it immediately so the agent
     # starts navigating without waiting for web chat input.
     _NO_GOAL_STRATEGIES = ("line_follow", "plant_center", "boundary_guard", "teleop",
