@@ -46,6 +46,35 @@ log = logging.getLogger("rover.frame_source")
 # ── Abstract base ─────────────────────────────────────────────────────────────
 
 class FrameSource:
+    """
+    Base class for all camera/sensor frame sources.
+
+    Any FrameSource can have a recorder attached after construction:
+        src.attach_recorder(session_recorder, "left_wheel")
+
+    Once attached, every new frame is automatically written to the session
+    via recorder.record(stream_name, frame).  Subclasses with background
+    threads record in the thread (one write per captured frame).
+    DeviceFrameSource records on each read() call.
+    """
+
+    def __init__(self) -> None:
+        self._recorder   = None
+        self._rec_name:  str | None = None
+        self._rec_fps:   float = 10.0
+
+    def attach_recorder(self, recorder, stream_name: str,
+                        fps: float = 10.0) -> None:
+        """Attach a SessionRecorder so every captured frame is auto-recorded."""
+        self._recorder  = recorder
+        self._rec_name  = stream_name
+        self._rec_fps   = fps
+
+    def _auto_record(self, frame: np.ndarray) -> None:
+        """Call from subclasses whenever a new frame is captured."""
+        if self._recorder is not None and frame is not None:
+            self._recorder.record(self._rec_name, frame, fps=self._rec_fps)
+
     def read(self) -> np.ndarray | None:
         raise NotImplementedError
 
@@ -62,12 +91,15 @@ class DeviceFrameSource(FrameSource):
     """Wraps a cv2.VideoCapture opened on a local device."""
 
     def __init__(self, cap: cv2.VideoCapture):
+        super().__init__()
         self._cap = cap
 
     def read(self) -> np.ndarray | None:
         if self._cap is None or not self._cap.isOpened():
             return None
         ret, frame = self._cap.read()
+        if ret and frame is not None:
+            self._auto_record(frame)
         return frame if ret else None
 
     def is_open(self) -> bool:
@@ -92,6 +124,7 @@ class WebSocketFrameSource(FrameSource):
     _RECONNECT_DELAY_S = 2.0
 
     def __init__(self, url: str):
+        super().__init__()
         self._url     = url
         self._frame: np.ndarray | None = None
         self._lock    = threading.Lock()
@@ -140,6 +173,7 @@ class WebSocketFrameSource(FrameSource):
                         if frame is not None:
                             with self._lock:
                                 self._frame = frame
+                            self._auto_record(frame)
             except Exception as e:
                 self._open = False
                 if self._running:
@@ -184,6 +218,7 @@ class RtspFrameSource(FrameSource):
     """
 
     def __init__(self, url: str, label: str = "rtsp") -> None:
+        super().__init__()
         self._url     = url
         self._label   = label
         self._frame:  np.ndarray | None = None
@@ -242,6 +277,7 @@ class RtspFrameSource(FrameSource):
             if ret and frame is not None:
                 with self._lock:
                     self._frame = frame
+                self._auto_record(frame)
                 fail = 0
             else:
                 fail += 1

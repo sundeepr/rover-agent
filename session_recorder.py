@@ -266,30 +266,8 @@ class SessionRecorder:
             self._down_writer.write(frame)
 
     def write_wheel_frame(self, frame: np.ndarray, side: str) -> None:
-        """Write one wheel camera frame to left_wheel.avi or right_wheel.avi."""
-        h, w = frame.shape[:2]
-        if side == "left":
-            if self._left_wheel_writer is None:
-                fourcc = cv2.VideoWriter_fourcc(*"MJPG")
-                self._left_wheel_writer = cv2.VideoWriter(
-                    str(self.session_dir / "left_wheel.avi"), fourcc, self._fps, (w, h)
-                )
-                if not self._left_wheel_writer.isOpened():
-                    log.error("left_wheel.avi VideoWriter failed to open")
-                    self._left_wheel_writer = None
-            if self._left_wheel_writer:
-                self._left_wheel_writer.write(frame)
-        else:
-            if self._right_wheel_writer is None:
-                fourcc = cv2.VideoWriter_fourcc(*"MJPG")
-                self._right_wheel_writer = cv2.VideoWriter(
-                    str(self.session_dir / "right_wheel.avi"), fourcc, self._fps, (w, h)
-                )
-                if not self._right_wheel_writer.isOpened():
-                    log.error("right_wheel.avi VideoWriter failed to open")
-                    self._right_wheel_writer = None
-            if self._right_wheel_writer:
-                self._right_wheel_writer.write(frame)
+        """Write one wheel camera frame — delegates to the generic record() API."""
+        self.record(f"{side}_wheel", frame)
 
     # ── Per-step data log ──────────────────────────────────────────────────────
     # Called from strategy threads — guarded by a lock.
@@ -357,12 +335,6 @@ class SessionRecorder:
                 except Exception:
                     pass
             self._stream_files.clear()
-        if self._left_wheel_writer:
-            self._left_wheel_writer.release()
-            self._left_wheel_writer = None
-        if self._right_wheel_writer:
-            self._right_wheel_writer.release()
-            self._right_wheel_writer = None
         with self._decisions_lock:
             self._decisions_fh.close()
         with self._events_lock:

@@ -758,7 +758,7 @@ def main():
         log.info("Rover         : disabled (pass --roomba-port or --atlas-port to enable)")
 
     from session_recorder import SessionRecorder
-    state               = AgentState()
+    state                = AgentState()
     state.recorder       = SessionRecorder()
     state.query_interval = args.interval
     strategy             = _build_strategy(args.strategy, args)
@@ -789,6 +789,9 @@ def main():
         log.info("%s controller active on %s%s",
                  args.rover.capitalize(), rover_port,
                  " (dry-run)" if args.dry_run else "")
+        # Wire recorder so every drive_raw / stop is captured in events.jsonl
+        if hasattr(rover_ctrl, "set_recorder"):
+            rover_ctrl.set_recorder(state.recorder)
 
     # SIGTERM handler — ensures the finally block runs on `kill <pid>`
     def _on_sigterm(signum, frame):

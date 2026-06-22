@@ -76,8 +76,9 @@ class RoombaController:
     """
 
     def __init__(self, port: str, baud: int = 115200, dry_run: bool = False):
-        self.port = port
-        self.baud = baud
+        self.port      = port
+        self.baud      = baud
+        self._recorder = None  # set via set_recorder() after connect()
         self.dry_run = dry_run
         self._roomba: "Roomba | None" = None
         self._ctx = None
@@ -156,6 +157,10 @@ class RoombaController:
         self._turn(180.0)
         log.info("U-turn complete")
 
+    def set_recorder(self, recorder) -> None:
+        """Attach a SessionRecorder so every motor command is auto-recorded."""
+        self._recorder = recorder
+
     def drive_raw(self, velocity: int, radius: int) -> None:
         """Send a raw (velocity, radius) drive command immediately without sleeping.
 
@@ -163,11 +168,18 @@ class RoombaController:
         want continuous motion rather than a fixed-duration step.
         """
         self._send_drive(velocity, radius)
+        if self._recorder:
+            self._recorder.write_event({
+                "type": "drive_raw", "source": "roomba",
+                "vel": velocity, "radius": radius,
+            })
 
     def stop(self) -> None:
         """Stop all wheel motion."""
         self._send_drive(0, 0x8000)
         log.info("Roomba stopped")
+        if self._recorder:
+            self._recorder.write_event({"type": "stop", "source": "roomba"})
 
     # ── Pixel → motion conversion ─────────────────────────────────────────────
 

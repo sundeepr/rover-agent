@@ -106,7 +106,8 @@ class AtlasController:
         self.baud    = baud
         self.dry_run = dry_run
         self._ser: "serial.Serial | None" = None
-        self._aux    = 0   # current AUX value — persists across drive_raw calls
+        self._aux      = 0     # current AUX value — persists across drive_raw calls
+        self._recorder = None  # set via set_recorder() after connect()
 
     # ── Connection ────────────────────────────────────────────────────────────
 
@@ -171,6 +172,10 @@ class AtlasController:
         self._turn(180.0)
         log.info("U-turn complete")
 
+    def set_recorder(self, recorder) -> None:
+        """Attach a SessionRecorder so every motor command is auto-recorded."""
+        self._recorder = recorder
+
     def drive_raw(self, velocity: int, radius: int) -> None:
         """
         Send a continuous drive command without sleeping.
@@ -180,11 +185,18 @@ class AtlasController:
         """
         L, R = self._velocity_radius_to_lr(velocity, radius)
         self._send_cmd(L, R)
+        if self._recorder:
+            self._recorder.write_event({
+                "type": "drive_raw", "source": "atlas",
+                "vel": velocity, "radius": radius, "L": L, "R": R,
+            })
 
     def stop(self) -> None:
         """Stop all wheel motion."""
         self._send_cmd(0, 0)
         log.info("Atlas stopped")
+        if self._recorder:
+            self._recorder.write_event({"type": "stop", "source": "atlas"})
 
     def set_aux(self, pct: int) -> None:
         """Set the AUX output (0–100 %). Persists across drive_raw calls."""
