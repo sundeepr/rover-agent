@@ -27,13 +27,14 @@ REQUIRED_KEYS = {"T", "x", "y", "z", "t"}
 
 
 def handle_client(conn: socket.socket, addr, ser: serial.Serial) -> None:
-    print(f"[+] connection from {addr}")
+    print(f"[+] new connection from {addr}")
     buf = ""
     try:
         while True:
             chunk = conn.recv(4096)
             if not chunk:
                 break
+            print(f"[>] data received from {addr}: {chunk.decode().strip()!r}")
             buf += chunk.decode()
             # process every newline-terminated or complete JSON object
             while True:
@@ -53,7 +54,7 @@ def handle_client(conn: socket.socket, addr, ser: serial.Serial) -> None:
 
                 payload = json.dumps(cmd) + "\n"
                 ser.write(payload.encode())
-                print(f"[arm] x={cmd['x']} y={cmd['y']} z={cmd['z']} t={cmd['t']}")
+                print(f"[arm] sending to serial → x={cmd['x']} y={cmd['y']} z={cmd['z']} t={cmd['t']}")
 
     except (ConnectionResetError, BrokenPipeError):
         pass
