@@ -34,9 +34,9 @@ Y_MIN, Y_MAX = -150, 150
 Z_MIN, Z_MAX =  30, 300
 
 # Home position — centred, mid-height
-HOME_X =  150
-HOME_Y =    0
-HOME_Z =  100
+HOME_X =  0
+HOME_Y =  0
+HOME_Z =  0
 
 WRIST_ANGLE = 0   # keep wrist flat throughout
 
