@@ -11,17 +11,17 @@ Clients send:
     {"T":1041,"x":<x>,"y":<y>,"z":<z>,"t":<wrist_angle>}
 
 Usage:
-    python roarm_socket_server.py --socket-type raw  [--port 9000] [--serial /dev/ttyUSB0]
-    python roarm_socket_server.py --socket-type ws   [--port 9000]
-    python roarm_socket_server.py --socket-type wss  --cert cert.pem --key key.pem [--port 9000]
+    python roarm_socket_server.py --socket-type raw  [--port 9876] [--serial /dev/ttyUSB0]
+    python roarm_socket_server.py --socket-type ws   [--port 9876]
+    python roarm_socket_server.py --socket-type wss  --cert cert.pem --key key.pem [--port 9876]
 
 Generate a self-signed cert for WSS testing:
     openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes
 
 Test with:
-    nc localhost 9000                              # raw
-    wscat -c ws://localhost:9000                  # ws
-    wscat -c wss://localhost:9000 --no-check      # wss (self-signed)
+    nc localhost 9876                              # raw
+    wscat -c ws://localhost:9876                  # ws
+    wscat -c wss://localhost:9876 --no-check      # wss (self-signed)
     > {"T":1041,"x":150,"y":0,"z":80,"t":3.14}
 """
 
@@ -37,7 +37,7 @@ import websockets
 SERIAL_PORT   = "/dev/ttyUSB0"
 BAUD_RATE     = 115200
 LISTEN_HOST   = "0.0.0.0"
-LISTEN_PORT   = 9000
+LISTEN_PORT   = 9876
 REQUIRED_KEYS = {"T", "x", "y", "z", "t"}
 
 
