@@ -38,8 +38,6 @@ SERIAL_PORT   = "/dev/ttyUSB0"
 BAUD_RATE     = 115200
 LISTEN_HOST   = "0.0.0.0"
 LISTEN_PORT   = 9876
-REQUIRED_KEYS = {"T", "x", "y", "z", "t"}
-
 
 # ---------------------------------------------------------------------------
 # Shared command handler
@@ -48,19 +46,13 @@ REQUIRED_KEYS = {"T", "x", "y", "z", "t"}
 def relay_command(raw: str, addr, ser: serial.Serial) -> None:
     print(f"[>] data received from {addr}: {raw!r}")
     try:
-        cmd = json.loads(raw)
+        json.loads(raw)
     except json.JSONDecodeError as e:
         print(f"[!] invalid JSON from {addr}: {e}")
         return
 
-    missing = REQUIRED_KEYS - cmd.keys()
-    if missing:
-        print(f"[!] ignored — missing keys: {missing}")
-        return
-
-    payload = json.dumps(cmd) + "\n"
-    ser.write(payload.encode())
-    print(f"[arm] sending to serial → x={cmd['x']} y={cmd['y']} z={cmd['z']} t={cmd['t']}")
+    ser.write((raw.strip() + "\n").encode())
+    print(f"[arm] sending to serial → {raw.strip()}")
 
 
 # ---------------------------------------------------------------------------
