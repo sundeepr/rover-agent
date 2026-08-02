@@ -37,6 +37,7 @@ SERIAL_PORT = "/dev/ttyUSB0"
 BAUD_RATE = 115200
 LISTEN_HOST = "0.0.0.0"
 LISTEN_PORT = 9876
+VERBOSE_STREAM_LOGS = False
 
 HOME_X_MM = 250.0
 HOME_Y_MM = 0.0
@@ -271,7 +272,8 @@ def handle_teleop_message(payload: dict, state: TeleopState, ser: serial.Serial)
         state.control_anchor_target = EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, HOME_T_RAD)
         ser.write((ee_command(state.target) + "\n").encode())
         state.commands_sent += 1
-        print(f"[arm] recenter sent seq={payload.get('seq')} target={state.target.__dict__}")
+        if VERBOSE_STREAM_LOGS:
+            print(f"[arm] recenter sent seq={payload.get('seq')} target={state.target.__dict__}")
         append_history(state)
         render_dashboard(state)
         return
@@ -279,9 +281,11 @@ def handle_teleop_message(payload: dict, state: TeleopState, ser: serial.Serial)
     requested_control_active = bool(payload.get("control_active", False))
     if requested_control_active and not state.control_active:
         state.control_anchor_target = EeTarget(state.target.x, state.target.y, state.target.z, state.target.t)
-        print(f"[teleop] control engaged seq={payload.get('seq')} anchor_target={state.control_anchor_target.__dict__}")
+        if VERBOSE_STREAM_LOGS:
+            print(f"[teleop] control engaged seq={payload.get('seq')} anchor_target={state.control_anchor_target.__dict__}")
     elif not requested_control_active and state.control_active:
-        print(f"[teleop] control released seq={payload.get('seq')} target={state.target.__dict__}")
+        if VERBOSE_STREAM_LOGS:
+            print(f"[teleop] control released seq={payload.get('seq')} target={state.target.__dict__}")
         state.control_anchor_target = EeTarget(state.target.x, state.target.y, state.target.z, state.target.t)
 
     state.control_active = requested_control_active
@@ -303,13 +307,15 @@ def handle_teleop_message(payload: dict, state: TeleopState, ser: serial.Serial)
     ser.write((command + "\n").encode())
     state.commands_sent += 1
     state.target = new_target
-    print(f"[arm] seq={payload.get('seq')} target={new_target.__dict__} command={command}")
+    if VERBOSE_STREAM_LOGS:
+        print(f"[arm] seq={payload.get('seq')} target={new_target.__dict__} command={command}")
     append_history(state)
     render_dashboard(state)
 
 
 def relay_command(raw: str, addr, ser: serial.Serial, state: TeleopState) -> None:
-    print(f"[>] data received from {addr}: {raw!r}")
+    if VERBOSE_STREAM_LOGS:
+        print(f"[>] data received from {addr}: {raw!r}")
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as e:
