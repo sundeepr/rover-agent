@@ -86,6 +86,7 @@ class JointTarget:
 class TeleopState:
     def __init__(self) -> None:
         self.target = EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, HOME_T_RAD)
+        self.control_anchor_target = EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, HOME_T_RAD)
         self.last_joint_target: JointTarget | None = None
         self.control_active = False
         self.messages_received = 0
@@ -175,28 +176,31 @@ def log_clamp(payload: dict, previous_target: EeTarget, new_target: EeTarget, mo
     )
 
 
-def apply_mode(previous: EeTarget, delta: dict, mode: str) -> tuple[EeTarget, bool]:
+def apply_mode(anchor: EeTarget, delta: dict, mode: str) -> tuple[EeTarget, bool]:
     dx = float(delta.get("x", 0.0))
     dy = float(delta.get("y", 0.0))
     dz = float(delta.get("z", 0.0))
 
-    new_target = EeTarget(previous.x, previous.y, previous.z, previous.t)
+    requested_target = EeTarget(anchor.x, anchor.y, anchor.z, anchor.t)
     clamped = False
 
     if mode in ("xyz", "x-only"):
-        target_x = clamp(HOME_X_MM - dz * MM_PER_METER if mode == "x-only" else previous.x - dz * MM_PER_METER, MIN_X_MM, MAX_X_MM)
-        clamped |= target_x in (MIN_X_MM, MAX_X_MM) and target_x != (HOME_X_MM - dz * MM_PER_METER if mode == "x-only" else previous.x - dz * MM_PER_METER)
-        new_target.x = target_x
+        requested_x = anchor.x - dz * MM_PER_METER
+        target_x = clamp(requested_x, MIN_X_MM, MAX_X_MM)
+        clamped |= abs(target_x - requested_x) > 1e-6
+        requested_target.x = target_x
     if mode in ("xyz", "y-only"):
-        target_y = clamp(HOME_Y_MM - dx * MM_PER_METER if mode == "y-only" else previous.y - dx * MM_PER_METER, MIN_Y_MM, MAX_Y_MM)
-        clamped |= target_y in (MIN_Y_MM, MAX_Y_MM) and target_y != (HOME_Y_MM - dx * MM_PER_METER if mode == "y-only" else previous.y - dx * MM_PER_METER)
-        new_target.y = target_y
+        requested_y = anchor.y - dx * MM_PER_METER
+        target_y = clamp(requested_y, MIN_Y_MM, MAX_Y_MM)
+        clamped |= abs(target_y - requested_y) > 1e-6
+        requested_target.y = target_y
     if mode in ("xyz", "z-only"):
-        target_z = clamp(HOME_Z_MM + dy * MM_PER_METER if mode == "z-only" else previous.z + dy * MM_PER_METER, MIN_Z_MM, MAX_Z_MM)
-        clamped |= target_z in (MIN_Z_MM, MAX_Z_MM) and target_z != (HOME_Z_MM + dy * MM_PER_METER if mode == "z-only" else previous.z + dy * MM_PER_METER)
-        new_target.z = target_z
+        requested_z = anchor.z + dy * MM_PER_METER
+        target_z = clamp(requested_z, MIN_Z_MM, MAX_Z_MM)
+        clamped |= abs(target_z - requested_z) > 1e-6
+        requested_target.z = target_z
 
-    return new_target, clamped
+    return requested_target, clamped
 
 
 def controller_moved(delta: dict) -> bool:
@@ -210,6 +214,7 @@ def handle_teleop_message(payload: dict, state: TeleopState, ser: serial.Serial)
 
     if payload.get("recenter"):
         state.target = EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, HOME_T_RAD)
+        state.control_anchor_target = EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, HOME_T_RAD)
         joints = solve_ik(state.target)
         if joints is None:
             state.ik_failures += 1
@@ -221,13 +226,21 @@ def handle_teleop_message(payload: dict, state: TeleopState, ser: serial.Serial)
         print(f"[arm] recenter sent seq={payload.get('seq')} target={state.target.__dict__}")
         return
 
-    state.control_active = bool(payload.get("control_active", False))
+    requested_control_active = bool(payload.get("control_active", False))
+    if requested_control_active and not state.control_active:
+        state.control_anchor_target = EeTarget(state.target.x, state.target.y, state.target.z, state.target.t)
+        print(f"[teleop] control engaged seq={payload.get('seq')} anchor_target={state.control_anchor_target.__dict__}")
+    elif not requested_control_active and state.control_active:
+        print(f"[teleop] control released seq={payload.get('seq')} target={state.target.__dict__}")
+        state.control_anchor_target = EeTarget(state.target.x, state.target.y, state.target.z, state.target.t)
+
+    state.control_active = requested_control_active
     if not state.control_active or not moved:
         return
 
     previous_target = EeTarget(state.target.x, state.target.y, state.target.z, state.target.t)
     previous_joints = state.last_joint_target
-    new_target, clamped = apply_mode(previous_target, delta, str(payload.get("mode", "xyz")))
+    new_target, clamped = apply_mode(state.control_anchor_target, delta, str(payload.get("mode", "xyz")))
     if clamped:
         state.clamp_events += 1
         log_clamp(payload, previous_target, new_target, str(payload.get("mode", "xyz")))
