@@ -54,6 +54,7 @@ MAX_Z_MM = 500.0
 
 INPUT_MOVE_EPS_M = 1e-4
 TARGET_EPS_MM = 0.5
+RECLUTCH_HOLDOFF_S = 0.30
 
 INIT_COMMAND = {"T": 100}
 FEEDBACK_COMMAND = {"T": 105}
@@ -75,6 +76,7 @@ class TeleopState:
         self.target = EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, HOME_T_RAD)
         self.control_anchor_target = EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, HOME_T_RAD)
         self.control_active = False
+        self.control_resume_time = 0.0
         self.mode = "xyz"
         self.last_delta = {"x": 0.0, "y": 0.0, "z": 0.0}
         self.last_seq = 0
@@ -281,15 +283,22 @@ def handle_teleop_message(payload: dict, state: TeleopState, ser: serial.Serial)
     requested_control_active = bool(payload.get("control_active", False))
     if requested_control_active and not state.control_active:
         state.control_anchor_target = EeTarget(state.target.x, state.target.y, state.target.z, state.target.t)
+        state.control_resume_time = time.monotonic() + RECLUTCH_HOLDOFF_S
         if VERBOSE_STREAM_LOGS:
             print(f"[teleop] control engaged seq={payload.get('seq')} anchor_target={state.control_anchor_target.__dict__}")
     elif not requested_control_active and state.control_active:
         if VERBOSE_STREAM_LOGS:
             print(f"[teleop] control released seq={payload.get('seq')} target={state.target.__dict__}")
         state.control_anchor_target = EeTarget(state.target.x, state.target.y, state.target.z, state.target.t)
+        state.control_resume_time = 0.0
 
     state.control_active = requested_control_active
     if not state.control_active or not moved:
+        append_history(state)
+        render_dashboard(state)
+        return
+
+    if time.monotonic() < state.control_resume_time:
         append_history(state)
         render_dashboard(state)
         return
