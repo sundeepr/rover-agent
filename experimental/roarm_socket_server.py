@@ -22,6 +22,7 @@ The server owns:
 
 import argparse
 import asyncio
+import collections
 import json
 import math
 import ssl
@@ -73,9 +74,15 @@ class TeleopState:
         self.target = EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, HOME_T_RAD)
         self.control_anchor_target = EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, HOME_T_RAD)
         self.control_active = False
+        self.mode = "xyz"
+        self.last_delta = {"x": 0.0, "y": 0.0, "z": 0.0}
+        self.last_seq = 0
         self.messages_received = 0
         self.commands_sent = 0
         self.clamp_events = 0
+        self.history_x = collections.deque(maxlen=40)
+        self.history_y = collections.deque(maxlen=40)
+        self.history_z = collections.deque(maxlen=40)
 
 
 def same_target(a: EeTarget, b: EeTarget) -> bool:
@@ -188,10 +195,76 @@ def controller_moved(delta: dict) -> bool:
     return any(abs(float(delta.get(axis, 0.0))) >= INPUT_MOVE_EPS_M for axis in ("x", "y", "z"))
 
 
+def axis_bar(value: float, minimum: float, maximum: float, width: int = 24) -> str:
+    if maximum <= minimum:
+        return "-" * width
+    ratio = (value - minimum) / (maximum - minimum)
+    ratio = clamp(ratio, 0.0, 1.0)
+    filled = int(round(ratio * width))
+    filled = max(0, min(width, filled))
+    return "█" * filled + "-" * (width - filled)
+
+
+def sparkline(values: collections.deque[float], minimum: float, maximum: float) -> str:
+    if not values:
+        return ""
+    glyphs = "▁▂▃▄▅▆▇█"
+    span = maximum - minimum
+    if span <= 0.0:
+        return glyphs[0] * len(values)
+    chars = []
+    for value in values:
+        ratio = clamp((value - minimum) / span, 0.0, 1.0)
+        index = min(len(glyphs) - 1, int(round(ratio * (len(glyphs) - 1))))
+        chars.append(glyphs[index])
+    return "".join(chars)
+
+
+def render_dashboard(state: TeleopState) -> None:
+    lines = [
+        "\x1b[2J\x1b[H",
+        "RoArm Teleop Dashboard",
+        f"seq={state.last_seq}  mode={state.mode}  control_active={state.control_active}",
+        f"messages={state.messages_received}  sent={state.commands_sent}  clamps={state.clamp_events}",
+        "",
+        "Current target",
+        f"  X {state.target.x:8.2f} |{axis_bar(state.target.x, MIN_X_MM, MAX_X_MM)}|",
+        f"  Y {state.target.y:8.2f} |{axis_bar(state.target.y, MIN_Y_MM, MAX_Y_MM)}|",
+        f"  Z {state.target.z:8.2f} |{axis_bar(state.target.z, MIN_Z_MM, MAX_Z_MM)}|",
+        "",
+        "Clutch anchor",
+        f"  X {state.control_anchor_target.x:8.2f} |{axis_bar(state.control_anchor_target.x, MIN_X_MM, MAX_X_MM)}|",
+        f"  Y {state.control_anchor_target.y:8.2f} |{axis_bar(state.control_anchor_target.y, MIN_Y_MM, MAX_Y_MM)}|",
+        f"  Z {state.control_anchor_target.z:8.2f} |{axis_bar(state.control_anchor_target.z, MIN_Z_MM, MAX_Z_MM)}|",
+        "",
+        f"Last delta: x={state.last_delta['x']:+.5f}  y={state.last_delta['y']:+.5f}  z={state.last_delta['z']:+.5f}",
+        "",
+        "History",
+        f"  X {sparkline(state.history_x, MIN_X_MM, MAX_X_MM)}",
+        f"  Y {sparkline(state.history_y, MIN_Y_MM, MAX_Y_MM)}",
+        f"  Z {sparkline(state.history_z, MIN_Z_MM, MAX_Z_MM)}",
+        "",
+    ]
+    print("\n".join(lines), end="", flush=True)
+
+
+def append_history(state: TeleopState) -> None:
+    state.history_x.append(state.target.x)
+    state.history_y.append(state.target.y)
+    state.history_z.append(state.target.z)
+
+
 def handle_teleop_message(payload: dict, state: TeleopState, ser: serial.Serial) -> None:
     state.messages_received += 1
     delta = payload.get("delta", {})
     moved = controller_moved(delta)
+    state.last_seq = int(payload.get("seq", state.last_seq))
+    state.mode = str(payload.get("mode", state.mode))
+    state.last_delta = {
+        "x": float(delta.get("x", 0.0)),
+        "y": float(delta.get("y", 0.0)),
+        "z": float(delta.get("z", 0.0)),
+    }
 
     if payload.get("recenter"):
         state.target = EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, HOME_T_RAD)
@@ -199,6 +272,8 @@ def handle_teleop_message(payload: dict, state: TeleopState, ser: serial.Serial)
         ser.write((ee_command(state.target) + "\n").encode())
         state.commands_sent += 1
         print(f"[arm] recenter sent seq={payload.get('seq')} target={state.target.__dict__}")
+        append_history(state)
+        render_dashboard(state)
         return
 
     requested_control_active = bool(payload.get("control_active", False))
@@ -211,6 +286,8 @@ def handle_teleop_message(payload: dict, state: TeleopState, ser: serial.Serial)
 
     state.control_active = requested_control_active
     if not state.control_active or not moved:
+        append_history(state)
+        render_dashboard(state)
         return
 
     previous_target = EeTarget(state.target.x, state.target.y, state.target.z, state.target.t)
@@ -227,6 +304,8 @@ def handle_teleop_message(payload: dict, state: TeleopState, ser: serial.Serial)
     state.commands_sent += 1
     state.target = new_target
     print(f"[arm] seq={payload.get('seq')} target={new_target.__dict__} command={command}")
+    append_history(state)
+    render_dashboard(state)
 
 
 def relay_command(raw: str, addr, ser: serial.Serial, state: TeleopState) -> None:
@@ -326,6 +405,8 @@ def main():
         print(f"[init] arm feedback target={state.target.__dict__}")
     else:
         print(f"[init] arm feedback unavailable; using home target={state.target.__dict__}")
+    append_history(state)
+    render_dashboard(state)
 
     try:
         if args.socket_type == "raw":
