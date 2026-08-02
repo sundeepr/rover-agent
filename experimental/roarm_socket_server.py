@@ -55,6 +55,7 @@ MAX_Z_MM = 500.0
 INPUT_MOVE_EPS_M = 1e-4
 TARGET_EPS_MM = 0.5
 RECLUTCH_HOLDOFF_S = 0.30
+MOVING_AVERAGE_WINDOW = 20
 
 INIT_COMMAND = {"T": 100}
 FEEDBACK_COMMAND = {"T": 105}
@@ -79,6 +80,7 @@ class TeleopState:
         self.control_resume_time = 0.0
         self.mode = "xyz"
         self.last_delta = {"x": 0.0, "y": 0.0, "z": 0.0}
+        self.filtered_delta = {"x": 0.0, "y": 0.0, "z": 0.0}
         self.last_seq = 0
         self.messages_received = 0
         self.commands_sent = 0
@@ -86,6 +88,9 @@ class TeleopState:
         self.history_x = collections.deque(maxlen=40)
         self.history_y = collections.deque(maxlen=40)
         self.history_z = collections.deque(maxlen=40)
+        self.delta_x_window = collections.deque(maxlen=MOVING_AVERAGE_WINDOW)
+        self.delta_y_window = collections.deque(maxlen=MOVING_AVERAGE_WINDOW)
+        self.delta_z_window = collections.deque(maxlen=MOVING_AVERAGE_WINDOW)
 
 
 def same_target(a: EeTarget, b: EeTarget) -> bool:
@@ -240,7 +245,8 @@ def render_dashboard(state: TeleopState) -> None:
         f"  Y {state.control_anchor_target.y:8.2f} |{axis_bar(state.control_anchor_target.y, MIN_Y_MM, MAX_Y_MM)}|",
         f"  Z {state.control_anchor_target.z:8.2f} |{axis_bar(state.control_anchor_target.z, MIN_Z_MM, MAX_Z_MM)}|",
         "",
-        f"Last delta: x={state.last_delta['x']:+.5f}  y={state.last_delta['y']:+.5f}  z={state.last_delta['z']:+.5f}",
+        f"Raw delta:      x={state.last_delta['x']:+.5f}  y={state.last_delta['y']:+.5f}  z={state.last_delta['z']:+.5f}",
+        f"Filtered delta: x={state.filtered_delta['x']:+.5f}  y={state.filtered_delta['y']:+.5f}  z={state.filtered_delta['z']:+.5f}",
         "",
         "History",
         f"  X {sparkline(state.history_x, MIN_X_MM, MAX_X_MM)}",
@@ -255,6 +261,29 @@ def append_history(state: TeleopState) -> None:
     state.history_x.append(state.target.x)
     state.history_y.append(state.target.y)
     state.history_z.append(state.target.z)
+
+
+def reset_delta_filter(state: TeleopState) -> None:
+    state.delta_x_window.clear()
+    state.delta_y_window.clear()
+    state.delta_z_window.clear()
+    state.filtered_delta = {"x": 0.0, "y": 0.0, "z": 0.0}
+
+
+def apply_moving_average_filter(state: TeleopState, delta: dict) -> dict:
+    dx = float(delta.get("x", 0.0))
+    dy = float(delta.get("y", 0.0))
+    dz = float(delta.get("z", 0.0))
+    state.delta_x_window.append(dx)
+    state.delta_y_window.append(dy)
+    state.delta_z_window.append(dz)
+    filtered = {
+        "x": sum(state.delta_x_window) / len(state.delta_x_window),
+        "y": sum(state.delta_y_window) / len(state.delta_y_window),
+        "z": sum(state.delta_z_window) / len(state.delta_z_window),
+    }
+    state.filtered_delta = filtered
+    return filtered
 
 
 def handle_teleop_message(payload: dict, state: TeleopState, ser: serial.Serial) -> None:
@@ -272,6 +301,7 @@ def handle_teleop_message(payload: dict, state: TeleopState, ser: serial.Serial)
     if payload.get("recenter"):
         state.target = EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, HOME_T_RAD)
         state.control_anchor_target = EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, HOME_T_RAD)
+        reset_delta_filter(state)
         ser.write((ee_command(state.target) + "\n").encode())
         state.commands_sent += 1
         if VERBOSE_STREAM_LOGS:
@@ -284,6 +314,7 @@ def handle_teleop_message(payload: dict, state: TeleopState, ser: serial.Serial)
     if requested_control_active and not state.control_active:
         state.control_anchor_target = EeTarget(state.target.x, state.target.y, state.target.z, state.target.t)
         state.control_resume_time = time.monotonic() + RECLUTCH_HOLDOFF_S
+        reset_delta_filter(state)
         if VERBOSE_STREAM_LOGS:
             print(f"[teleop] control engaged seq={payload.get('seq')} anchor_target={state.control_anchor_target.__dict__}")
     elif not requested_control_active and state.control_active:
@@ -291,6 +322,7 @@ def handle_teleop_message(payload: dict, state: TeleopState, ser: serial.Serial)
             print(f"[teleop] control released seq={payload.get('seq')} target={state.target.__dict__}")
         state.control_anchor_target = EeTarget(state.target.x, state.target.y, state.target.z, state.target.t)
         state.control_resume_time = 0.0
+        reset_delta_filter(state)
 
     state.control_active = requested_control_active
     if not state.control_active or not moved:
@@ -298,13 +330,15 @@ def handle_teleop_message(payload: dict, state: TeleopState, ser: serial.Serial)
         render_dashboard(state)
         return
 
+    filtered_delta = apply_moving_average_filter(state, delta)
+
     if time.monotonic() < state.control_resume_time:
         append_history(state)
         render_dashboard(state)
         return
 
     previous_target = EeTarget(state.target.x, state.target.y, state.target.z, state.target.t)
-    new_target, clamped = apply_mode(state.control_anchor_target, delta, str(payload.get("mode", "xyz")))
+    new_target, clamped = apply_mode(state.control_anchor_target, filtered_delta, str(payload.get("mode", "xyz")))
     if clamped:
         state.clamp_events += 1
         log_clamp(payload, previous_target, new_target, str(payload.get("mode", "xyz")))
