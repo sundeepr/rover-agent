@@ -63,11 +63,6 @@ ELBOW_MAX_RAD = 3.14
 INPUT_MOVE_EPS_M = 1e-4
 TARGET_EPS_MM = 0.5
 JOINT_EPS_RAD = 1e-3
-FEEDBACK_EPS_RAD = 3e-3
-FEEDBACK_SETTLE_S = 0.25
-FEEDBACK_TIMEOUT_S = 0.5
-
-
 def clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(value, hi))
 
@@ -92,11 +87,9 @@ class TeleopState:
     def __init__(self) -> None:
         self.target = EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, HOME_T_RAD)
         self.last_joint_target: JointTarget | None = None
-        self.last_feedback: dict | None = None
         self.control_active = False
         self.messages_received = 0
         self.commands_sent = 0
-        self.no_motion = 0
         self.ik_failures = 0
         self.clamp_events = 0
 
@@ -169,54 +162,15 @@ def joint_command(joints: JointTarget) -> str:
     })
 
 
-def send_serial_json(ser: serial.Serial, payload: dict) -> None:
-    ser.write((json.dumps(payload) + "\n").encode())
-
-
-def read_feedback(ser: serial.Serial) -> dict | None:
-    send_serial_json(ser, {"T": 105})
-    deadline = time.time() + FEEDBACK_TIMEOUT_S
-    buf = b""
-    while time.time() < deadline:
-        chunk = ser.read(ser.in_waiting or 1)
-        if chunk:
-            buf += chunk
-            while b"\n" in buf:
-                line, buf = buf.split(b"\n", 1)
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(data, dict) and data.get("T") == 1051:
-                    return data
-    return None
-
-
-def feedback_changed(before: dict | None, after: dict | None) -> bool:
-    if before is None or after is None:
-        return False
-    for key in ("b", "s", "e", "t"):
-        if abs(float(after.get(key, 0.0)) - float(before.get(key, 0.0))) >= FEEDBACK_EPS_RAD:
-            return True
-    return False
-
-
-def log_no_motion(reason: str, payload: dict, previous_target: EeTarget, new_target: EeTarget,
-                  previous_joints: JointTarget | None, new_joints: JointTarget | None) -> None:
+def log_clamp(payload: dict, previous_target: EeTarget, new_target: EeTarget, mode: str) -> None:
     print(
-        "[no_motion]",
+        "[clamp]",
         json.dumps({
-            "reason": reason,
             "seq": payload.get("seq"),
-            "mode": payload.get("mode"),
+            "mode": mode,
             "delta": payload.get("delta"),
             "previous_target": previous_target.__dict__,
             "new_target": new_target.__dict__,
-            "previous_joints": None if previous_joints is None else previous_joints.__dict__,
-            "new_joints": None if new_joints is None else new_joints.__dict__,
         }),
     )
 
@@ -255,25 +209,16 @@ def handle_teleop_message(payload: dict, state: TeleopState, ser: serial.Serial)
     moved = controller_moved(delta)
 
     if payload.get("recenter"):
-        previous_target = EeTarget(state.target.x, state.target.y, state.target.z, state.target.t)
         state.target = EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, HOME_T_RAD)
         joints = solve_ik(state.target)
         if joints is None:
             state.ik_failures += 1
             print(f"[!] IK failed for recenter seq={payload.get('seq')}")
             return
-        before = read_feedback(ser)
         ser.write((joint_command(joints) + "\n").encode())
         state.commands_sent += 1
-        time.sleep(FEEDBACK_SETTLE_S)
-        after = read_feedback(ser)
-        state.last_feedback = after
         state.last_joint_target = joints
-        if not feedback_changed(before, after):
-            state.no_motion += 1
-            log_no_motion("physical_arm_unchanged", payload, previous_target, state.target, None, joints)
-        else:
-            print(f"[arm] recenter sent seq={payload.get('seq')} target={state.target.__dict__}")
+        print(f"[arm] recenter sent seq={payload.get('seq')} target={state.target.__dict__}")
         return
 
     state.control_active = bool(payload.get("control_active", False))
@@ -285,39 +230,36 @@ def handle_teleop_message(payload: dict, state: TeleopState, ser: serial.Serial)
     new_target, clamped = apply_mode(previous_target, delta, str(payload.get("mode", "xyz")))
     if clamped:
         state.clamp_events += 1
+        log_clamp(payload, previous_target, new_target, str(payload.get("mode", "xyz")))
 
     if same_target(previous_target, new_target):
-        state.no_motion += 1
-        reason = "workspace_clamped_to_same_target" if clamped else "target_unchanged"
-        log_no_motion(reason, payload, previous_target, new_target, previous_joints, previous_joints)
         return
 
     joints = solve_ik(new_target)
     if joints is None:
         state.ik_failures += 1
-        log_no_motion("ik_failed", payload, previous_target, new_target, previous_joints, None)
+        print(
+            "[ik_failed]",
+            json.dumps({
+                "seq": payload.get("seq"),
+                "mode": payload.get("mode"),
+                "delta": payload.get("delta"),
+                "previous_target": previous_target.__dict__,
+                "new_target": new_target.__dict__,
+            }),
+        )
         return
 
     if same_joints(previous_joints, joints):
-        state.no_motion += 1
-        log_no_motion("joint_target_unchanged", payload, previous_target, new_target, previous_joints, joints)
         state.target = new_target
         return
 
-    before = read_feedback(ser)
     command = joint_command(joints)
     ser.write((command + "\n").encode())
     state.commands_sent += 1
-    time.sleep(FEEDBACK_SETTLE_S)
-    after = read_feedback(ser)
-    state.last_feedback = after
     state.target = new_target
     state.last_joint_target = joints
-    if not feedback_changed(before, after):
-        state.no_motion += 1
-        log_no_motion("physical_arm_unchanged", payload, previous_target, new_target, previous_joints, joints)
-    else:
-        print(f"[arm] seq={payload.get('seq')} target={new_target.__dict__} joints={joints.__dict__} command={command}")
+    print(f"[arm] seq={payload.get('seq')} target={new_target.__dict__} joints={joints.__dict__} command={command}")
 
 
 def relay_command(raw: str, addr, ser: serial.Serial, state: TeleopState) -> None:
@@ -413,7 +355,7 @@ def main():
         print("\nShutting down.")
         print(
             f"Summary: received={state.messages_received} sent={state.commands_sent} "
-            f"no_motion={state.no_motion} ik_failures={state.ik_failures} clamps={state.clamp_events}"
+            f"ik_failures={state.ik_failures} clamps={state.clamp_events}"
         )
     finally:
         ser.close()
