@@ -180,17 +180,17 @@ def apply_mode(anchor: EeTarget, delta: dict, mode: str) -> tuple[EeTarget, bool
     requested_target = EeTarget(anchor.x, anchor.y, anchor.z, anchor.t)
     clamped = False
 
-    if mode in ("xyz", "x-only"):
+    if mode in ("xyz", "xyz_rate", "x-only"):
         requested_x = anchor.x + dz * MM_PER_METER
         target_x = clamp(requested_x, MIN_X_MM, MAX_X_MM)
         clamped |= abs(target_x - requested_x) > 1e-6
         requested_target.x = target_x
-    if mode in ("xyz", "y-only"):
+    if mode in ("xyz", "xyz_rate", "y-only"):
         requested_y = anchor.y - dx * MM_PER_METER
         target_y = clamp(requested_y, MIN_Y_MM, MAX_Y_MM)
         clamped |= abs(target_y - requested_y) > 1e-6
         requested_target.y = target_y
-    if mode in ("xyz", "z-only"):
+    if mode in ("xyz", "xyz_rate", "z-only"):
         requested_z = anchor.z + dy * MM_PER_METER
         target_z = clamp(requested_z, MIN_Z_MM, MAX_Z_MM)
         clamped |= abs(target_z - requested_z) > 1e-6
