@@ -181,17 +181,17 @@ def apply_mode(anchor: EeTarget, delta: dict, mode: str) -> tuple[EeTarget, bool
     clamped = False
 
     if mode in ("xyz", "xyz_rate", "x-only"):
-        requested_x = anchor.x + dz * MM_PER_METER
+        requested_x = anchor.x + dx * MM_PER_METER
         target_x = clamp(requested_x, MIN_X_MM, MAX_X_MM)
         clamped |= abs(target_x - requested_x) > 1e-6
         requested_target.x = target_x
     if mode in ("xyz", "xyz_rate", "y-only"):
-        requested_y = anchor.y - dx * MM_PER_METER
+        requested_y = anchor.y + dy * MM_PER_METER
         target_y = clamp(requested_y, MIN_Y_MM, MAX_Y_MM)
         clamped |= abs(target_y - requested_y) > 1e-6
         requested_target.y = target_y
     if mode in ("xyz", "xyz_rate", "z-only"):
-        requested_z = anchor.z + dy * MM_PER_METER
+        requested_z = anchor.z + dz * MM_PER_METER
         target_z = clamp(requested_z, MIN_Z_MM, MAX_Z_MM)
         clamped |= abs(target_z - requested_z) > 1e-6
         requested_target.z = target_z
@@ -339,8 +339,7 @@ def handle_teleop_message(payload: dict, state: TeleopState, ser: serial.Serial)
 
     previous_target = EeTarget(state.target.x, state.target.y, state.target.z, state.target.t)
     mode = str(payload.get("mode", "xyz"))
-    anchor = state.target if mode == "xyz_rate" else state.control_anchor_target
-    new_target, clamped = apply_mode(anchor, filtered_delta, mode)
+    new_target, clamped = apply_mode(state.control_anchor_target, filtered_delta, mode)
     if clamped:
         state.clamp_events += 1
         log_clamp(payload, previous_target, new_target, str(payload.get("mode", "xyz")))
