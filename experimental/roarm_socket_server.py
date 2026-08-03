@@ -45,6 +45,17 @@ HOME_Z_MM = 0.0
 HOME_T_RAD = 3.14
 MM_PER_METER = 1250.0
 
+LINK1_MM = 320.0
+LINK2_MM = 212.0
+BASE_MIN_RAD = -3.14
+BASE_MAX_RAD = 3.14
+SHOULDER_MIN_RAD = -1.57
+SHOULDER_MAX_RAD = 1.57
+ELBOW_MIN_RAD = 0.0
+ELBOW_MAX_RAD = 3.14
+JOINT_SPD = 0
+JOINT_ACC = 10
+
 MIN_X_MM = 0.0
 MAX_X_MM = 490.0
 MIN_Y_MM = -490.0
@@ -70,6 +81,14 @@ class EeTarget:
     y: float
     z: float
     t: float = HOME_T_RAD
+
+
+@dataclass
+class JointTarget:
+    base: float
+    shoulder: float
+    elbow: float
+    hand: float
 
 
 class TeleopState:
@@ -102,13 +121,51 @@ def same_target(a: EeTarget, b: EeTarget) -> bool:
     )
 
 
-def ee_command(target: EeTarget) -> str:
+def solve_ik(target: EeTarget) -> JointTarget:
+    base = math.atan2(target.y, target.x)
+    radial = math.sqrt(target.x * target.x + target.y * target.y)
+    reach = math.sqrt(radial * radial + target.z * target.z)
+    min_reach = abs(LINK1_MM - LINK2_MM) + 1.0
+    max_reach = (LINK1_MM + LINK2_MM) - 1.0
+    safe_reach = clamp(reach, min_reach, max_reach)
+
+    safe_radial = radial
+    safe_z = target.z
+    if reach > 1e-3 and abs(safe_reach - reach) > 1e-3:
+        scale = safe_reach / reach
+        safe_radial *= scale
+        safe_z *= scale
+
+    cos_elbow = clamp(
+        (safe_radial * safe_radial + safe_z * safe_z - LINK1_MM * LINK1_MM - LINK2_MM * LINK2_MM) /
+        (2.0 * LINK1_MM * LINK2_MM),
+        -1.0,
+        1.0,
+    )
+    elbow = math.acos(cos_elbow)
+    shoulder = math.atan2(safe_z, safe_radial) - math.atan2(
+        LINK2_MM * math.sin(elbow),
+        LINK1_MM + LINK2_MM * math.cos(elbow),
+    )
+
+    return JointTarget(
+        base=clamp(base, BASE_MIN_RAD, BASE_MAX_RAD),
+        shoulder=clamp(shoulder, SHOULDER_MIN_RAD, SHOULDER_MAX_RAD),
+        elbow=clamp(elbow, ELBOW_MIN_RAD, ELBOW_MAX_RAD),
+        hand=target.t,
+    )
+
+
+def joint_command(target: EeTarget) -> str:
+    joints = solve_ik(target)
     return json.dumps({
-        "T": 1041,
-        "x": round(target.x, 3),
-        "y": round(target.y, 3),
-        "z": round(target.z, 3),
-        "t": round(target.t, 6),
+        "T": 102,
+        "base": round(joints.base, 6),
+        "shoulder": round(joints.shoulder, 6),
+        "elbow": round(joints.elbow, 6),
+        "hand": round(joints.hand, 6),
+        "spd": JOINT_SPD,
+        "acc": JOINT_ACC,
     })
 
 
@@ -302,7 +359,7 @@ def handle_teleop_message(payload: dict, state: TeleopState, ser: serial.Serial)
         state.target = EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, HOME_T_RAD)
         state.control_anchor_target = EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, HOME_T_RAD)
         reset_delta_filter(state)
-        ser.write((ee_command(state.target) + "\n").encode())
+        ser.write((joint_command(state.target) + "\n").encode())
         state.commands_sent += 1
         if VERBOSE_STREAM_LOGS:
             print(f"[arm] recenter sent seq={payload.get('seq')} target={state.target.__dict__}")
@@ -347,7 +404,7 @@ def handle_teleop_message(payload: dict, state: TeleopState, ser: serial.Serial)
     if same_target(previous_target, new_target):
         return
 
-    command = ee_command(new_target)
+    command = joint_command(new_target)
     ser.write((command + "\n").encode())
     state.commands_sent += 1
     state.target = new_target
