@@ -48,7 +48,7 @@ os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
     "|framedrop;1"
 )
 
-IP       = "192.168.1.100"
+IP       = "192.168.1.101"
 USER     = "admin"
 PASSWORD = "Cam3ra_1234"
 
