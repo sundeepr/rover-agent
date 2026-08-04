@@ -46,11 +46,16 @@ HOME_T_RAD = 3.14
 MM_PER_METER = 1000.0
 MOTION_SCALE = 0.4
 
-BASE_Z_OFFSET_MM = 37.96
-LINK1_X_OFFSET_MM = 30.0
-LINK1_Z_OFFSET_MM = 236.82
-LINK1_MM = math.hypot(LINK1_X_OFFSET_MM, LINK1_Z_OFFSET_MM)
-LINK2_MM = 215.99
+# RoArm-M2 geometry and angular offsets from Waveshare's RoArm-M2_config.h.
+ARM_L1_LENGTH_MM = 126.06
+ARM_L2_LENGTH_MM_A = 236.82
+ARM_L2_LENGTH_MM_B = 30.00
+ARM_L3_LENGTH_MM_A = 280.15
+ARM_L3_LENGTH_MM_B = 1.73
+ARM_L2_LENGTH_MM = math.hypot(ARM_L2_LENGTH_MM_A, ARM_L2_LENGTH_MM_B)
+ARM_L3_LENGTH_MM = math.hypot(ARM_L3_LENGTH_MM_A, ARM_L3_LENGTH_MM_B)
+T2_RAD = math.atan2(ARM_L2_LENGTH_MM_B, ARM_L2_LENGTH_MM_A)
+T3_RAD = math.atan2(ARM_L3_LENGTH_MM_B, ARM_L3_LENGTH_MM_A)
 BASE_MIN_RAD = -3.14
 BASE_MAX_RAD = 3.14
 SHOULDER_MIN_RAD = -1.57
@@ -96,6 +101,10 @@ class JointTarget:
     hand: float
 
 
+class KinematicsError(ValueError):
+    pass
+
+
 class TeleopState:
     def __init__(self) -> None:
         self.target = EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, HOME_T_RAD)
@@ -121,39 +130,86 @@ def same_target(a: EeTarget, b: EeTarget) -> bool:
     )
 
 
+def checked_acos(value: float, label: str) -> float:
+    if value < -1.000001 or value > 1.000001:
+        raise KinematicsError(f"unreachable target ({label}={value:.6f})")
+    return math.acos(clamp(value, -1.0, 1.0))
+
+
+def solve_planar_ik(radial_mm: float, z_mm: float) -> tuple[float, float]:
+    """Port of Waveshare simpleLinkageIkRad for EEMode 0."""
+    if radial_mm <= 1e-6:
+        raise KinematicsError("target lies on the base axis")
+
+    if abs(z_mm) < 1e-6:
+        psi = checked_acos(
+            (ARM_L2_LENGTH_MM**2 + radial_mm**2 - ARM_L3_LENGTH_MM**2) /
+            (2.0 * ARM_L2_LENGTH_MM * radial_mm),
+            "psi",
+        ) + T2_RAD
+        shoulder = math.pi / 2.0 - psi
+        omega = checked_acos(
+            (radial_mm**2 + ARM_L3_LENGTH_MM**2 - ARM_L2_LENGTH_MM**2) /
+            (2.0 * radial_mm * ARM_L3_LENGTH_MM),
+            "omega",
+        )
+    else:
+        reach_squared = radial_mm**2 + z_mm**2
+        reach = math.sqrt(reach_squared)
+        elevation = math.atan2(z_mm, radial_mm)
+        psi = checked_acos(
+            (ARM_L2_LENGTH_MM**2 + reach_squared - ARM_L3_LENGTH_MM**2) /
+            (2.0 * ARM_L2_LENGTH_MM * reach),
+            "psi",
+        ) + T2_RAD
+        shoulder = math.pi / 2.0 - elevation - psi
+        omega = checked_acos(
+            (ARM_L3_LENGTH_MM**2 + reach_squared - ARM_L2_LENGTH_MM**2) /
+            (2.0 * reach * ARM_L3_LENGTH_MM),
+            "omega",
+        )
+
+    elbow = psi + omega - T3_RAD
+    return shoulder, elbow
+
+
 def solve_ik(target: EeTarget) -> JointTarget:
+    """Cartesian -> polar -> Waveshare planar IK decomposition."""
+    radial = math.hypot(target.x, target.y)
     base = math.atan2(target.y, target.x)
-    radial = math.sqrt(target.x * target.x + target.y * target.y)
-    shoulder_plane_z = target.z - BASE_Z_OFFSET_MM
-    reach = math.sqrt(radial * radial + shoulder_plane_z * shoulder_plane_z)
-    min_reach = abs(LINK1_MM - LINK2_MM) + 1.0
-    max_reach = (LINK1_MM + LINK2_MM) - 1.0
-    safe_reach = clamp(reach, min_reach, max_reach)
+    shoulder, elbow = solve_planar_ik(radial, target.z)
 
-    safe_radial = radial
-    safe_z = shoulder_plane_z
-    if reach > 1e-3 and abs(safe_reach - reach) > 1e-3:
-        scale = safe_reach / reach
-        safe_radial *= scale
-        safe_z *= scale
-
-    cos_elbow = clamp(
-        (safe_radial * safe_radial + safe_z * safe_z - LINK1_MM * LINK1_MM - LINK2_MM * LINK2_MM) /
-        (2.0 * LINK1_MM * LINK2_MM),
-        -1.0,
-        1.0,
+    joint_values = (
+        ("base", base, BASE_MIN_RAD, BASE_MAX_RAD),
+        ("shoulder", shoulder, SHOULDER_MIN_RAD, SHOULDER_MAX_RAD),
+        ("elbow", elbow, ELBOW_MIN_RAD, ELBOW_MAX_RAD),
     )
-    elbow = math.acos(cos_elbow)
-    shoulder = math.atan2(safe_z, safe_radial) - math.atan2(
-        LINK2_MM * math.sin(elbow),
-        LINK1_MM + LINK2_MM * math.cos(elbow),
-    )
+    for name, value, minimum, maximum in joint_values:
+        if value < minimum or value > maximum:
+            raise KinematicsError(
+                f"{name}={value:.6f} outside [{minimum:.6f}, {maximum:.6f}]"
+            )
 
-    return JointTarget(
-        base=clamp(base, BASE_MIN_RAD, BASE_MAX_RAD),
-        shoulder=clamp(shoulder, SHOULDER_MIN_RAD, SHOULDER_MAX_RAD),
-        elbow=clamp(elbow, ELBOW_MIN_RAD, ELBOW_MAX_RAD),
-        hand=target.t,
+    return JointTarget(base=base, shoulder=shoulder, elbow=elbow, hand=target.t)
+
+
+def compute_fk(joints: JointTarget) -> EeTarget:
+    """Port of Waveshare RoArmM2_computePosbyJointRad for EEMode 0."""
+    link2_angle = math.pi / 2.0 - (joints.shoulder + T2_RAD)
+    link3_angle = math.pi / 2.0 - (joints.elbow + joints.shoulder)
+    radial = (
+        ARM_L2_LENGTH_MM * math.cos(link2_angle) +
+        ARM_L3_LENGTH_MM * math.cos(link3_angle)
+    )
+    z = (
+        ARM_L2_LENGTH_MM * math.sin(link2_angle) +
+        ARM_L3_LENGTH_MM * math.sin(link3_angle)
+    )
+    return EeTarget(
+        x=radial * math.cos(joints.base),
+        y=radial * math.sin(joints.base),
+        z=z,
+        t=joints.hand,
     )
 
 
@@ -226,6 +282,17 @@ def log_clamp(payload: dict, previous_target: EeTarget, new_target: EeTarget, mo
             "delta": payload.get("delta"),
             "previous_target": previous_target.__dict__,
             "new_target": new_target.__dict__,
+        }),
+    )
+
+
+def log_ik_rejection(payload: dict, target: EeTarget, error: KinematicsError) -> None:
+    print(
+        "[ik_rejected]",
+        json.dumps({
+            "seq": payload.get("seq"),
+            "target": target.__dict__,
+            "reason": str(error),
         }),
     )
 
@@ -365,7 +432,12 @@ def handle_teleop_message(payload: dict, state: TeleopState, ser: serial.Serial)
         state.target = EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, HOME_T_RAD)
         state.control_anchor_target = EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, HOME_T_RAD)
         reset_delta_filter(state)
-        ser.write((joint_command(state.target) + "\n").encode())
+        try:
+            command = joint_command(state.target)
+        except KinematicsError as error:
+            log_ik_rejection(payload, state.target, error)
+            return
+        ser.write((command + "\n").encode())
         state.commands_sent += 1
         if VERBOSE_STREAM_LOGS:
             print(f"[arm] recenter sent seq={payload.get('seq')} target={state.target.__dict__}")
@@ -410,7 +482,12 @@ def handle_teleop_message(payload: dict, state: TeleopState, ser: serial.Serial)
     if same_target(previous_target, new_target):
         return
 
-    command = joint_command(new_target)
+    try:
+        command = joint_command(new_target)
+    except KinematicsError as error:
+        state.clamp_events += 1
+        log_ik_rejection(payload, new_target, error)
+        return
     ser.write((command + "\n").encode())
     state.commands_sent += 1
     state.target = new_target
