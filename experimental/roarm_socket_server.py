@@ -39,11 +39,12 @@ LISTEN_HOST = "0.0.0.0"
 LISTEN_PORT = 9876
 VERBOSE_STREAM_LOGS = False
 
-HOME_X_MM = 10.0
-HOME_Y_MM = 10.0
-HOME_Z_MM = 10.0
+HOME_X_MM = 250.0
+HOME_Y_MM = 0.0
+HOME_Z_MM = 150.0
 HOME_T_RAD = 3.14
-MM_PER_METER = 2500.0
+MM_PER_METER = 1000.0
+MOTION_SCALE = 0.4
 
 BASE_Z_OFFSET_MM = 37.96
 LINK1_X_OFFSET_MM = 30.0
@@ -65,11 +66,12 @@ MIN_Y_MM = -490.0
 MAX_Y_MM = 490.0
 MIN_Z_MM = -490.0
 MAX_Z_MM = 490.0
+MIN_RADIAL_MM = 80.0
 
 INPUT_MOVE_EPS_M = 1e-4
 TARGET_EPS_MM = 0.5
 RECLUTCH_HOLDOFF_S = 0.30
-MOVING_AVERAGE_WINDOW = 20
+EMA_ALPHA = 0.35
 
 INIT_COMMAND = {"T": 100}
 FEEDBACK_COMMAND = {"T": 105}
@@ -110,11 +112,6 @@ class TeleopState:
         self.history_x = collections.deque(maxlen=40)
         self.history_y = collections.deque(maxlen=40)
         self.history_z = collections.deque(maxlen=40)
-        self.delta_x_window = collections.deque(maxlen=MOVING_AVERAGE_WINDOW)
-        self.delta_y_window = collections.deque(maxlen=MOVING_AVERAGE_WINDOW)
-        self.delta_z_window = collections.deque(maxlen=MOVING_AVERAGE_WINDOW)
-
-
 def same_target(a: EeTarget, b: EeTarget) -> bool:
     return (
         abs(a.x - b.x) < TARGET_EPS_MM and
@@ -242,20 +239,31 @@ def apply_mode(anchor: EeTarget, delta: dict, mode: str) -> tuple[EeTarget, bool
     clamped = False
 
     if mode in ("xyz", "xyz_rate", "x-only"):
-        requested_x = anchor.x + dx * MM_PER_METER
+        requested_x = anchor.x + dx * MM_PER_METER * MOTION_SCALE
         target_x = clamp(requested_x, MIN_X_MM, MAX_X_MM)
         clamped |= abs(target_x - requested_x) > 1e-6
         requested_target.x = target_x
     if mode in ("xyz", "xyz_rate", "y-only"):
-        requested_y = anchor.y + dy * MM_PER_METER
+        requested_y = anchor.y + dy * MM_PER_METER * MOTION_SCALE
         target_y = clamp(requested_y, MIN_Y_MM, MAX_Y_MM)
         clamped |= abs(target_y - requested_y) > 1e-6
         requested_target.y = target_y
     if mode in ("xyz", "xyz_rate", "z-only"):
-        requested_z = anchor.z + dz * MM_PER_METER
+        requested_z = anchor.z + dz * MM_PER_METER * MOTION_SCALE
         target_z = clamp(requested_z, MIN_Z_MM, MAX_Z_MM)
         clamped |= abs(target_z - requested_z) > 1e-6
         requested_target.z = target_z
+
+    radial = math.hypot(requested_target.x, requested_target.y)
+    if radial < MIN_RADIAL_MM:
+        if radial < 1e-6:
+            requested_target.x = MIN_RADIAL_MM
+            requested_target.y = 0.0
+        else:
+            scale = MIN_RADIAL_MM / radial
+            requested_target.x *= scale
+            requested_target.y *= scale
+        clamped = True
 
     return requested_target, clamped
 
@@ -325,23 +333,17 @@ def append_history(state: TeleopState) -> None:
 
 
 def reset_delta_filter(state: TeleopState) -> None:
-    state.delta_x_window.clear()
-    state.delta_y_window.clear()
-    state.delta_z_window.clear()
     state.filtered_delta = {"x": 0.0, "y": 0.0, "z": 0.0}
 
 
-def apply_moving_average_filter(state: TeleopState, delta: dict) -> dict:
+def apply_ema_filter(state: TeleopState, delta: dict) -> dict:
     dx = float(delta.get("x", 0.0))
     dy = float(delta.get("y", 0.0))
     dz = float(delta.get("z", 0.0))
-    state.delta_x_window.append(dx)
-    state.delta_y_window.append(dy)
-    state.delta_z_window.append(dz)
     filtered = {
-        "x": sum(state.delta_x_window) / len(state.delta_x_window),
-        "y": sum(state.delta_y_window) / len(state.delta_y_window),
-        "z": sum(state.delta_z_window) / len(state.delta_z_window),
+        "x": state.filtered_delta["x"] + EMA_ALPHA * (dx - state.filtered_delta["x"]),
+        "y": state.filtered_delta["y"] + EMA_ALPHA * (dy - state.filtered_delta["y"]),
+        "z": state.filtered_delta["z"] + EMA_ALPHA * (dz - state.filtered_delta["z"]),
     }
     state.filtered_delta = filtered
     return filtered
@@ -391,7 +393,7 @@ def handle_teleop_message(payload: dict, state: TeleopState, ser: serial.Serial)
         render_dashboard(state)
         return
 
-    filtered_delta = apply_moving_average_filter(state, delta)
+    filtered_delta = apply_ema_filter(state, delta)
 
     if time.monotonic() < state.control_resume_time:
         append_history(state)
