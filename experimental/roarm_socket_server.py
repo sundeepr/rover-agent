@@ -43,7 +43,7 @@ HOME_X_MM = 250.0
 HOME_Y_MM = 0.0
 HOME_Z_MM = 150.0
 HOME_T_RAD = 3.14
-MM_PER_METER = 2000.0
+MM_PER_METER = 1500.0
 MOTION_SCALE = 0.4
 
 # RoArm-M2 geometry and angular offsets from Waveshare's RoArm-M2_config.h.
