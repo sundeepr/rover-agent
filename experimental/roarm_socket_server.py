@@ -39,10 +39,15 @@ LISTEN_HOST = "0.0.0.0"
 LISTEN_PORT = 9876
 VERBOSE_STREAM_LOGS = False
 
+GRIPPER_OPEN_RAD = math.pi / 2.0
+GRIPPER_CLOSED_RAD = math.pi
+GRIPPER_SPD = 0
+GRIPPER_ACC = 10
+
 HOME_X_MM = 250.0
 HOME_Y_MM = 0.0
 HOME_Z_MM = 150.0
-HOME_T_RAD = 3.14
+HOME_T_RAD = GRIPPER_OPEN_RAD
 MM_PER_METER = 1500.0
 MOTION_SCALE = 0.4
 
@@ -110,6 +115,7 @@ class TeleopState:
         self.target = EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, HOME_T_RAD)
         self.control_anchor_target = EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, HOME_T_RAD)
         self.control_active = False
+        self.gripper_closed = None
         self.control_resume_time = 0.0
         self.mode = "xyz"
         self.last_delta = {"x": 0.0, "y": 0.0, "z": 0.0}
@@ -223,6 +229,15 @@ def joint_command(target: EeTarget) -> str:
         "hand": round(joints.hand, 6),
         "spd": JOINT_SPD,
         "acc": JOINT_ACC,
+    })
+
+
+def gripper_command(closed: bool) -> str:
+    return json.dumps({
+        "T": 106,
+        "cmd": GRIPPER_CLOSED_RAD if closed else GRIPPER_OPEN_RAD,
+        "spd": GRIPPER_SPD,
+        "acc": GRIPPER_ACC,
     })
 
 
@@ -370,6 +385,7 @@ def render_dashboard(state: TeleopState) -> None:
         "RoArm Teleop Dashboard",
         f"seq={state.last_seq}  mode={state.mode}  control_active={state.control_active}",
         f"messages={state.messages_received}  sent={state.commands_sent}  clamps={state.clamp_events}",
+        f"gripper={'unknown' if state.gripper_closed is None else ('closed' if state.gripper_closed else 'open')}",
         "",
         "Current target",
         f"  X {state.target.x:8.2f} |{axis_bar(state.target.x, MIN_X_MM, MAX_X_MM)}|",
@@ -416,6 +432,25 @@ def apply_ema_filter(state: TeleopState, delta: dict) -> dict:
     return filtered
 
 
+def handle_gripper_message(payload: dict, state: TeleopState, ser: serial.Serial) -> None:
+    closed = payload.get("closed")
+    if not isinstance(closed, bool):
+        print(f"[!] invalid gripper state: {closed!r}")
+        return
+    if state.gripper_closed is closed:
+        return
+
+    command = gripper_command(closed)
+    ser.write((command + "\n").encode())
+    angle = GRIPPER_CLOSED_RAD if closed else GRIPPER_OPEN_RAD
+    state.gripper_closed = closed
+    state.target.t = angle
+    state.control_anchor_target.t = angle
+    state.commands_sent += 1
+    print(f"[gripper] state={'closed' if closed else 'open'} command={command}")
+    render_dashboard(state)
+
+
 def handle_teleop_message(payload: dict, state: TeleopState, ser: serial.Serial) -> None:
     state.messages_received += 1
     delta = payload.get("delta", {})
@@ -429,8 +464,9 @@ def handle_teleop_message(payload: dict, state: TeleopState, ser: serial.Serial)
     }
 
     if payload.get("recenter"):
-        state.target = EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, HOME_T_RAD)
-        state.control_anchor_target = EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, HOME_T_RAD)
+        current_hand_angle = state.target.t
+        state.target = EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, current_hand_angle)
+        state.control_anchor_target = EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, current_hand_angle)
         reset_delta_filter(state)
         try:
             command = joint_command(state.target)
@@ -506,11 +542,13 @@ def relay_command(raw: str, addr, ser: serial.Serial, state: TeleopState) -> Non
         print(f"[!] invalid JSON from {addr}: {e}")
         return
 
-    if payload.get("type") != "teleop_delta":
-        print(f"[!] unsupported payload type from {addr}: {payload.get('type')!r}")
-        return
-
-    handle_teleop_message(payload, state, ser)
+    payload_type = payload.get("type")
+    if payload_type == "teleop_delta":
+        handle_teleop_message(payload, state, ser)
+    elif payload_type == "gripper_state":
+        handle_gripper_message(payload, state, ser)
+    else:
+        print(f"[!] unsupported payload type from {addr}: {payload_type!r}")
 
 
 async def handle_raw_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, ser: serial.Serial, state: TeleopState) -> None:
