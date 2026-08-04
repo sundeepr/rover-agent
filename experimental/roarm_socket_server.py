@@ -39,19 +39,22 @@ LISTEN_HOST = "0.0.0.0"
 LISTEN_PORT = 9876
 VERBOSE_STREAM_LOGS = False
 
-HOME_X_MM = 250.0
-HOME_Y_MM = 0.0
-HOME_Z_MM = 0.0
+HOME_X_MM = 10.0
+HOME_Y_MM = 10.0
+HOME_Z_MM = 10.0
 HOME_T_RAD = 3.14
-MM_PER_METER = 1250.0
+MM_PER_METER = 2500.0
 
-LINK1_MM = 320.0
-LINK2_MM = 212.0
+BASE_Z_OFFSET_MM = 37.96
+LINK1_X_OFFSET_MM = 30.0
+LINK1_Z_OFFSET_MM = 236.82
+LINK1_MM = math.hypot(LINK1_X_OFFSET_MM, LINK1_Z_OFFSET_MM)
+LINK2_MM = 215.99
 BASE_MIN_RAD = -3.14
 BASE_MAX_RAD = 3.14
 SHOULDER_MIN_RAD = -1.57
 SHOULDER_MAX_RAD = 1.57
-ELBOW_MIN_RAD = 0.0
+ELBOW_MIN_RAD = -0.78539815
 ELBOW_MAX_RAD = 3.14
 JOINT_SPD = 0
 JOINT_ACC = 10
@@ -124,13 +127,14 @@ def same_target(a: EeTarget, b: EeTarget) -> bool:
 def solve_ik(target: EeTarget) -> JointTarget:
     base = math.atan2(target.y, target.x)
     radial = math.sqrt(target.x * target.x + target.y * target.y)
-    reach = math.sqrt(radial * radial + target.z * target.z)
+    shoulder_plane_z = target.z - BASE_Z_OFFSET_MM
+    reach = math.sqrt(radial * radial + shoulder_plane_z * shoulder_plane_z)
     min_reach = abs(LINK1_MM - LINK2_MM) + 1.0
     max_reach = (LINK1_MM + LINK2_MM) - 1.0
     safe_reach = clamp(reach, min_reach, max_reach)
 
     safe_radial = radial
-    safe_z = target.z
+    safe_z = shoulder_plane_z
     if reach > 1e-3 and abs(safe_reach - reach) > 1e-3:
         scale = safe_reach / reach
         safe_radial *= scale
