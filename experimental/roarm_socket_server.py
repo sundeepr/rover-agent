@@ -111,7 +111,8 @@ class KinematicsError(ValueError):
 
 
 class TeleopState:
-    def __init__(self) -> None:
+    def __init__(self, arm_name: str) -> None:
+        self.arm_name = arm_name
         self.target = EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, HOME_T_RAD)
         self.control_anchor_target = EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, HOME_T_RAD)
         self.control_active = False
@@ -382,7 +383,7 @@ def sparkline(values: collections.deque[float], minimum: float, maximum: float) 
 def render_dashboard(state: TeleopState) -> None:
     lines = [
         "\x1b[2J\x1b[H",
-        "RoArm Teleop Dashboard",
+        f"RoArm Teleop Dashboard [{state.arm_name}]",
         f"seq={state.last_seq}  mode={state.mode}  control_active={state.control_active}",
         f"messages={state.messages_received}  sent={state.commands_sent}  clamps={state.clamp_events}",
         f"gripper={'unknown' if state.gripper_closed is None else ('closed' if state.gripper_closed else 'open')}",
@@ -533,13 +534,24 @@ def handle_teleop_message(payload: dict, state: TeleopState, ser: serial.Serial)
     render_dashboard(state)
 
 
-def relay_command(raw: str, addr, ser: serial.Serial, state: TeleopState) -> None:
+def relay_command(
+        raw: str,
+        addr,
+        serial_ports: dict[str, serial.Serial],
+        states: dict[str, TeleopState]) -> None:
     if VERBOSE_STREAM_LOGS:
         print(f"[>] data received from {addr}: {raw!r}")
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as e:
         print(f"[!] invalid JSON from {addr}: {e}")
+        return
+
+    arm_name = str(payload.get("arm", "right")).lower()
+    ser = serial_ports.get(arm_name)
+    state = states.get(arm_name)
+    if ser is None or state is None:
+        print(f"[!] arm {arm_name!r} is not configured")
         return
 
     payload_type = payload.get("type")
@@ -551,7 +563,11 @@ def relay_command(raw: str, addr, ser: serial.Serial, state: TeleopState) -> Non
         print(f"[!] unsupported payload type from {addr}: {payload_type!r}")
 
 
-async def handle_raw_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, ser: serial.Serial, state: TeleopState) -> None:
+async def handle_raw_client(
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        serial_ports: dict[str, serial.Serial],
+        states: dict[str, TeleopState]) -> None:
     addr = writer.get_extra_info("peername")
     print(f"[+] new connection from {addr}")
     try:
@@ -559,7 +575,7 @@ async def handle_raw_client(reader: asyncio.StreamReader, writer: asyncio.Stream
             line = await reader.readline()
             if not line:
                 break
-            relay_command(line.decode().strip(), addr, ser, state)
+            relay_command(line.decode().strip(), addr, serial_ports, states)
     except (ConnectionResetError, asyncio.IncompleteReadError):
         pass
     finally:
@@ -567,39 +583,88 @@ async def handle_raw_client(reader: asyncio.StreamReader, writer: asyncio.Stream
         print(f"[-] disconnected {addr}")
 
 
-async def run_raw(host: str, port: int, ser: serial.Serial, state: TeleopState) -> None:
+async def run_raw(
+        host: str,
+        port: int,
+        serial_ports: dict[str, serial.Serial],
+        states: dict[str, TeleopState]) -> None:
     print(f"Raw TCP server listening on {host}:{port}")
     server = await asyncio.start_server(
-        lambda r, w: handle_raw_client(r, w, ser, state), host, port
+        lambda r, w: handle_raw_client(r, w, serial_ports, states), host, port
     )
     async with server:
         await server.serve_forever()
 
 
-async def handle_ws_client(ws, ser: serial.Serial, state: TeleopState) -> None:
+async def handle_ws_client(
+        ws,
+        serial_ports: dict[str, serial.Serial],
+        states: dict[str, TeleopState]) -> None:
     addr = ws.remote_address
     print(f"[+] new connection from {addr}")
     try:
         async for message in ws:
-            relay_command(message, addr, ser, state)
+            relay_command(message, addr, serial_ports, states)
     except websockets.ConnectionClosed:
         pass
     finally:
         print(f"[-] disconnected {addr}")
 
 
-async def run_ws(host: str, port: int, ser: serial.Serial, state: TeleopState, ssl_ctx=None) -> None:
+async def run_ws(
+        host: str,
+        port: int,
+        serial_ports: dict[str, serial.Serial],
+        states: dict[str, TeleopState],
+        ssl_ctx=None) -> None:
     scheme = "wss" if ssl_ctx else "ws"
     print(f"WebSocket server listening on {scheme}://{host}:{port}")
-    async with websockets.serve(lambda ws: handle_ws_client(ws, ser, state), host, port, ssl=ssl_ctx):
+    async with websockets.serve(
+            lambda ws: handle_ws_client(ws, serial_ports, states),
+            host,
+            port,
+            ssl=ssl_ctx):
         await asyncio.Future()
+
+
+def initialize_arm(name: str, ser: serial.Serial) -> TeleopState:
+    state = TeleopState(name)
+    send_json(ser, INIT_COMMAND)
+    feedback = request_feedback(ser)
+    feedback_target = extract_target_from_feedback(feedback)
+    if feedback_target is not None:
+        state.target = feedback_target
+        state.control_anchor_target = EeTarget(
+            feedback_target.x,
+            feedback_target.y,
+            feedback_target.z,
+            feedback_target.t,
+        )
+        print(f"[init] {name} arm feedback target={state.target.__dict__}")
+    else:
+        print(f"[init] {name} arm feedback unavailable; using home target={state.target.__dict__}")
+    append_history(state)
+    render_dashboard(state)
+    return state
 
 
 def main():
     parser = argparse.ArgumentParser(description="RoArm teleop socket server")
     parser.add_argument("--socket-type", choices=["raw", "ws", "wss"], default="ws")
     parser.add_argument("--port", type=int, default=LISTEN_PORT)
-    parser.add_argument("--serial", type=str, default=SERIAL_PORT)
+    parser.add_argument(
+        "--serial",
+        dest="right_serial",
+        type=str,
+        default=SERIAL_PORT,
+        help="right-arm serial device",
+    )
+    parser.add_argument(
+        "--left-serial",
+        type=str,
+        default=None,
+        help="left-arm serial device; omit for right-arm-only operation",
+    )
     parser.add_argument("--baud", type=int, default=BAUD_RATE)
     parser.add_argument("--cert", type=str, default=None)
     parser.add_argument("--key", type=str, default=None)
@@ -615,40 +680,35 @@ def main():
             parser.error("--cert / --key are only used with --socket-type wss")
         ssl_ctx = None
 
-    print(f"Opening serial {args.serial} @ {args.baud}")
-    ser = serial.Serial(args.serial, args.baud, timeout=0.05)
+    serial_paths = {"right": args.right_serial}
+    if args.left_serial:
+        serial_paths["left"] = args.left_serial
+
+    serial_ports = {}
+    for name, path in serial_paths.items():
+        print(f"Opening {name} arm serial {path} @ {args.baud}")
+        serial_ports[name] = serial.Serial(path, args.baud, timeout=0.05)
     time.sleep(2)
-    state = TeleopState()
-    send_json(ser, INIT_COMMAND)
-    feedback = request_feedback(ser)
-    feedback_target = extract_target_from_feedback(feedback)
-    if feedback_target is not None:
-        state.target = feedback_target
-        state.control_anchor_target = EeTarget(
-            feedback_target.x,
-            feedback_target.y,
-            feedback_target.z,
-            feedback_target.t,
-        )
-        print(f"[init] arm feedback target={state.target.__dict__}")
-    else:
-        print(f"[init] arm feedback unavailable; using home target={state.target.__dict__}")
-    append_history(state)
-    render_dashboard(state)
+    states = {
+        name: initialize_arm(name, ser)
+        for name, ser in serial_ports.items()
+    }
 
     try:
         if args.socket_type == "raw":
-            asyncio.run(run_raw(LISTEN_HOST, args.port, ser, state))
+            asyncio.run(run_raw(LISTEN_HOST, args.port, serial_ports, states))
         else:
-            asyncio.run(run_ws(LISTEN_HOST, args.port, ser, state, ssl_ctx))
+            asyncio.run(run_ws(LISTEN_HOST, args.port, serial_ports, states, ssl_ctx))
     except KeyboardInterrupt:
         print("\nShutting down.")
-        print(
-            f"Summary: received={state.messages_received} sent={state.commands_sent} "
-            f"clamps={state.clamp_events}"
-        )
+        for name, state in states.items():
+            print(
+                f"Summary [{name}]: received={state.messages_received} "
+                f"sent={state.commands_sent} clamps={state.clamp_events}"
+            )
     finally:
-        ser.close()
+        for ser in serial_ports.values():
+            ser.close()
 
 
 if __name__ == "__main__":
