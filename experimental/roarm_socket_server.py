@@ -97,6 +97,7 @@ FEEDBACK_COMMAND = {"T": 105}
 FEEDBACK_TIMEOUT_S = 0.5
 ROVER_MAX_VEL_MM_S = 80
 ROVER_WATCHDOG_S = 0.3
+ROVER_GRIP_AUX_PCT = 50
 def clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(value, hi))
 
@@ -126,6 +127,9 @@ class RoverDriveState:
         self.last_command_time = 0.0
         self.active = False
         self.commands_received = 0
+        self.fwd = 0
+        self.turn = 0
+        self.aux_pct = 0
 
 
 class TeleopState:
@@ -153,12 +157,17 @@ def stop_rover(
         rover_state: RoverDriveState,
         source: str) -> None:
     try:
-        if rover_state.active and rover_ctrl is not None:
+        if source != "release" and rover_state.aux_pct != 0 and rover_ctrl is not None:
+            rover_ctrl.set_aux(0)
+            rover_state.aux_pct = 0
+        if (rover_state.active or source != "release") and rover_ctrl is not None:
             rover_ctrl.stop()
     except Exception as error:
         print(f"[!] rover stop failed source={source}: {error}")
     finally:
         rover_state.active = False
+        rover_state.fwd = 0
+        rover_state.turn = 0
     print(f"[rover] stop source={source}")
 def same_target(a: EeTarget, b: EeTarget) -> bool:
     return (
@@ -465,7 +474,12 @@ def apply_ema_filter(state: TeleopState, delta: dict) -> dict:
     return filtered
 
 
-def handle_gripper_message(payload: dict, state: TeleopState, ser: serial.Serial) -> None:
+def handle_gripper_message(
+        payload: dict,
+        state: TeleopState,
+        ser: serial.Serial,
+        rover_ctrl: AtlasController | None,
+        rover_state: RoverDriveState) -> None:
     closed = payload.get("closed")
     if not isinstance(closed, bool):
         print(f"[!] invalid gripper state: {closed!r}")
@@ -481,6 +495,22 @@ def handle_gripper_message(payload: dict, state: TeleopState, ser: serial.Serial
     state.control_anchor_target.t = angle
     state.commands_sent += 1
     print(f"[gripper] state={'closed' if closed else 'open'} command={command}")
+
+    if state.arm_name == "right" and rover_ctrl is not None:
+        aux_pct = ROVER_GRIP_AUX_PCT if closed else 0
+        if aux_pct != rover_state.aux_pct:
+            try:
+                rover_ctrl.set_aux(aux_pct)
+                rover_state.aux_pct = aux_pct
+                velocity, radius = _joy_to_drive(
+                    rover_state.fwd,
+                    rover_state.turn,
+                    ROVER_MAX_VEL_MM_S,
+                )
+                rover_ctrl.drive_raw(velocity, radius)
+                print(f"[rover] aux={aux_pct}% source=right_grip")
+            except Exception as error:
+                print(f"[!] rover AUX command failed: {error}")
     render_dashboard(state)
 
 
@@ -497,6 +527,8 @@ def handle_rover_drive_message(
 
     rover_state.commands_received += 1
     rover_state.last_command_time = time.monotonic()
+    rover_state.fwd = fwd
+    rover_state.turn = turn
 
     try:
         if fwd == 0 and turn == 0:
@@ -628,7 +660,7 @@ def relay_command(
     if payload_type == "teleop_delta":
         handle_teleop_message(payload, state, ser)
     elif payload_type == "gripper_state":
-        handle_gripper_message(payload, state, ser)
+        handle_gripper_message(payload, state, ser, rover_ctrl, rover_state)
     else:
         print(f"[!] unsupported payload type from {addr}: {payload_type!r}")
 
@@ -658,7 +690,7 @@ async def handle_raw_client(
     except (ConnectionResetError, asyncio.IncompleteReadError):
         pass
     finally:
-        if rover_state.active:
+        if rover_state.active or rover_state.aux_pct != 0:
             stop_rover(rover_ctrl, rover_state, "disconnect")
         writer.close()
         print(f"[-] disconnected {addr}")
@@ -701,7 +733,7 @@ async def handle_ws_client(
     except websockets.ConnectionClosed:
         pass
     finally:
-        if rover_state.active:
+        if rover_state.active or rover_state.aux_pct != 0:
             stop_rover(rover_ctrl, rover_state, "disconnect")
         print(f"[-] disconnected {addr}")
 
