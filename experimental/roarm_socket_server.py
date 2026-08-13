@@ -26,11 +26,20 @@ import collections
 import json
 import math
 import ssl
+import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import serial
 import websockets
+
+ROVER_AGENT_ROOT = Path(__file__).resolve().parents[1]
+if str(ROVER_AGENT_ROOT) not in sys.path:
+    sys.path.insert(0, str(ROVER_AGENT_ROOT))
+
+from atlas_controller import AtlasController
+from control_server import _joy_to_drive
 
 
 SERIAL_PORT = "/dev/ttyUSB0"
@@ -86,6 +95,8 @@ EMA_ALPHA = 1.0
 INIT_COMMAND = {"T": 100}
 FEEDBACK_COMMAND = {"T": 105}
 FEEDBACK_TIMEOUT_S = 0.5
+ROVER_MAX_VEL_MM_S = 80
+ROVER_WATCHDOG_S = 0.3
 def clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(value, hi))
 
@@ -110,6 +121,13 @@ class KinematicsError(ValueError):
     pass
 
 
+class RoverDriveState:
+    def __init__(self) -> None:
+        self.last_command_time = 0.0
+        self.active = False
+        self.commands_received = 0
+
+
 class TeleopState:
     def __init__(self, arm_name: str) -> None:
         self.arm_name = arm_name
@@ -128,6 +146,20 @@ class TeleopState:
         self.history_x = collections.deque(maxlen=40)
         self.history_y = collections.deque(maxlen=40)
         self.history_z = collections.deque(maxlen=40)
+
+
+def stop_rover(
+        rover_ctrl: AtlasController | None,
+        rover_state: RoverDriveState,
+        source: str) -> None:
+    try:
+        if rover_state.active and rover_ctrl is not None:
+            rover_ctrl.stop()
+    except Exception as error:
+        print(f"[!] rover stop failed source={source}: {error}")
+    finally:
+        rover_state.active = False
+    print(f"[rover] stop source={source}")
 def same_target(a: EeTarget, b: EeTarget) -> bool:
     return (
         abs(a.x - b.x) < TARGET_EPS_MM and
@@ -452,6 +484,38 @@ def handle_gripper_message(payload: dict, state: TeleopState, ser: serial.Serial
     render_dashboard(state)
 
 
+def handle_rover_drive_message(
+        payload: dict,
+        rover_ctrl: AtlasController | None,
+        rover_state: RoverDriveState) -> None:
+    try:
+        fwd = int(clamp(int(payload.get("fwd", 0)), -100, 100))
+        turn = int(clamp(int(payload.get("turn", 0)), -100, 100))
+    except (TypeError, ValueError):
+        print(f"[!] invalid rover drive payload: {payload!r}")
+        return
+
+    rover_state.commands_received += 1
+    rover_state.last_command_time = time.monotonic()
+
+    try:
+        if fwd == 0 and turn == 0:
+            stop_rover(rover_ctrl, rover_state, "release")
+            return
+
+        velocity, radius = _joy_to_drive(fwd, turn, ROVER_MAX_VEL_MM_S)
+        if rover_ctrl is not None:
+            rover_ctrl.drive_raw(velocity, radius)
+        rover_state.active = True
+        if VERBOSE_STREAM_LOGS:
+            print(
+                f"[rover] fwd={fwd} turn={turn} velocity={velocity} radius={radius}"
+            )
+    except Exception as error:
+        rover_state.active = False
+        print(f"[!] rover command failed: {error}")
+
+
 def handle_teleop_message(payload: dict, state: TeleopState, ser: serial.Serial) -> None:
     state.messages_received += 1
     delta = payload.get("delta", {})
@@ -538,13 +602,20 @@ def relay_command(
         raw: str,
         addr,
         serial_ports: dict[str, serial.Serial],
-        states: dict[str, TeleopState]) -> None:
+        states: dict[str, TeleopState],
+        rover_ctrl: AtlasController | None,
+        rover_state: RoverDriveState) -> None:
     if VERBOSE_STREAM_LOGS:
         print(f"[>] data received from {addr}: {raw!r}")
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as e:
         print(f"[!] invalid JSON from {addr}: {e}")
+        return
+
+    payload_type = payload.get("type")
+    if payload_type == "rover_drive":
+        handle_rover_drive_message(payload, rover_ctrl, rover_state)
         return
 
     arm_name = str(payload.get("arm", "right")).lower()
@@ -554,7 +625,6 @@ def relay_command(
         print(f"[!] arm {arm_name!r} is not configured")
         return
 
-    payload_type = payload.get("type")
     if payload_type == "teleop_delta":
         handle_teleop_message(payload, state, ser)
     elif payload_type == "gripper_state":
@@ -567,7 +637,9 @@ async def handle_raw_client(
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
         serial_ports: dict[str, serial.Serial],
-        states: dict[str, TeleopState]) -> None:
+        states: dict[str, TeleopState],
+        rover_ctrl: AtlasController | None,
+        rover_state: RoverDriveState) -> None:
     addr = writer.get_extra_info("peername")
     print(f"[+] new connection from {addr}")
     try:
@@ -575,10 +647,19 @@ async def handle_raw_client(
             line = await reader.readline()
             if not line:
                 break
-            relay_command(line.decode().strip(), addr, serial_ports, states)
+            relay_command(
+                line.decode().strip(),
+                addr,
+                serial_ports,
+                states,
+                rover_ctrl,
+                rover_state,
+            )
     except (ConnectionResetError, asyncio.IncompleteReadError):
         pass
     finally:
+        if rover_state.active:
+            stop_rover(rover_ctrl, rover_state, "disconnect")
         writer.close()
         print(f"[-] disconnected {addr}")
 
@@ -587,27 +668,41 @@ async def run_raw(
         host: str,
         port: int,
         serial_ports: dict[str, serial.Serial],
-        states: dict[str, TeleopState]) -> None:
+        states: dict[str, TeleopState],
+        rover_ctrl: AtlasController | None,
+        rover_state: RoverDriveState) -> None:
     print(f"Raw TCP server listening on {host}:{port}")
     server = await asyncio.start_server(
-        lambda r, w: handle_raw_client(r, w, serial_ports, states), host, port
+        lambda r, w: handle_raw_client(
+            r, w, serial_ports, states, rover_ctrl, rover_state
+        ), host, port
     )
-    async with server:
-        await server.serve_forever()
+    watchdog_task = asyncio.create_task(rover_watchdog(rover_ctrl, rover_state))
+    try:
+        async with server:
+            await server.serve_forever()
+    finally:
+        watchdog_task.cancel()
 
 
 async def handle_ws_client(
         ws,
         serial_ports: dict[str, serial.Serial],
-        states: dict[str, TeleopState]) -> None:
+        states: dict[str, TeleopState],
+        rover_ctrl: AtlasController | None,
+        rover_state: RoverDriveState) -> None:
     addr = ws.remote_address
     print(f"[+] new connection from {addr}")
     try:
         async for message in ws:
-            relay_command(message, addr, serial_ports, states)
+            relay_command(
+                message, addr, serial_ports, states, rover_ctrl, rover_state
+            )
     except websockets.ConnectionClosed:
         pass
     finally:
+        if rover_state.active:
+            stop_rover(rover_ctrl, rover_state, "disconnect")
         print(f"[-] disconnected {addr}")
 
 
@@ -616,15 +711,35 @@ async def run_ws(
         port: int,
         serial_ports: dict[str, serial.Serial],
         states: dict[str, TeleopState],
+        rover_ctrl: AtlasController | None,
+        rover_state: RoverDriveState,
         ssl_ctx=None) -> None:
     scheme = "wss" if ssl_ctx else "ws"
     print(f"WebSocket server listening on {scheme}://{host}:{port}")
-    async with websockets.serve(
-            lambda ws: handle_ws_client(ws, serial_ports, states),
-            host,
-            port,
-            ssl=ssl_ctx):
-        await asyncio.Future()
+    watchdog_task = asyncio.create_task(rover_watchdog(rover_ctrl, rover_state))
+    try:
+        async with websockets.serve(
+                lambda ws: handle_ws_client(
+                    ws, serial_ports, states, rover_ctrl, rover_state
+                ),
+                host,
+                port,
+                ssl=ssl_ctx):
+            await asyncio.Future()
+    finally:
+        watchdog_task.cancel()
+
+
+async def rover_watchdog(
+        rover_ctrl: AtlasController | None,
+        rover_state: RoverDriveState) -> None:
+    while True:
+        await asyncio.sleep(0.05)
+        if (
+            rover_state.active and
+            time.monotonic() - rover_state.last_command_time > ROVER_WATCHDOG_S
+        ):
+            stop_rover(rover_ctrl, rover_state, "watchdog")
 
 
 def initialize_arm(name: str, ser: serial.Serial) -> TeleopState:
@@ -666,6 +781,13 @@ def main():
         help="left-arm serial device; omit for right-arm-only operation",
     )
     parser.add_argument("--baud", type=int, default=BAUD_RATE)
+    parser.add_argument(
+        "--rover-serial",
+        type=str,
+        default=None,
+        help="Atlas rover serial device; omit to disable rover driving",
+    )
+    parser.add_argument("--rover-baud", type=int, default=115200)
     parser.add_argument("--cert", type=str, default=None)
     parser.add_argument("--key", type=str, default=None)
     args = parser.parse_args()
@@ -693,12 +815,36 @@ def main():
         name: initialize_arm(name, ser)
         for name, ser in serial_ports.items()
     }
+    rover_context = None
+    rover_ctrl = None
+    rover_state = RoverDriveState()
+    if args.rover_serial:
+        rover_context = AtlasController(
+            port=args.rover_serial,
+            baud=args.rover_baud,
+        ).connect()
+        rover_ctrl = rover_context.__enter__()
 
     try:
         if args.socket_type == "raw":
-            asyncio.run(run_raw(LISTEN_HOST, args.port, serial_ports, states))
+            asyncio.run(run_raw(
+                LISTEN_HOST,
+                args.port,
+                serial_ports,
+                states,
+                rover_ctrl,
+                rover_state,
+            ))
         else:
-            asyncio.run(run_ws(LISTEN_HOST, args.port, serial_ports, states, ssl_ctx))
+            asyncio.run(run_ws(
+                LISTEN_HOST,
+                args.port,
+                serial_ports,
+                states,
+                rover_ctrl,
+                rover_state,
+                ssl_ctx,
+            ))
     except KeyboardInterrupt:
         print("\nShutting down.")
         for name, state in states.items():
@@ -707,6 +853,8 @@ def main():
                 f"sent={state.commands_sent} clamps={state.clamp_events}"
             )
     finally:
+        if rover_context is not None:
+            rover_context.__exit__(None, None, None)
         for ser in serial_ports.values():
             ser.close()
 
