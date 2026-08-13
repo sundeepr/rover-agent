@@ -130,6 +130,8 @@ class RoverDriveState:
         self.fwd = 0
         self.turn = 0
         self.aux_pct = 0
+        self.spray_active = False
+        self.last_spray_time = 0.0
 
 
 class TeleopState:
@@ -168,7 +170,32 @@ def stop_rover(
         rover_state.active = False
         rover_state.fwd = 0
         rover_state.turn = 0
+        if source != "release":
+            rover_state.spray_active = False
     print(f"[rover] stop source={source}")
+
+
+def stop_spray(
+        rover_ctrl: AtlasController | None,
+        rover_state: RoverDriveState,
+        source: str) -> None:
+    try:
+        if rover_ctrl is not None:
+            rover_ctrl.set_aux(0)
+            velocity, radius = _joy_to_drive(
+                rover_state.fwd,
+                rover_state.turn,
+                ROVER_MAX_VEL_MM_S,
+            )
+            rover_ctrl.drive_raw(velocity, radius)
+    except Exception as error:
+        print(f"[!] rover spray stop failed source={source}: {error}")
+    finally:
+        rover_state.aux_pct = 0
+        rover_state.spray_active = False
+    print(f"[rover] spray=off source={source}")
+
+
 def same_target(a: EeTarget, b: EeTarget) -> bool:
     return (
         abs(a.x - b.x) < TARGET_EPS_MM and
@@ -474,44 +501,33 @@ def apply_ema_filter(state: TeleopState, delta: dict) -> dict:
     return filtered
 
 
-def handle_gripper_message(
+def handle_spray_message(
         payload: dict,
-        state: TeleopState,
-        ser: serial.Serial,
         rover_ctrl: AtlasController | None,
         rover_state: RoverDriveState) -> None:
-    closed = payload.get("closed")
-    if not isinstance(closed, bool):
-        print(f"[!] invalid gripper state: {closed!r}")
-        return
-    if state.gripper_closed is closed:
+    active = payload.get("active")
+    if not isinstance(active, bool):
+        print(f"[!] invalid spray state: {active!r}")
         return
 
-    command = gripper_command(closed)
-    ser.write((command + "\n").encode())
-    angle = GRIPPER_CLOSED_RAD if closed else GRIPPER_OPEN_RAD
-    state.gripper_closed = closed
-    state.target.t = angle
-    state.control_anchor_target.t = angle
-    state.commands_sent += 1
-    print(f"[gripper] state={'closed' if closed else 'open'} command={command}")
-
-    if state.arm_name == "right" and rover_ctrl is not None:
-        aux_pct = ROVER_GRIP_AUX_PCT if closed else 0
-        if aux_pct != rover_state.aux_pct:
-            try:
-                rover_ctrl.set_aux(aux_pct)
-                rover_state.aux_pct = aux_pct
-                velocity, radius = _joy_to_drive(
-                    rover_state.fwd,
-                    rover_state.turn,
-                    ROVER_MAX_VEL_MM_S,
-                )
-                rover_ctrl.drive_raw(velocity, radius)
-                print(f"[rover] aux={aux_pct}% source=right_grip")
-            except Exception as error:
-                print(f"[!] rover AUX command failed: {error}")
-    render_dashboard(state)
+    rover_state.last_spray_time = time.monotonic()
+    aux_pct = ROVER_GRIP_AUX_PCT if active else 0
+    try:
+        if rover_ctrl is not None:
+            rover_ctrl.set_aux(aux_pct)
+            velocity, radius = _joy_to_drive(
+                rover_state.fwd,
+                rover_state.turn,
+                ROVER_MAX_VEL_MM_S,
+            )
+            rover_ctrl.drive_raw(velocity, radius)
+        if active != rover_state.spray_active:
+            print(f"[rover] spray={'on' if active else 'off'} aux={aux_pct}%")
+        rover_state.aux_pct = aux_pct
+        rover_state.spray_active = active
+    except Exception as error:
+        rover_state.spray_active = False
+        print(f"[!] rover spray command failed: {error}")
 
 
 def handle_rover_drive_message(
@@ -649,6 +665,9 @@ def relay_command(
     if payload_type == "rover_drive":
         handle_rover_drive_message(payload, rover_ctrl, rover_state)
         return
+    if payload_type == "spray_state":
+        handle_spray_message(payload, rover_ctrl, rover_state)
+        return
 
     arm_name = str(payload.get("arm", "right")).lower()
     ser = serial_ports.get(arm_name)
@@ -659,8 +678,6 @@ def relay_command(
 
     if payload_type == "teleop_delta":
         handle_teleop_message(payload, state, ser)
-    elif payload_type == "gripper_state":
-        handle_gripper_message(payload, state, ser, rover_ctrl, rover_state)
     else:
         print(f"[!] unsupported payload type from {addr}: {payload_type!r}")
 
@@ -690,7 +707,7 @@ async def handle_raw_client(
     except (ConnectionResetError, asyncio.IncompleteReadError):
         pass
     finally:
-        if rover_state.active or rover_state.aux_pct != 0:
+        if rover_state.active or rover_state.spray_active or rover_state.aux_pct != 0:
             stop_rover(rover_ctrl, rover_state, "disconnect")
         writer.close()
         print(f"[-] disconnected {addr}")
@@ -733,7 +750,7 @@ async def handle_ws_client(
     except websockets.ConnectionClosed:
         pass
     finally:
-        if rover_state.active or rover_state.aux_pct != 0:
+        if rover_state.active or rover_state.spray_active or rover_state.aux_pct != 0:
             stop_rover(rover_ctrl, rover_state, "disconnect")
         print(f"[-] disconnected {addr}")
 
@@ -772,6 +789,11 @@ async def rover_watchdog(
             time.monotonic() - rover_state.last_command_time > ROVER_WATCHDOG_S
         ):
             stop_rover(rover_ctrl, rover_state, "watchdog")
+        elif (
+            rover_state.spray_active and
+            time.monotonic() - rover_state.last_spray_time > ROVER_WATCHDOG_S
+        ):
+            stop_spray(rover_ctrl, rover_state, "watchdog")
 
 
 def initialize_arm(name: str, ser: serial.Serial) -> TeleopState:
@@ -790,6 +812,13 @@ def initialize_arm(name: str, ser: serial.Serial) -> TeleopState:
         print(f"[init] {name} arm feedback target={state.target.__dict__}")
     else:
         print(f"[init] {name} arm feedback unavailable; using configured target={state.target.__dict__}")
+    command = gripper_command(True)
+    ser.write((command + "\n").encode())
+    state.gripper_closed = True
+    state.target.t = GRIPPER_CLOSED_RAD
+    state.control_anchor_target.t = GRIPPER_CLOSED_RAD
+    state.commands_sent += 1
+    print(f"[init] {name} arm EOAT closed command={command}")
     append_history(state)
     render_dashboard(state)
     return state
