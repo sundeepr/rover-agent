@@ -55,7 +55,7 @@ GRIPPER_ACC = 10
 
 HOME_X_MM = 250.0
 HOME_Y_MM = 0.0
-HOME_Z_MM = 150.0
+HOME_Z_MM = 0.0
 HOME_T_RAD = GRIPPER_OPEN_RAD
 MM_PER_METER = 1500.0
 MOTION_SCALE = 0.4
@@ -780,16 +780,16 @@ def initialize_arm(name: str, ser: serial.Serial) -> TeleopState:
     feedback = request_feedback(ser)
     feedback_target = extract_target_from_feedback(feedback)
     if feedback_target is not None:
-        state.target = feedback_target
-        state.control_anchor_target = EeTarget(
-            feedback_target.x,
-            feedback_target.y,
-            feedback_target.z,
-            feedback_target.t,
-        )
-        print(f"[init] {name} arm feedback target={state.target.__dict__}")
+        print(f"[init] {name} arm startup feedback={feedback_target.__dict__}")
     else:
-        print(f"[init] {name} arm feedback unavailable; using home target={state.target.__dict__}")
+        print(f"[init] {name} arm startup feedback unavailable")
+
+    home_command = joint_command(state.target)
+    ser.write((home_command + "\n").encode())
+    print(
+        f"[init] {name} arm moving to configured home={state.target.__dict__} "
+        f"command={home_command}"
+    )
     append_history(state)
     render_dashboard(state)
     return state
