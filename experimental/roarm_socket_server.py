@@ -780,16 +780,16 @@ def initialize_arm(name: str, ser: serial.Serial) -> TeleopState:
     feedback = request_feedback(ser)
     feedback_target = extract_target_from_feedback(feedback)
     if feedback_target is not None:
-        print(f"[init] {name} arm startup feedback={feedback_target.__dict__}")
+        state.target = feedback_target
+        state.control_anchor_target = EeTarget(
+            feedback_target.x,
+            feedback_target.y,
+            feedback_target.z,
+            feedback_target.t,
+        )
+        print(f"[init] {name} arm feedback target={state.target.__dict__}")
     else:
-        print(f"[init] {name} arm startup feedback unavailable")
-
-    home_command = joint_command(state.target)
-    ser.write((home_command + "\n").encode())
-    print(
-        f"[init] {name} arm moving to configured home={state.target.__dict__} "
-        f"command={home_command}"
-    )
+        print(f"[init] {name} arm feedback unavailable; using configured target={state.target.__dict__}")
     append_history(state)
     render_dashboard(state)
     return state
