@@ -259,7 +259,7 @@ def _headless_loop(state, strategy, interval: float, rover_ctrl=None) -> None:
 
     while True:
         now               = time.time()
-        effective_interval = getattr(strategy, "cycle_interval", interval)
+        effective_interval = getattr(strategy, "cycle_interval", None) or interval
         goal_ok = (state.goal_ready.is_set()
                    or not getattr(strategy, "requires_goal", True))
 
