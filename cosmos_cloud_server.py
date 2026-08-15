@@ -240,8 +240,67 @@ class ReasoningEngine:
         self._tokenizer = AutoTokenizer.from_pretrained(
             self._model_path, trust_remote_code=True)
         self._model.eval()
+
+        # ── Discover the actual generatable LM ───────────────────────────────
+        # Cosmos3EdgeModel nests custom modules: Cosmos3EdgeModel →
+        # Cosmos3EdgeTextModel → ??? → actual causal LM with .generate().
+        # Walk the sub-module tree (BFS) to find the first module whose class
+        # name looks like a standard HF causal LM.
+        self._lm = self._find_generatable_lm(self._model)
+        if self._lm is not None:
+            log.info("Found generatable LM: %s", type(self._lm).__name__)
+        else:
+            log.warning("Could not find a generatable sub-LM; "
+                        "will attempt forward() + logit greedy decode")
+
         log.info("ReasoningEngine ready (mode=%s) in %.1fs", self._mode,
                  time.time() - t0)
+
+    @staticmethod
+    def _find_generatable_lm(root):
+        """
+        BFS through sub-modules to find the first one that has .generate().
+        Prefers modules whose class name contains 'Qwen', 'Llama', 'Mistral',
+        'Causal', 'LM', 'GPT' — typical HF causal LM names.
+        Logs the module tree to help debug future changes.
+        """
+        from collections import deque
+        preferred_keywords = ("qwen", "llama", "mistral", "causallm", "gpt",
+                              "falcon", "gemma", "phi", "causal")
+
+        candidates = []
+        queue = deque([(name, module)
+                       for name, module in root.named_children()])
+        visited = set()
+
+        while queue:
+            name, mod = queue.popleft()
+            mid = id(mod)
+            if mid in visited:
+                continue
+            visited.add(mid)
+
+            cname = type(mod).__name__.lower()
+            has_gen = callable(getattr(mod, "generate", None))
+
+            log.info("  sub-module %-40s  has_generate=%s  class=%s",
+                     name, has_gen, type(mod).__name__)
+
+            if has_gen:
+                score = sum(1 for k in preferred_keywords if k in cname)
+                candidates.append((score, name, mod))
+
+            for child_name, child in mod.named_children():
+                queue.append((f"{name}.{child_name}", child))
+
+        if not candidates:
+            return None
+        # Pick highest-scoring (most LLM-like name); tie-break by order (first)
+        candidates.sort(key=lambda x: -x[0])
+        chosen_score, chosen_name, chosen_mod = candidates[0]
+        log.info("Selected generatable LM: %s (%s)", chosen_name,
+                 type(chosen_mod).__name__)
+        return chosen_mod
 
     def infer(self, frame_jpeg: bytes, goal: str) -> dict:
         """
@@ -339,8 +398,10 @@ class ReasoningEngine:
                 log.warning("AutoModelForVision2Seq.generate() failed (%s) — "
                             "falling back to Cosmos3EdgeModel path", e)
 
-        # ── Path B: Cosmos3EdgeModel — language_model sub-attribute has generate()
-        # ── B1: Image-conditioned (visual → projector → language_model) ────────
+        # ── Path B: Cosmos3EdgeModel (custom nested modules) ─────────────────
+        # self._lm is found by BFS in load() — the deepest sub-module with
+        # .generate().  If none was found we fall through to a greedy-decode
+        # forward() loop as last resort.
         text_inputs = self._tokenizer(
             prompt,
             return_tensors="pt",
@@ -350,60 +411,83 @@ class ReasoningEngine:
         ).to(device)
         input_ids = text_inputs["input_ids"]
 
-        try:
-            import torchvision.transforms as T
+        lm = self._lm  # may be None
 
-            transform = T.Compose([
-                T.Resize((336, 336)),
-                T.ToTensor(),
-                T.Normalize(mean=[0.485, 0.456, 0.406],
-                            std=[0.229, 0.224, 0.225]),
-            ])
-            img_tensor = transform(image).unsqueeze(0).to(device=device, dtype=dtype)
+        # ── B1: Image-conditioned path ────────────────────────────────────────
+        if lm is not None:
+            try:
+                import torchvision.transforms as T
 
-            with torch.no_grad():
-                if hasattr(self._model, "get_image_features"):
-                    # Some cosmos models expose a convenience method
-                    visual_feats = self._model.get_image_features(img_tensor)
-                else:
-                    visual_feats = self._model.visual(img_tensor)
-                    if hasattr(self._model, "projector"):
-                        visual_feats = self._model.projector(visual_feats)
+                transform = T.Compose([
+                    T.Resize((336, 336)),
+                    T.ToTensor(),
+                    T.Normalize(mean=[0.485, 0.456, 0.406],
+                                std=[0.229, 0.224, 0.225]),
+                ])
+                img_tensor = transform(image).unsqueeze(0).to(device=device, dtype=dtype)
 
-            # visual_feats: [1, num_patches, hidden_dim]
-            lm       = self._model.language_model
-            embed_fn = lm.get_input_embeddings()          # nn.Embedding layer
-            text_embeds = embed_fn(input_ids)             # [1, seq_len, hidden_dim]
+                with torch.no_grad():
+                    if hasattr(self._model, "get_image_features"):
+                        visual_feats = self._model.get_image_features(img_tensor)
+                    else:
+                        visual_feats = self._model.visual(img_tensor)
+                        if hasattr(self._model, "projector"):
+                            visual_feats = self._model.projector(visual_feats)
 
-            combined_embeds = torch.cat([visual_feats, text_embeds], dim=1)
-            attn_mask = torch.ones(
-                1, combined_embeds.shape[1], device=device, dtype=torch.long)
+                embed_fn    = lm.get_input_embeddings()
+                text_embeds = embed_fn(input_ids)
+                combined    = torch.cat([visual_feats, text_embeds], dim=1)
+                attn_mask   = torch.ones(1, combined.shape[1], device=device,
+                                         dtype=torch.long)
 
-            with torch.no_grad():
-                out_ids = lm.generate(
-                    inputs_embeds=combined_embeds,
-                    attention_mask=attn_mask,
-                    max_new_tokens=self._max_new_tokens,
-                    do_sample=False,
-                    pad_token_id=self._tokenizer.eos_token_id,
-                )
+                with torch.no_grad():
+                    out_ids = lm.generate(
+                        inputs_embeds=combined,
+                        attention_mask=attn_mask,
+                        max_new_tokens=self._max_new_tokens,
+                        do_sample=False,
+                        pad_token_id=self._tokenizer.eos_token_id,
+                    )
 
-            return self._tokenizer.decode(out_ids[0], skip_special_tokens=True).strip()
+                return self._tokenizer.decode(out_ids[0], skip_special_tokens=True).strip()
 
-        except Exception as e:
-            log.warning("Image-conditioned generate failed (%s) — text-only fallback", e)
+            except Exception as e:
+                log.warning("Image-conditioned generate failed (%s) — "
+                            "trying text-only lm.generate()", e)
 
-        # ── B2: Text-only fallback — still use language_model.generate() ───────
-        lm = self._model.language_model
+        # ── B2: Text-only via discovered LM ──────────────────────────────────
+        if lm is not None:
+            try:
+                with torch.no_grad():
+                    out_ids = lm.generate(
+                        input_ids=input_ids,
+                        attention_mask=text_inputs.get("attention_mask"),
+                        max_new_tokens=self._max_new_tokens,
+                        do_sample=False,
+                        pad_token_id=self._tokenizer.eos_token_id,
+                    )
+                new_tokens = out_ids[0][input_ids.shape[1]:]
+                return self._tokenizer.decode(
+                    new_tokens, skip_special_tokens=True).strip()
+            except Exception as e:
+                log.warning("lm.generate() text-only failed (%s) — "
+                            "falling back to greedy forward() loop", e)
+
+        # ── B3: Last-resort greedy decode via model.forward() ─────────────────
+        # Some custom models only expose forward() and not generate().
+        # We do a simple greedy decode loop using the top-level model.
+        log.warning("Using slow greedy forward() decode — "
+                    "consider loading with AutoModelForCausalLM")
+        generated = input_ids.clone()
         with torch.no_grad():
-            out_ids = lm.generate(
-                input_ids=input_ids,
-                attention_mask=text_inputs.get("attention_mask"),
-                max_new_tokens=self._max_new_tokens,
-                do_sample=False,
-                pad_token_id=self._tokenizer.eos_token_id,
-            )
-        new_tokens = out_ids[0][input_ids.shape[1]:]
+            for _ in range(self._max_new_tokens):
+                out = self._model(input_ids=generated)
+                logits = out.logits if hasattr(out, "logits") else out[0]
+                next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+                generated  = torch.cat([generated, next_token], dim=1)
+                if next_token.item() == self._tokenizer.eos_token_id:
+                    break
+        new_tokens = generated[0][input_ids.shape[1]:]
         return self._tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
 
 
