@@ -297,18 +297,22 @@ class ReasoningEngine:
 
     def _generate_text(self, image, prompt: str) -> str:
         """
-        Generate text from the Cosmos3 reasoning tower.
-
-        Uses AutoProcessor + AutoModelForVision2Seq.generate() when available
-        (transformers ≥ 4.45), otherwise falls back to tokenizer-only text
-        generation via AutoModel.generate() without image conditioning.
+        Generate text from either:
+          (A) A standard HF VLM loaded via AutoModelForVision2Seq — call .generate() directly
+              after processing through AutoProcessor.  (_use_processor=True)
+          (B) Cosmos3EdgeModel loaded via AutoModel — no top-level .generate(); instead use:
+                .language_model  — the causal LM with .generate()
+                .visual          — vision encoder
+                .projector       — vision→language projection
+              (_use_processor=False)
         """
         import torch
 
         device = next(self._model.parameters()).device
+        dtype  = next(self._model.parameters()).dtype
 
+        # ── Path A: standard VLM (AutoModelForVision2Seq + AutoProcessor) ─────
         if self._use_processor and self._processor is not None:
-            # ── Full VLM path: image + text ───────────────────────────────────
             try:
                 messages = [
                     {"role": "user", "content": [
@@ -332,20 +336,74 @@ class ReasoningEngine:
                 return self._tokenizer.decode(
                     new_tokens, skip_special_tokens=True).strip()
             except Exception as e:
-                log.warning("VLM generate failed (%s) — falling back to text-only", e)
+                log.warning("AutoModelForVision2Seq.generate() failed (%s) — "
+                            "falling back to Cosmos3EdgeModel path", e)
 
-        # ── Text-only fallback (no image conditioning) ────────────────────────
-        inputs = self._tokenizer(
-            prompt, return_tensors="pt", truncation=True, max_length=512
+        # ── Path B: Cosmos3EdgeModel — language_model sub-attribute has generate()
+        # ── B1: Image-conditioned (visual → projector → language_model) ────────
+        text_inputs = self._tokenizer(
+            prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=512,
+            add_special_tokens=True,
         ).to(device)
+        input_ids = text_inputs["input_ids"]
+
+        try:
+            import torchvision.transforms as T
+
+            transform = T.Compose([
+                T.Resize((336, 336)),
+                T.ToTensor(),
+                T.Normalize(mean=[0.485, 0.456, 0.406],
+                            std=[0.229, 0.224, 0.225]),
+            ])
+            img_tensor = transform(image).unsqueeze(0).to(device=device, dtype=dtype)
+
+            with torch.no_grad():
+                if hasattr(self._model, "get_image_features"):
+                    # Some cosmos models expose a convenience method
+                    visual_feats = self._model.get_image_features(img_tensor)
+                else:
+                    visual_feats = self._model.visual(img_tensor)
+                    if hasattr(self._model, "projector"):
+                        visual_feats = self._model.projector(visual_feats)
+
+            # visual_feats: [1, num_patches, hidden_dim]
+            lm       = self._model.language_model
+            embed_fn = lm.get_input_embeddings()          # nn.Embedding layer
+            text_embeds = embed_fn(input_ids)             # [1, seq_len, hidden_dim]
+
+            combined_embeds = torch.cat([visual_feats, text_embeds], dim=1)
+            attn_mask = torch.ones(
+                1, combined_embeds.shape[1], device=device, dtype=torch.long)
+
+            with torch.no_grad():
+                out_ids = lm.generate(
+                    inputs_embeds=combined_embeds,
+                    attention_mask=attn_mask,
+                    max_new_tokens=self._max_new_tokens,
+                    do_sample=False,
+                    pad_token_id=self._tokenizer.eos_token_id,
+                )
+
+            return self._tokenizer.decode(out_ids[0], skip_special_tokens=True).strip()
+
+        except Exception as e:
+            log.warning("Image-conditioned generate failed (%s) — text-only fallback", e)
+
+        # ── B2: Text-only fallback — still use language_model.generate() ───────
+        lm = self._model.language_model
         with torch.no_grad():
-            out_ids = self._model.generate(
-                **inputs,
+            out_ids = lm.generate(
+                input_ids=input_ids,
+                attention_mask=text_inputs.get("attention_mask"),
                 max_new_tokens=self._max_new_tokens,
                 do_sample=False,
                 pad_token_id=self._tokenizer.eos_token_id,
             )
-        new_tokens = out_ids[0][inputs["input_ids"].shape[1]:]
+        new_tokens = out_ids[0][input_ids.shape[1]:]
         return self._tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
 
 
