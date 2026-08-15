@@ -64,3 +64,256 @@ originSessionId: 74eb3b7b-c6c1-4d44-b30a-0225d3b8f403
 - Returns `{"positive": [...], "negative": [...]}` CLIP prompts
 - Falls back to template prompts if Ollama unreachable
 - Goal: generate prompts AFTER OmniVLA+CLIP loaded to avoid GPU OOM
+
+---
+
+## Cosmos3-Edge Strategies
+
+Four strategies using NVIDIA Cosmos3-Edge (4B param world foundation model) running
+on a **cloud GPU** via WebSocket. The rover (Jetson Nano) sends camera frames; the
+cloud runs inference and returns drive commands, corrections, or action chunks.
+
+### Model & setup
+- Model: `nvidia/Cosmos3-Edge` (4B, BF16) — also works with `nvidia/Cosmos3-Nano`
+- Local weights on Jetson: `/media/sundeep/ERASED/cosmos3/models/Cosmos3-Edge`
+- Venv: `/home/sundeep/claude-cosmos/venv` (torch 2.13+cu132, diffusers 0.40.0.dev0)
+- Server default port: **8767** (separate from OmniVLA's 8765 and Qwen's 8766)
+- Server file: `cosmos_cloud_server.py` (single file, mode selected via `--mode`)
+- Pipeline: `Cosmos3OmniPipeline` with `UniPCMultistepScheduler(flow_shift=10.0)`
+
+### Cloud server modes
+```
+--mode reasoning_supervisor   → Option 1
+--mode reasoning_driver       → Option 2
+--mode av_policy              → Option 4
+--mode trajectory_ranking     → Option 6
+```
+
+Start server:
+```bash
+source /home/sundeep/claude-cosmos/venv/bin/activate
+python cosmos_cloud_server.py \
+    --mode <mode> \
+    --model-path nvidia/Cosmos3-Edge \
+    --host 0.0.0.0 --port 8767
+```
+
+### WebSocket protocol (all modes)
+- Client → Server: `{"type": "goal", "goal": "..."}` — set goal without inference
+- Client → Server: `{"type": "infer", "goal": "...", "frame_b64": "<JPEG>"}` — run inference
+- Client → Server (av_policy only): `{"type": "infer", "goal": "...", "frames_b64": ["<JPEG>", ...]}` — rolling frame buffer
+- Server → Client: `{"type": "ready", "mode": "..."}` on connect
+- Server → Client: mode-specific response (see below)
+- Frame encoding: letterboxed to 640×480, JPEG quality 85, base64
+
+---
+
+### Option 1 — cosmos_supervisor (`CosmosReasoningSupervisorStrategy`)
+**File:** `cloud_cosmos_strategy.py`
+**Mode:** `reasoning_supervisor`
+
+**How it works:**
+- Local centroid steering runs every query cycle (~5 Hz): finds brightest region in
+  bottom half of frame, steers toward it
+- Cosmos reasoning fires in a **background thread** every `supervision_interval` seconds
+  (default 5s) — does NOT block the local steering loop
+- Cosmos returns: `{drift, drift_mm, row_end, observation}`
+- Drift correction biases the local steering radius for `_CORRECTION_HOLD_STEPS = 10`
+  local steps, then re-centers
+- `row_end=True` stops the rover and awaits operator input
+
+**Server response format:**
+```json
+{"type": "supervision", "drift": "left"|"right"|"center",
+ "drift_mm": 120, "row_end": false,
+ "observation": "Robot is drifting left toward the crop row edge.", "elapsed": 2.4}
+```
+
+**Steering radii used:**
+- `_STEER_LEFT_HARD = 600mm`, `_STEER_LEFT_SOFT = 1200mm`
+- `_STEER_RIGHT_SOFT = -1200mm`, `_STEER_RIGHT_HARD = -600mm`
+- Hard correction when `|drift_mm| > 150mm`
+
+**CLI:**
+```bash
+python rover_agent.py --strategy cosmos_supervisor \
+    --cosmos-server ws://<cloud-ip>:8767 \
+    --goal "Follow the crop row" \
+    --cosmos-supervision-interval 5.0 \
+    --cosmos-velocity 120
+```
+
+**Latency:** Local steering <100ms; Cosmos correction ~3s on H100, ~11s on Jetson AGX Orin
+**Best for:** Crop row following, outdoor navigation where local centroid is reliable
+
+---
+
+### Option 2 — cosmos_driver (`CosmosReasoningDriverStrategy`)
+**File:** `cloud_cosmos_strategy.py`
+**Mode:** `reasoning_driver`
+
+**How it works:**
+- Cosmos drives the robot directly via natural language reasoning
+- Every query cycle: encode frame → send to cloud → wait for `{velocity, radius}` response
+- Between cloud responses: holds last drive command (coasts)
+- Cosmos receives the full scene image + goal text and reasons about what to do
+- Prompt: "The Roomba uses drive_raw(velocity, radius)... what command?"
+- Response is parsed from JSON in model output
+
+**Server response format:**
+```json
+{"type": "drive", "velocity": 120, "radius": 32767,
+ "reasoning": "Path is clear and centred, driving straight.", "elapsed": 3.1}
+```
+
+**Velocity clamped** to `min(max_lin_mm_s, 200)`. Radius 32767 = straight.
+
+**CLI:**
+```bash
+python rover_agent.py --strategy cosmos_driver \
+    --cosmos-server ws://<cloud-ip>:8767 \
+    --goal "Navigate to the next room" \
+    --interval 3.0 \
+    --cosmos-velocity 150 \
+    --cosmos-timeout 30.0
+```
+
+**Latency:** ~3s on H100 for ~50 token response (~11s on Orin)
+**Best for:** Open-ended indoor navigation goals, scene understanding tasks
+
+---
+
+### Option 4 — cosmos_av (`CosmosAvPolicyStrategy`)
+**File:** `cosmos_av_strategy.py`
+**Mode:** `av_policy`
+
+**How it works:**
+- Uses `CosmosActionCondition(mode="policy", domain_name="av", chunk_size=16)`
+- Keeps a rolling buffer of last 5 frames (`_FRAME_BUFFER_LEN = 5`)
+- Cloud returns 16 × 9D action chunk; actions executed locally at `_ACTION_HZ = 5 Hz`
+- While executing chunk locally (no cloud needed), next frame batch accumulates
+- When chunk exhausted → sends next batch → gets new chunk
+- Effective: ~0.25 Hz cloud calls, 5 Hz local execution
+
+**Action mapping (AV 9D → Roomba):**
+- `action[0]` = forward displacement → `velocity = action[0] × 150.0` (mm/s)
+- `action[1]` = lateral displacement → `radius = 2000.0 / |action[1]|` (mm), sign = direction
+- `|lateral| < 0.03` → straight (32767)
+- `radius` clamped to minimum 200mm (no spin-in-place)
+- **Note:** AV domain trained on car dashcam data — scale constants need calibration
+  after first real-world experiment. Tune `_AV_VEL_SCALE` and `_AV_LAT_SCALE`.
+
+**Server response format:**
+```json
+{"type": "actions", "actions": [[f0,f1,...f8], ...×16], "elapsed": 4.2}
+```
+
+**CLI:**
+```bash
+python rover_agent.py --strategy cosmos_av \
+    --cosmos-server ws://<cloud-ip>:8767 \
+    --goal "Follow the crop row straight ahead" \
+    --interval 0.5 \
+    --cosmos-velocity 200 \
+    --cosmos-timeout 60.0
+```
+
+**Latency:** ~4s on H100 for policy inference
+**Best for:** First experiment to see raw AV domain outputs on your scene
+**Caution:** AV domain was trained on highway/urban car data — scene distribution mismatch.
+The action scale constants _will_ need tuning. Log all raw action values on first run.
+
+---
+
+### Option 6 — cosmos_trajectory (`CosmosTrajectoryStrategy`)
+**File:** `cosmos_trajectory_strategy.py`
+**Mode:** `trajectory_ranking`
+
+**How it works:**
+- Cloud samples the Cosmos policy **N times** (default 5, `--num-samples` on server)
+- Each sample: `CosmosActionCondition(mode="policy", domain_name="av")` → 16×9D actions
+- Each trajectory scored by heuristic: `mean(fwd[0:8]) - 0.5 × mean(|lat[0:8]|)`
+  (forward progress minus lateral deviation penalty) — replace with model value head
+  when/if diffusers exposes it
+- All N trajectories returned ranked best-first with scores and descriptions
+- Rover executes rank-1 trajectory's action chunk locally
+- **All N trajectories shown on web UI** as overlaid waypoint paths with probability scores
+- Same chunk-execution pattern as cosmos_av: execute locally, request new set when exhausted
+
+**Server response format:**
+```json
+{"type": "trajectories", "trajectories": [
+  {"rank": 1, "score": 0.42, "actions": [[...], ...×16],
+   "description": "rank 1: straight fwd=0.28 lat=0.01"},
+  {"rank": 2, "score": 0.31, "actions": [...], "description": "rank 2: right ..."},
+  ...
+], "elapsed": 18.5}
+```
+
+**UI waypoints:** Each ranked trajectory projected onto frame as `(x, y)` point
+with `probability = score` — renders in existing waypoint overlay.
+
+**CLI:**
+```bash
+python rover_agent.py --strategy cosmos_trajectory \
+    --cosmos-server ws://<cloud-ip>:8767 \
+    --goal "Follow the red line on the floor" \
+    --interval 1.0 \
+    --cosmos-velocity 120 \
+    --cosmos-timeout 120.0
+```
+
+Server with 5 samples:
+```bash
+python cosmos_cloud_server.py --mode trajectory_ranking \
+    --model-path nvidia/Cosmos3-Edge \
+    --num-samples 5 --chunk-size 16 \
+    --host 0.0.0.0 --port 8767
+```
+
+**Latency:** ~4s × N samples on H100 (parallelisable with batch_size=N → ~4s flat)
+**Best for:** Open-ended goals ("find the blue box", "navigate to next room"),
+  situations where you want to see all candidate paths before committing
+**Goal examples that work:** "follow the red line", "move along the left wall",
+  "navigate through the doorway", "find the chair and move toward it"
+
+---
+
+### Option 5 — Fine-tuned Policy (NOT YET IMPLEMENTED — future work)
+**Planned file:** `cosmos_finetuned_strategy.py`
+
+**How it works:**
+- Record 2–4h of Roomba driving: camera frames + `[vel, radius]` logged per step
+- Convert dataset to LeRobot format with `raw_action_dim=2`
+- Fine-tune Cosmos3-Edge with a new domain: `domain_name="roomba_croprow"`
+- Deploy same as cosmos_av but with the fine-tuned checkpoint and correct domain name
+- Action output will be `[vel, radius]` directly — no mapping heuristic needed
+- NVIDIA provides post-training scripts; see `cosmos-framework` repo
+
+**Why it's the best long-term option:**
+- Correct action space (2D not 9D)
+- Trained on your exact scene (crop rows, indoors)
+- No scale-constant guesswork
+- Same latency as cosmos_av (~4s on H100)
+
+---
+
+### CLI args added to rover_agent.py
+| Arg | Default | Used by |
+|-----|---------|---------|
+| `--cosmos-server` | `ws://localhost:8767` | all cosmos strategies |
+| `--cosmos-velocity` | `120` mm/s | all cosmos strategies |
+| `--cosmos-timeout` | `60.0` s | cosmos_driver, cosmos_av, cosmos_trajectory |
+| `--cosmos-supervision-interval` | `5.0` s | cosmos_supervisor only |
+
+### Known limitations / things to tune after first experiment
+1. **AV action scale** — `_AV_VEL_SCALE=150` and `_AV_LAT_SCALE=2000` in
+   `cosmos_av_strategy.py` and `cosmos_trajectory_strategy.py` are guesses.
+   Log raw `action[0]` and `action[1]` values on first run and calibrate.
+2. **Trajectory scoring heuristic** — current score = `fwd - 0.5×|lat|` is a
+   placeholder. Replace with model value head when diffusers exposes it.
+3. **Reasoning prompt format** — Cosmos3 was trained on structured JSON captions.
+   The reasoning prompts in `ReasoningEngine` use plain text; may benefit from
+   the cosmos-framework prompt upsampler for better quality.
+4. **av domain scene mismatch** — AV domain trained on car/highway data, not
+   indoor/crop-row scenes. Option 5 (fine-tuning) is the fix.
