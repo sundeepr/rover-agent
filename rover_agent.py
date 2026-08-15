@@ -504,6 +504,38 @@ def _build_strategy(name: str, args) -> NavigationStrategy:
             instruction=args.teleop_instruction,
             fps=args.teleop_fps,
         )
+    if name == "cosmos_supervisor":
+        from cloud_cosmos_strategy import CosmosReasoningSupervisorStrategy
+        return CosmosReasoningSupervisorStrategy(
+            server_url=args.cosmos_server,
+            goal=args.goal,
+            max_lin_mm_s=args.cosmos_velocity,
+            supervision_interval=args.cosmos_supervision_interval,
+        )
+    if name == "cosmos_driver":
+        from cloud_cosmos_strategy import CosmosReasoningDriverStrategy
+        return CosmosReasoningDriverStrategy(
+            server_url=args.cosmos_server,
+            goal=args.goal,
+            max_lin_mm_s=args.cosmos_velocity,
+            response_timeout=args.cosmos_timeout,
+        )
+    if name == "cosmos_av":
+        from cosmos_av_strategy import CosmosAvPolicyStrategy
+        return CosmosAvPolicyStrategy(
+            server_url=args.cosmos_server,
+            goal=args.goal,
+            max_lin_mm_s=args.cosmos_velocity,
+            response_timeout=args.cosmos_timeout,
+        )
+    if name == "cosmos_trajectory":
+        from cosmos_trajectory_strategy import CosmosTrajectoryStrategy
+        return CosmosTrajectoryStrategy(
+            server_url=args.cosmos_server,
+            goal=args.goal,
+            max_lin_mm_s=args.cosmos_velocity,
+            response_timeout=args.cosmos_timeout,
+        )
     raise ValueError(f"Unknown strategy: {name!r}")
 
 
@@ -542,7 +574,9 @@ def main():
                                  "omnivla", "line_follow", "plant_center",
                                  "boundary_guard", "teleop", "crop_guard",
                                  "wheel_guard", "crop_spray", "row_change",
-                                 "crop_row"],
+                                 "crop_row",
+                                 "cosmos_supervisor", "cosmos_driver",
+                                 "cosmos_av", "cosmos_trajectory"],
                         help="Navigation strategy (default: omnivla_full)")
     parser.add_argument("--left-cam",   type=_device, default=1,
                         metavar="INDEX|PATH",
@@ -614,6 +648,22 @@ def main():
                         metavar="URL",
                         help="WebSocket URL of qwen_cloud_server.py "
                              "(row_change strategy, default: ws://localhost:8766)")
+    parser.add_argument("--cosmos-server", type=str, default="ws://localhost:8767",
+                        metavar="URL",
+                        help="WebSocket URL of cosmos_cloud_server.py "
+                             "(cosmos_* strategies, default: ws://localhost:8767)")
+    parser.add_argument("--cosmos-velocity", type=int, default=120,
+                        metavar="MM_S",
+                        help="Max forward velocity for Cosmos strategies in mm/s "
+                             "(default: 120)")
+    parser.add_argument("--cosmos-timeout", type=float, default=60.0,
+                        metavar="SECS",
+                        help="Cloud response timeout for Cosmos strategies in seconds "
+                             "(default: 60.0)")
+    parser.add_argument("--cosmos-supervision-interval", type=float, default=5.0,
+                        metavar="SECS",
+                        help="How often cosmos_supervisor queries the cloud in seconds "
+                             "(default: 5.0)")
     parser.add_argument("--turn-90-duration", type=float, default=4.5,
                         metavar="SECS",
                         help="Time in seconds for a 90° tank turn (row_change, default 4.5). "
@@ -750,6 +800,11 @@ def main():
     if args.strategy in ("cloud_omnivla", "omnivla_full", "bev_omnivla"):
         log.info("Cloud server  : %s", args.cloud_server)
         log.info("Goal          : %s", args.goal)
+    if args.strategy in ("cosmos_supervisor", "cosmos_driver",
+                         "cosmos_av", "cosmos_trajectory"):
+        log.info("Cosmos server : %s", args.cosmos_server)
+        log.info("Goal          : %s", args.goal)
+        log.info("Max velocity  : %d mm/s", args.cosmos_velocity)
     log.info("Web server    : %s", args.web_server)
     log.info("Rover         : %s", args.rover)
     if rover_port:
