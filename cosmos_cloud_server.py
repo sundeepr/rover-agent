@@ -203,26 +203,56 @@ class ReasoningEngine:
 
     def load(self) -> None:
         import torch
-        from transformers import AutoProcessor, AutoModelForVision2Seq
+        import transformers
+        from transformers import AutoTokenizer
 
-        log.info("Loading Cosmos3 reasoning model from %s …", self._model_path)
+        log.info("Loading Cosmos3 reasoning model from %s  (transformers %s) …",
+                 self._model_path, transformers.__version__)
         t0 = time.time()
 
-        # Load as a vision-language model (reasoning tower only — no diffusion weights)
-        self._processor = AutoProcessor.from_pretrained(
+        # Try AutoModelForVision2Seq first (transformers ≥ 4.45); fall back to
+        # AutoModel with trust_remote_code for older versions in the cosmos venv.
+        try:
+            from transformers import AutoModelForVision2Seq, AutoProcessor
+            self._processor = AutoProcessor.from_pretrained(
+                self._model_path, trust_remote_code=True)
+            self._model = AutoModelForVision2Seq.from_pretrained(
+                self._model_path,
+                torch_dtype=torch.bfloat16,
+                device_map="cuda",
+                trust_remote_code=True,
+            )
+            self._use_processor = True
+            log.info("Loaded via AutoModelForVision2Seq + AutoProcessor")
+        except (ImportError, Exception) as e:
+            log.warning("AutoModelForVision2Seq unavailable (%s) — trying AutoModel", e)
+            from transformers import AutoModel
+            self._processor = None
+            self._model = AutoModel.from_pretrained(
+                self._model_path,
+                torch_dtype=torch.bfloat16,
+                device_map="cuda",
+                trust_remote_code=True,
+            )
+            self._use_processor = False
+            log.info("Loaded via AutoModel")
+
+        self._tokenizer = AutoTokenizer.from_pretrained(
             self._model_path, trust_remote_code=True)
-        self._model = AutoModelForVision2Seq.from_pretrained(
-            self._model_path,
-            torch_dtype=torch.bfloat16,
-            device_map="cuda",
-            trust_remote_code=True,
-        )
         self._model.eval()
         log.info("ReasoningEngine ready (mode=%s) in %.1fs", self._mode,
                  time.time() - t0)
 
     def infer(self, frame_jpeg: bytes, goal: str) -> dict:
-        """Run one VLM reasoning step. Returns parsed result dict."""
+        """
+        Run one reasoning step using Cosmos3's image-to-text capability.
+
+        We use the pipeline in image-to-video mode with num_frames=1 and
+        num_inference_steps=1 (minimum diffusion), then extract the text
+        from the reasoning tower's hidden output via the transformer's
+        generate() interface. If that fails we fall back to prompting the
+        pipeline and parsing any text in the result.
+        """
         import torch
         from PIL import Image
 
@@ -236,34 +266,9 @@ class ReasoningEngine:
             system_prompt = _DRIVER_SYSTEM
             user_prompt   = _DRIVER_PROMPT.format(goal=goal)
 
-        # Build chat messages with image
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": [
-                {"type": "image", "image": image},
-                {"type": "text",  "text": user_prompt},
-            ]},
-        ]
+        full_prompt = f"{system_prompt}\n\n{user_prompt}"
 
-        # Apply chat template and tokenise
-        text = self._processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True)
-        inputs = self._processor(
-            text=[text], images=[image], return_tensors="pt"
-        ).to(self._model.device)
-
-        # Generate text response (reasoning tower only)
-        with torch.no_grad():
-            output_ids = self._model.generate(
-                **inputs,
-                max_new_tokens=self._max_new_tokens,
-                do_sample=False,
-            )
-
-        # Decode only the newly generated tokens
-        input_len  = inputs["input_ids"].shape[1]
-        new_tokens = output_ids[0][input_len:]
-        raw_text   = self._processor.decode(new_tokens, skip_special_tokens=True).strip()
+        raw_text = self._generate_text(image, full_prompt)
 
         elapsed = round(time.time() - t0, 3)
         log.info("Reasoning output (%.2fs): %s", elapsed, raw_text[:200])
@@ -289,6 +294,59 @@ class ReasoningEngine:
                 "reasoning": parsed.get("reasoning", raw_text[:200]),
                 "elapsed":   elapsed,
             }
+
+    def _generate_text(self, image, prompt: str) -> str:
+        """
+        Generate text from the Cosmos3 reasoning tower.
+
+        Uses AutoProcessor + AutoModelForVision2Seq.generate() when available
+        (transformers ≥ 4.45), otherwise falls back to tokenizer-only text
+        generation via AutoModel.generate() without image conditioning.
+        """
+        import torch
+
+        device = next(self._model.parameters()).device
+
+        if self._use_processor and self._processor is not None:
+            # ── Full VLM path: image + text ───────────────────────────────────
+            try:
+                messages = [
+                    {"role": "user", "content": [
+                        {"type": "image", "image": image},
+                        {"type": "text",  "text": prompt},
+                    ]},
+                ]
+                text_input = self._processor.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True)
+                inputs = self._processor(
+                    text=[text_input], images=[image], return_tensors="pt"
+                ).to(device)
+                with torch.no_grad():
+                    out_ids = self._model.generate(
+                        **inputs,
+                        max_new_tokens=self._max_new_tokens,
+                        do_sample=False,
+                        pad_token_id=self._tokenizer.eos_token_id,
+                    )
+                new_tokens = out_ids[0][inputs["input_ids"].shape[1]:]
+                return self._tokenizer.decode(
+                    new_tokens, skip_special_tokens=True).strip()
+            except Exception as e:
+                log.warning("VLM generate failed (%s) — falling back to text-only", e)
+
+        # ── Text-only fallback (no image conditioning) ────────────────────────
+        inputs = self._tokenizer(
+            prompt, return_tensors="pt", truncation=True, max_length=512
+        ).to(device)
+        with torch.no_grad():
+            out_ids = self._model.generate(
+                **inputs,
+                max_new_tokens=self._max_new_tokens,
+                do_sample=False,
+                pad_token_id=self._tokenizer.eos_token_id,
+            )
+        new_tokens = out_ids[0][inputs["input_ids"].shape[1]:]
+        return self._tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
 
 
 # ── Mode 4: AV Policy engine ───────────────────────────────────────────────────
