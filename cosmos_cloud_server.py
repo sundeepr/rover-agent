@@ -181,21 +181,49 @@ _DRIVER_PROMPT = (
 
 class ReasoningEngine:
     """
-    Uses the Cosmos3-Edge *reasoning* (LLM) path — text output, no video generation.
-    Supports both supervisor and driver modes.
+    Uses the Cosmos3-Edge *reasoning* (LLM/VLM) path — text output only, no diffusion.
+
+    Cosmos3OmniPipeline does not expose a text-output mode; the `output` kwarg
+    belongs only to Cosmos3OmniModularPipeline.  Instead we access the reasoning
+    tower (a Qwen-style VLM) directly via the HuggingFace `transformers` library,
+    which is how the official Jetson benchmarks run the reasoner.
+
+    The transformer inside the pipeline is a `Cosmos3OmniTransformer` whose
+    text generation path is reached by calling `pipe.transformer` with token
+    inputs.  For simplicity we load it as a plain AutoModelForCausalLM so we
+    can use the standard chat-template / generate() interface.
     """
 
-    def __init__(self, model_path: str, mode: str):
-        self._model_path = model_path
-        self._mode       = mode   # "reasoning_supervisor" | "reasoning_driver"
-        self._pipe       = None
+    def __init__(self, model_path: str, mode: str, max_new_tokens: int = 128):
+        self._model_path    = model_path
+        self._mode          = mode   # "reasoning_supervisor" | "reasoning_driver"
+        self._max_new_tokens = max_new_tokens
+        self._model     = None
+        self._processor = None
 
     def load(self) -> None:
-        self._pipe = _load_pipeline(self._model_path)
-        log.info("ReasoningEngine ready (mode=%s)", self._mode)
+        import torch
+        from transformers import AutoProcessor, AutoModelForVision2Seq
+
+        log.info("Loading Cosmos3 reasoning model from %s …", self._model_path)
+        t0 = time.time()
+
+        # Load as a vision-language model (reasoning tower only — no diffusion weights)
+        self._processor = AutoProcessor.from_pretrained(
+            self._model_path, trust_remote_code=True)
+        self._model = AutoModelForVision2Seq.from_pretrained(
+            self._model_path,
+            torch_dtype=torch.bfloat16,
+            device_map="cuda",
+            trust_remote_code=True,
+        )
+        self._model.eval()
+        log.info("ReasoningEngine ready (mode=%s) in %.1fs", self._mode,
+                 time.time() - t0)
 
     def infer(self, frame_jpeg: bytes, goal: str) -> dict:
-        """Run one reasoning step. Returns parsed result dict."""
+        """Run one VLM reasoning step. Returns parsed result dict."""
+        import torch
         from PIL import Image
 
         t0    = time.time()
@@ -208,23 +236,38 @@ class ReasoningEngine:
             system_prompt = _DRIVER_SYSTEM
             user_prompt   = _DRIVER_PROMPT.format(goal=goal)
 
-        # Cosmos3 reasoning path: pass image + text, get text back.
-        # use_system_prompt=False so we control the full prompt ourselves.
-        result = self._pipe(
-            prompt=user_prompt,
-            image=image,
-            num_frames=1,
-            num_inference_steps=1,      # reasoning path — no diffusion steps needed
-            use_system_prompt=False,
-            output=["text"],            # text-only output
-            enable_safety_check=False,
-        )
+        # Build chat messages with image
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": [
+                {"type": "image", "image": image},
+                {"type": "text",  "text": user_prompt},
+            ]},
+        ]
 
-        raw_text = result.text[0] if hasattr(result, "text") else ""
-        elapsed  = round(time.time() - t0, 3)
-        log.debug("Raw reasoning output: %s", raw_text[:200])
+        # Apply chat template and tokenise
+        text = self._processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True)
+        inputs = self._processor(
+            text=[text], images=[image], return_tensors="pt"
+        ).to(self._model.device)
 
-        # Parse JSON from model output
+        # Generate text response (reasoning tower only)
+        with torch.no_grad():
+            output_ids = self._model.generate(
+                **inputs,
+                max_new_tokens=self._max_new_tokens,
+                do_sample=False,
+            )
+
+        # Decode only the newly generated tokens
+        input_len  = inputs["input_ids"].shape[1]
+        new_tokens = output_ids[0][input_len:]
+        raw_text   = self._processor.decode(new_tokens, skip_special_tokens=True).strip()
+
+        elapsed = round(time.time() - t0, 3)
+        log.info("Reasoning output (%.2fs): %s", elapsed, raw_text[:200])
+
         parsed = _parse_json_from_text(raw_text)
 
         if self._mode == "reasoning_supervisor":
@@ -561,15 +604,18 @@ def main() -> None:
                              "(default: nvidia/Cosmos3-Edge)")
     parser.add_argument("--host",        default="0.0.0.0")
     parser.add_argument("--port",        default=8767, type=int)
-    parser.add_argument("--num-samples", default=5,    type=int,
+    parser.add_argument("--num-samples",    default=5,   type=int,
                         help="Trajectory samples for trajectory_ranking mode (default 5)")
-    parser.add_argument("--chunk-size",  default=16,   type=int,
+    parser.add_argument("--chunk-size",     default=16,  type=int,
                         help="Action chunk size for policy modes (default 16)")
+    parser.add_argument("--max-new-tokens", default=128, type=int,
+                        help="Max tokens to generate in reasoning modes (default 128)")
     args = parser.parse_args()
 
     # Instantiate the right engine
     if args.mode in ("reasoning_supervisor", "reasoning_driver"):
-        engine = ReasoningEngine(args.model_path, args.mode)
+        engine = ReasoningEngine(args.model_path, args.mode,
+                                 max_new_tokens=args.max_new_tokens)
     elif args.mode == "av_policy":
         engine = AvPolicyEngine(args.model_path, chunk_size=args.chunk_size)
     elif args.mode == "trajectory_ranking":
