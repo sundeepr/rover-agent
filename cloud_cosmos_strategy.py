@@ -95,6 +95,33 @@ def _letterbox(frame: np.ndarray, w: int, h: int) -> np.ndarray:
     return out
 
 
+def _annotate_frame(frame: np.ndarray, strategy_name: str, goal: str,
+                    vel: int, radius: int, status: str,
+                    lines: list[str] | None = None) -> np.ndarray:
+    """
+    Draw a HUD overlay on a copy of frame and return it.
+    Written to state.llm_frame so the web server shows it in the LLM panel.
+    """
+    out  = frame.copy()
+    h, w = out.shape[:2]
+    r_str = "straight" if radius == _STEER_STRAIGHT else f"r={radius}mm"
+
+    overlay_lines = [
+        f"{strategy_name}  [{status}]",
+        f"goal: {goal[:60]}",
+        f"vel={vel}mm/s  {r_str}",
+    ] + (lines or [])
+
+    y = 28
+    for txt in overlay_lines:
+        cv2.putText(out, txt, (10, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0),   3, cv2.LINE_AA)
+        cv2.putText(out, txt, (10, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 1, cv2.LINE_AA)
+        y += 24
+    return out
+
+
 # ── Shared WebSocket mixin ─────────────────────────────────────────────────────
 
 class _CosmosWebSocketMixin:
@@ -268,14 +295,21 @@ class CosmosReasoningSupervisorStrategy(_CosmosWebSocketMixin, NavigationStrateg
         with self._conn_lock:
             conn = self._conn_state
 
+        def _publish_status(status: str) -> None:
+            ann = _annotate_frame(frame, self.name, self._goal, 0, _STEER_STRAIGHT, status)
+            with state.llm_lock:
+                state.llm_frame = ann
+
         if conn == _ConnState.CONNECTING:
             log.info("Step %d | waiting for Cosmos server…", step)
+            _publish_status("connecting")
             self._write_result(state, step, phase, "connecting", 0,
                                _STEER_STRAIGHT, t0)
             return
 
         if not self._goal:
             log.info("Step %d | no goal yet", step)
+            _publish_status("waiting_goal")
             self._write_result(state, step, phase, "waiting_goal", 0,
                                _STEER_STRAIGHT, t0)
             return
@@ -286,6 +320,7 @@ class CosmosReasoningSupervisorStrategy(_CosmosWebSocketMixin, NavigationStrateg
                 log.info("Step %d | row end detected by Cosmos — stopping", step)
                 if rover_ctrl:
                     rover_ctrl.drive_raw(0, _STEER_STRAIGHT)
+                _publish_status("row_end")
                 self._write_result(state, step, phase, "row_end", 0,
                                    _STEER_STRAIGHT, t0)
                 return
@@ -322,10 +357,23 @@ class CosmosReasoningSupervisorStrategy(_CosmosWebSocketMixin, NavigationStrateg
 
         elapsed = time.time() - t0
         with self._supervision_lock:
-            obs = self._last_observation
+            obs  = self._last_observation
+            corr = self._correction_steps_left
 
         log.info("Step %d | local vel=%d r=%d | cosmos obs='%s'",
                  step, vel, radius, obs[:60] if obs else "none yet")
+
+        # ── Publish annotated frame to web UI ─────────────────────────────────
+        annotated = _annotate_frame(
+            frame, self.name, self._goal, vel, radius, "navigating",
+            lines=[
+                f"cosmos: {obs[:70]}" if obs else "cosmos: (no supervision yet)",
+                f"correction_steps={corr}",
+            ],
+        )
+        with state.llm_lock:
+            state.llm_frame = annotated
+
         self._write_result(state, step, phase, "navigating", vel, radius, t0, obs)
 
     def _local_steer(self, frame: np.ndarray) -> tuple[int, int]:
@@ -495,14 +543,21 @@ class CosmosReasoningDriverStrategy(_CosmosWebSocketMixin, NavigationStrategy):
         with self._conn_lock:
             conn = self._conn_state
 
+        def _publish_status(status: str) -> None:
+            ann = _annotate_frame(frame, self.name, self._goal, 0, _STEER_STRAIGHT, status)
+            with state.llm_lock:
+                state.llm_frame = ann
+
         if conn == _ConnState.CONNECTING:
             log.info("Step %d | waiting for Cosmos server…", step)
+            _publish_status("connecting")
             self._write_result(state, step, phase, "connecting", 0,
                                _STEER_STRAIGHT, "", t0)
             return
 
         if not self._goal:
             log.info("Step %d | no goal yet", step)
+            _publish_status("waiting_goal")
             self._write_result(state, step, phase, "waiting_goal", 0,
                                _STEER_STRAIGHT, "", t0)
             return
@@ -556,6 +611,14 @@ class CosmosReasoningDriverStrategy(_CosmosWebSocketMixin, NavigationStrategy):
                            and state.operator_until > time.time())
         if rover_ctrl and not state.paused.is_set() and not operator_active:
             rover_ctrl.drive_raw(vel, radius)
+
+        # ── Publish annotated frame to web UI ─────────────────────────────────
+        annotated = _annotate_frame(
+            frame, self.name, self._goal, vel, radius, "navigating",
+            lines=[f"cosmos: {reasoning[:80]}"],
+        )
+        with state.llm_lock:
+            state.llm_frame = annotated
 
         self._write_result(state, step, phase, "navigating",
                            vel, radius, reasoning, t0)

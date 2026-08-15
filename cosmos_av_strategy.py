@@ -93,6 +93,27 @@ def _letterbox(frame: np.ndarray, w: int, h: int) -> np.ndarray:
     return out
 
 
+def _annotate_frame(frame: np.ndarray, strategy_name: str, goal: str,
+                    vel: int, radius: int, status: str,
+                    lines: list[str] | None = None) -> np.ndarray:
+    """Draw HUD overlay and return annotated copy for state.llm_frame."""
+    out   = frame.copy()
+    r_str = "straight" if radius == _STRAIGHT else f"r={radius}mm"
+    overlay = [
+        f"{strategy_name}  [{status}]",
+        f"goal: {goal[:60]}",
+        f"vel={vel}mm/s  {r_str}",
+    ] + (lines or [])
+    y = 28
+    for txt in overlay:
+        cv2.putText(out, txt, (10, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0),   3, cv2.LINE_AA)
+        cv2.putText(out, txt, (10, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 1, cv2.LINE_AA)
+        y += 24
+    return out
+
+
 def _av_action_to_drive(action: list) -> tuple[int, int]:
     """
     Map one 9D AV action vector to (velocity mm/s, radius mm).
@@ -254,13 +275,22 @@ class CosmosAvPolicyStrategy(NavigationStrategy):
         with self._conn_lock:
             conn = self._conn_state
 
+        def _pub(status: str, vel: int = 0, radius: int = _STRAIGHT,
+                 lines: list | None = None) -> None:
+            ann = _annotate_frame(frame, self.name, self._goal, vel, radius,
+                                  status, lines)
+            with state.llm_lock:
+                state.llm_frame = ann
+
         if conn == _ConnState.CONNECTING:
             log.info("Step %d | waiting for Cosmos server…", step)
+            _pub("connecting")
             self._write_result(state, step, phase, "connecting", 0, _STRAIGHT, [], t0)
             return
 
         if not self._goal:
             log.info("Step %d | no goal yet", step)
+            _pub("waiting_goal")
             self._write_result(state, step, phase, "waiting_goal", 0, _STRAIGHT, [], t0)
             return
 
@@ -286,6 +316,8 @@ class CosmosAvPolicyStrategy(NavigationStrategy):
                                    and state.operator_until > time.time())
                 if rover_ctrl and not state.paused.is_set() and not operator_active:
                     rover_ctrl.drive_raw(vel, radius)
+                _pub("executing_chunk", vel, radius,
+                     [f"action {self._chunk_idx}/{len(self._action_chunk)}"])
                 self._write_result(state, step, phase, "executing_chunk",
                                    vel, radius, [action], t0)
                 return
@@ -346,9 +378,12 @@ class CosmosAvPolicyStrategy(NavigationStrategy):
                                and state.operator_until > time.time())
             if rover_ctrl and not state.paused.is_set() and not operator_active:
                 rover_ctrl.drive_raw(first_vel, first_radius)
+            _pub("navigating", first_vel, first_radius,
+                 [f"{len(actions)} actions  cloud={cloud_s:.1f}s"])
             self._write_result(state, step, phase, "navigating",
                                first_vel, first_radius, actions, t0)
         else:
+            _pub("no_actions")
             self._write_result(state, step, phase, "no_actions", 0, _STRAIGHT, [], t0)
 
     def _write_result(self, state, step, phase, status, vel, radius, actions, t0) -> None:
