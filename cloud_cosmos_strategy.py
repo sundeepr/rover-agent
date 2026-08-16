@@ -407,15 +407,19 @@ class CosmosReasoningSupervisorStrategy(_CosmosWebSocketMixin, NavigationStrateg
     def _run_supervision(self, frame: np.ndarray, goal: str) -> None:
         """Background thread: send frame to Cosmos, apply correction."""
         try:
+            log.info("Supervision: encoding frame and sending to cloud…")
             frame_b64 = self._encode_frame(frame)
-            self._send_infer_sync(frame_b64, goal, timeout=5.0)
+            self._send_infer_sync(frame_b64, goal, timeout=10.0)
+            log.info("Supervision: frame sent, waiting for response (up to 120s)…")
 
-            budget = 30.0
+            budget = 120.0   # first inference can be slow (model warm-up)
             if not self._response_event.wait(timeout=budget):
-                log.warning("Cosmos supervision timed out")
+                log.warning("Cosmos supervision timed out after %.0fs — "
+                            "check cloud server logs", budget)
                 return
 
             resp = self._pending_resp
+            log.info("Supervision: got response type=%s", resp.get("type") if resp else "None")
             if resp is None or resp.get("type") != "supervision":
                 log.warning("Unexpected supervision response: %s", resp)
                 return
