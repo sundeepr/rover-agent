@@ -37,3 +37,31 @@ Removed from requirements.txt — AssertionError in pip resolver. Use plain `ult
 CLIP ViT-B/32 not trained on agricultural imagery — path detection unreliable.
 Workaround: use `crop_row` or `row_centering_omnivla` strategies with YOLO instead.
 AgriCLIP exists but was not integrated.
+
+## cosmos_cloud_server.py --mode av_policy fails to load (venv: /home/sundeep/claude-cosmos/venv)
+**Symptom 1 — crash on import:** `RuntimeError: Detected that PyTorch and TorchAudio were
+compiled with different CUDA versions` (torch `2.13.0+cu132` vs `torchaudio 2.11.0`, PyPI's
+final torchaudio release — the project no longer tracks new torch versions). `transformers`/
+`diffusers` only catch `ImportError` around the optional `import torchaudio`, so the `RuntimeError`
+propagates and crashes startup, even though `av_policy` mode never touches audio.
+**Fix:** `pip uninstall -y torchaudio` — the optional import then fails softly (ModuleNotFoundError)
+and audio support is disabled, which is fine for image/video-only modes.
+
+**Symptom 2 — crash after fixing #1:** `NotImplementedError: Cannot copy out of meta tensor;
+no data!` when `Cosmos3OmniPipeline.from_pretrained(..., device_map="cuda")` tries to move the
+transformer to GPU. Root cause: the Cosmos3-Edge checkpoint's `model_index.json` was exported
+against `diffusers==0.40.0.dev0`, but the venv had the PyPI release `0.39.0`. The 0.39.0
+`Cosmos3OmniTransformer` doesn't have matching `norm_q`/`norm_k`/MoE (`mlp_moe_gen.gate_proj`)
+weight names, so those params never get loaded from the checkpoint and stay on the `meta`
+device — `.to("cuda")` then has nothing to copy.
+**Fix:** `pip install --upgrade "git+https://github.com/huggingface/diffusers.git"` (installs
+main branch, which resolves to `0.40.0.dev0` — matches the checkpoint exactly, no more
+missing/newly-initialized weight warnings).
+**Side effect:** this venv also has `vllm-omni 0.26.0` installed, which pins
+`diffusers==0.38.0` and `accelerate==1.12.0` — now conflicts with the upgraded versions
+(`0.40.0.dev0`/`1.14.0`). Not an issue for `av_policy` mode itself, but if the `reasoning_*`
+modes (which use vllm-omni) break in this same venv, this is why — may need a separate venv.
+**Also noted (non-blocking):** PyTorch prints "No published PyTorch CUDA builds... support this
+GPU" for the Jetson Orin's compute capability 8.7 — cosmetic in testing (dispatch to `cuda:0`
+and inference load both worked fine), but worth checking first if numerical/perf oddities show
+up later.
