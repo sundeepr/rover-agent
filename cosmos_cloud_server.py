@@ -147,393 +147,173 @@ def _load_pipeline(model_path: str):
 
 
 # ── Mode 1 & 2: Reasoning engine ──────────────────────────────────────────────
-
-_SUPERVISOR_SYSTEM = (
-    "You are a navigation assistant for a Roomba robot equipped with a forward-facing "
-    "camera. The robot navigates autonomously through indoor and outdoor environments. "
-    "Respond ONLY with a JSON object — no prose, no markdown fences."
-)
-
-_SUPERVISOR_PROMPT = (
-    'The robot\'s goal is: "{goal}"\n\n'
-    "Analyse the camera image and respond with a JSON object:\n"
-    '{{"drift": "left"|"right"|"center", '
-    '"drift_mm": <estimated lateral offset in mm, positive=right>, '
-    '"row_end": <true if the path/row ends within 1 metre>, '
-    '"observation": "<one sentence describing what you see>"}}'
-)
-
-_DRIVER_SYSTEM = (
-    "You are the navigation controller for a Roomba robot. "
-    "The Roomba uses drive_raw(velocity, radius) where velocity is mm/s (0–200) "
-    "and radius is mm (32767=straight, positive=left turn, negative=right turn, "
-    "1=spin). Respond ONLY with a JSON object — no prose, no markdown fences."
-)
-
-_DRIVER_PROMPT = (
-    'The robot\'s goal is: "{goal}"\n\n'
-    "Analyse the camera image and respond with the drive command:\n"
-    '{{"velocity": <int 0-200>, '
-    '"radius": <int, 32767 for straight>, '
-    '"reasoning": "<one sentence explaining the command>"}}'
-)
+#
+# Cosmos3OmniPipeline is a VIDEO DIFFUSION model — it generates pixels, not
+# text.  There is no text output path.
+#
+# For navigation reasoning we use CosmosActionCondition(mode="policy") to get
+# the model's action prediction from the current frame, then interpret the
+# action dimensions as navigation signals:
+#
+#   AV 9-D action layout (inferred from Cosmos3 AV domain):
+#     [0] forward velocity  (positive = forward)
+#     [1] lateral offset    (positive = right of path, negative = left)
+#     [2] yaw rate          (positive = turn right)
+#     [3–8] other dims (height, orientation, etc.) — not used here
+#
+# reasoning_supervisor  →  interprets lateral offset as drift direction
+# reasoning_driver      →  maps forward + yaw directly to vel + radius
 
 
 class ReasoningEngine:
     """
-    Uses the Cosmos3-Edge *reasoning* (LLM/VLM) path — text output only, no diffusion.
+    Options 1 & 2: Navigation reasoning via Cosmos3OmniPipeline action prediction.
 
-    Cosmos3OmniPipeline does not expose a text-output mode; the `output` kwarg
-    belongs only to Cosmos3OmniModularPipeline.  Instead we access the reasoning
-    tower (a Qwen-style VLM) directly via the HuggingFace `transformers` library,
-    which is how the official Jetson benchmarks run the reasoner.
+    Cosmos3 is a video diffusion model — it generates pixels, not text.
+    We use CosmosActionCondition(mode="policy", domain_name="av") to get the
+    model's predicted action from the current camera frame, then interpret
+    the action dimensions as navigation signals:
 
-    The transformer inside the pipeline is a `Cosmos3OmniTransformer` whose
-    text generation path is reached by calling `pipe.transformer` with token
-    inputs.  For simplicity we load it as a plain AutoModelForCausalLM so we
-    can use the standard chat-template / generate() interface.
+      AV 9-D action (inferred layout):
+        [0] forward component  (higher = more forward motion predicted)
+        [1] lateral component  (positive = rightward, negative = leftward)
+        [2] yaw component      (positive = turn right)
+
+    reasoning_supervisor → drift direction derived from lateral component
+    reasoning_driver     → vel + radius derived from forward + yaw components
     """
 
-    def __init__(self, model_path: str, mode: str, max_new_tokens: int = 128):
-        self._model_path    = model_path
-        self._mode          = mode   # "reasoning_supervisor" | "reasoning_driver"
-        self._max_new_tokens = max_new_tokens
-        self._model     = None
-        self._processor = None
+    # Thresholds for lateral drift classification
+    _LAT_DEADBAND  = 0.05   # |lat| < this → center
+    _LAT_LARGE     = 0.20   # |lat| > this → hard correction
+
+    # Scale yaw → Roomba radius (mm).  Tune by observation.
+    _YAW_TO_RADIUS = 800.0  # radius = _YAW_TO_RADIUS / |yaw|  (clamped)
+    _MIN_RADIUS    = 200
+    _MAX_RADIUS    = 3000
+    _STRAIGHT      = 32767
+
+    def __init__(self, model_path: str, mode: str):
+        self._model_path = model_path
+        self._mode       = mode   # "reasoning_supervisor" | "reasoning_driver"
+        self._pipe       = None
 
     def load(self) -> None:
-        import torch
-        import transformers
-        from transformers import AutoTokenizer
-
-        log.info("Loading Cosmos3 reasoning model from %s  (transformers %s) …",
-                 self._model_path, transformers.__version__)
-        t0 = time.time()
-
-        _load_kwargs = dict(
-            torch_dtype=torch.bfloat16,
-            device_map="cuda",
-            trust_remote_code=True,
-        )
-
-        self._model         = None
-        self._processor     = None
-        self._use_processor = False
-
-        # ── Attempt 1: AutoModelForCausalLM ──────────────────────────────────
-        # With trust_remote_code=True this resolves the model_type from config
-        # and loads Cosmos3EdgeForCausalLM (or equivalent) which HAS .generate().
-        try:
-            from transformers import AutoModelForCausalLM
-            self._model = AutoModelForCausalLM.from_pretrained(
-                self._model_path, **_load_kwargs)
-            self._use_processor = False
-            log.info("Loaded via AutoModelForCausalLM (class=%s)",
-                     type(self._model).__name__)
-        except Exception as e:
-            log.warning("AutoModelForCausalLM failed (%s)", e)
-
-        # ── Attempt 2: AutoModelForVision2Seq + AutoProcessor ────────────────
-        if self._model is None:
-            try:
-                from transformers import AutoModelForVision2Seq, AutoProcessor
-                self._processor = AutoProcessor.from_pretrained(
-                    self._model_path, trust_remote_code=True)
-                self._model = AutoModelForVision2Seq.from_pretrained(
-                    self._model_path, **_load_kwargs)
-                self._use_processor = True
-                log.info("Loaded via AutoModelForVision2Seq + AutoProcessor (class=%s)",
-                         type(self._model).__name__)
-            except Exception as e:
-                log.warning("AutoModelForVision2Seq failed (%s)", e)
-
-        # ── Attempt 3: AutoModel (last resort — likely gives Cosmos3EdgeModel
-        #    which has no .generate(); we'll rely on the greedy B3 path) ──────
-        if self._model is None:
-            from transformers import AutoModel
-            self._model = AutoModel.from_pretrained(
-                self._model_path, **_load_kwargs)
-            self._use_processor = False
-            log.info("Loaded via AutoModel (class=%s) — no .generate() expected",
-                     type(self._model).__name__)
-
-        self._tokenizer = AutoTokenizer.from_pretrained(
-            self._model_path, trust_remote_code=True)
-        self._model.eval()
-
-        # ── Discover the actual generatable LM ───────────────────────────────
-        # Cosmos3EdgeModel nests custom modules: Cosmos3EdgeModel →
-        # Cosmos3EdgeTextModel → ??? → actual causal LM with .generate().
-        # Walk the sub-module tree (BFS) to find the first module whose class
-        # name looks like a standard HF causal LM.
-        self._lm = self._find_generatable_lm(self._model)
-        if self._lm is not None:
-            log.info("Found generatable LM: %s", type(self._lm).__name__)
-        else:
-            log.warning("Could not find a generatable sub-LM; "
-                        "will attempt forward() + logit greedy decode")
-
-        log.info("ReasoningEngine ready (mode=%s) in %.1fs", self._mode,
-                 time.time() - t0)
-
-    @staticmethod
-    def _find_generatable_lm(root):
-        """
-        BFS through sub-modules to find the first one that has .generate().
-        Prefers modules whose class name contains 'Qwen', 'Llama', 'Mistral',
-        'Causal', 'LM', 'GPT' — typical HF causal LM names.
-        Logs the module tree to help debug future changes.
-        """
-        from collections import deque
-        preferred_keywords = ("qwen", "llama", "mistral", "causallm", "gpt",
-                              "falcon", "gemma", "phi", "causal")
-
-        candidates = []
-        queue = deque([(name, module)
-                       for name, module in root.named_children()])
-        visited = set()
-
-        while queue:
-            name, mod = queue.popleft()
-            mid = id(mod)
-            if mid in visited:
-                continue
-            visited.add(mid)
-
-            cname = type(mod).__name__.lower()
-            has_gen = callable(getattr(mod, "generate", None))
-
-            log.info("  sub-module %-40s  has_generate=%s  class=%s",
-                     name, has_gen, type(mod).__name__)
-
-            if has_gen:
-                score = sum(1 for k in preferred_keywords if k in cname)
-                candidates.append((score, name, mod))
-
-            for child_name, child in mod.named_children():
-                queue.append((f"{name}.{child_name}", child))
-
-        if not candidates:
-            return None
-        # Pick highest-scoring (most LLM-like name); tie-break by order (first)
-        candidates.sort(key=lambda x: -x[0])
-        chosen_score, chosen_name, chosen_mod = candidates[0]
-        log.info("Selected generatable LM: %s (%s)", chosen_name,
-                 type(chosen_mod).__name__)
-        return chosen_mod
+        self._pipe = _load_pipeline(self._model_path)
+        log.info("ReasoningEngine ready (mode=%s)", self._mode)
 
     def infer(self, frame_jpeg: bytes, goal: str) -> dict:
         """
-        Run one reasoning step using Cosmos3's image-to-text capability.
-
-        We use the pipeline in image-to-video mode with num_frames=1 and
-        num_inference_steps=1 (minimum diffusion), then extract the text
-        from the reasoning tower's hidden output via the transformer's
-        generate() interface. If that fails we fall back to prompting the
-        pipeline and parsing any text in the result.
+        Run one inference step.  Returns a supervision or drive dict.
         """
         import torch
         from PIL import Image
+        from diffusers import CosmosActionCondition
 
         t0    = time.time()
         image = Image.open(io.BytesIO(frame_jpeg)).convert("RGB")
 
-        if self._mode == "reasoning_supervisor":
-            system_prompt = _SUPERVISOR_SYSTEM
-            user_prompt   = _SUPERVISOR_PROMPT.format(goal=goal)
-        else:
-            system_prompt = _DRIVER_SYSTEM
-            user_prompt   = _DRIVER_PROMPT.format(goal=goal)
-
-        full_prompt = f"{system_prompt}\n\n{user_prompt}"
-
-        raw_text = self._generate_text(image, full_prompt)
+        result = self._pipe(
+            prompt=goal,
+            action=CosmosActionCondition(
+                mode="policy",
+                chunk_size=8,           # only need first few steps for direction
+                domain_name="av",
+                resolution_tier=480,
+                image=image,
+                view_point="ego_view",
+            ),
+            num_frames=1,
+            height=480,
+            width=832,
+            num_inference_steps=20,    # fewer steps → faster (~8–12s on H100)
+            guidance_scale=1.0,
+            use_system_prompt=False,
+            enable_safety_check=False,
+        )
 
         elapsed = round(time.time() - t0, 3)
-        log.info("Reasoning output (%.2fs): %s", elapsed, raw_text[:200])
 
-        parsed = _parse_json_from_text(raw_text)
+        # Extract action chunk — shape [chunk_size, 9] or None
+        actions = result.action[0].tolist() if (
+            result.action is not None and len(result.action) > 0
+        ) else []
+
+        log.info("ReasoningEngine inference (%.2fs)  actions[0]=%s",
+                 elapsed, actions[0] if actions else "none")
 
         if self._mode == "reasoning_supervisor":
-            return {
-                "type":        "supervision",
-                "drift":       parsed.get("drift", "center"),
-                "drift_mm":    int(parsed.get("drift_mm", 0)),
-                "row_end":     bool(parsed.get("row_end", False)),
-                "observation": parsed.get("observation", raw_text[:200]),
-                "elapsed":     elapsed,
-            }
+            return self._to_supervision(actions, elapsed)
         else:
-            vel    = int(max(0, min(200, parsed.get("velocity", 100))))
-            radius = int(parsed.get("radius", 32767))
+            return self._to_drive(actions, elapsed)
+
+    def _to_supervision(self, actions: list, elapsed: float) -> dict:
+        """Convert action chunk to supervision signal."""
+        if not actions:
             return {
-                "type":      "drive",
-                "velocity":  vel,
-                "radius":    radius,
-                "reasoning": parsed.get("reasoning", raw_text[:200]),
-                "elapsed":   elapsed,
+                "type": "supervision", "drift": "center", "drift_mm": 0,
+                "row_end": False, "observation": "no action predicted",
+                "elapsed": elapsed,
             }
 
-    def _generate_text(self, image, prompt: str) -> str:
-        """
-        Generate text from either:
-          (A) A standard HF VLM loaded via AutoModelForVision2Seq — call .generate() directly
-              after processing through AutoProcessor.  (_use_processor=True)
-          (B) Cosmos3EdgeModel loaded via AutoModel — no top-level .generate(); instead use:
-                .language_model  — the causal LM with .generate()
-                .visual          — vision encoder
-                .projector       — vision→language projection
-              (_use_processor=False)
-        """
-        import torch
+        # Average lateral over first 4 steps for stability
+        n   = min(4, len(actions))
+        lat = sum(float(a[1]) for a in actions[:n] if len(a) > 1) / n
+        fwd = float(actions[0][0]) if len(actions[0]) > 0 else 1.0
 
-        device = next(self._model.parameters()).device
-        dtype  = next(self._model.parameters()).dtype
+        if abs(lat) < self._LAT_DEADBAND:
+            drift = "center"
+        elif lat < 0:
+            drift = "left"
+        else:
+            drift = "right"
 
-        # ── Apply chat template if the tokenizer supports it ──────────────────
-        # This ensures the model sees the correct special tokens (im_start etc.)
-        if hasattr(self._tokenizer, "apply_chat_template"):
-            try:
-                messages = [
-                    {"role": "system", "content": prompt.split("\n\n")[0]},
-                    {"role": "user",   "content": "\n\n".join(prompt.split("\n\n")[1:])
-                                                  or prompt},
-                ]
-                prompt = self._tokenizer.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=True)
-            except Exception:
-                pass  # keep original prompt if template fails
+        drift_mm  = int(lat * 500)   # rough mm estimate (tune as needed)
+        row_end   = fwd < 0.05       # very low forward motion → path ending
+        obs       = (f"drift={drift} lat={lat:.3f} fwd={fwd:.3f} "
+                     f"({'row end' if row_end else 'path clear'})")
 
-        # ── Path A: standard VLM (AutoModelForVision2Seq + AutoProcessor) ─────
-        if self._use_processor and self._processor is not None:
-            try:
-                messages = [
-                    {"role": "user", "content": [
-                        {"type": "image", "image": image},
-                        {"type": "text",  "text": prompt},
-                    ]},
-                ]
-                text_input = self._processor.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=True)
-                inputs = self._processor(
-                    text=[text_input], images=[image], return_tensors="pt"
-                ).to(device)
-                with torch.no_grad():
-                    out_ids = self._model.generate(
-                        **inputs,
-                        max_new_tokens=self._max_new_tokens,
-                        do_sample=False,
-                        pad_token_id=self._tokenizer.eos_token_id,
-                    )
-                new_tokens = out_ids[0][inputs["input_ids"].shape[1]:]
-                return self._tokenizer.decode(
-                    new_tokens, skip_special_tokens=True).strip()
-            except Exception as e:
-                log.warning("AutoModelForVision2Seq.generate() failed (%s) — "
-                            "falling back to Cosmos3EdgeModel path", e)
+        return {
+            "type":        "supervision",
+            "drift":       drift,
+            "drift_mm":    drift_mm,
+            "row_end":     row_end,
+            "observation": obs,
+            "elapsed":     elapsed,
+        }
 
-        # ── Path B: Cosmos3EdgeModel (custom nested modules) ─────────────────
-        # self._lm is found by BFS in load() — the deepest sub-module with
-        # .generate().  If none was found we fall through to a greedy-decode
-        # forward() loop as last resort.
-        text_inputs = self._tokenizer(
-            prompt,
-            return_tensors="pt",
-            truncation=True,
-            max_length=512,
-            add_special_tokens=True,
-        ).to(device)
-        input_ids = text_inputs["input_ids"]
+    def _to_drive(self, actions: list, elapsed: float) -> dict:
+        """Convert action chunk to vel + radius drive command."""
+        if not actions:
+            return {
+                "type": "drive", "velocity": 0, "radius": self._STRAIGHT,
+                "reasoning": "no action predicted", "elapsed": elapsed,
+            }
 
-        lm = self._lm  # may be None
+        fwd = float(actions[0][0]) if len(actions[0]) > 0 else 0.0
+        yaw = float(actions[0][2]) if len(actions[0]) > 2 else 0.0
 
-        # ── B1: Image-conditioned path ────────────────────────────────────────
-        if lm is not None:
-            try:
-                import torchvision.transforms as T
+        # Map forward component → velocity (0–200 mm/s)
+        vel = int(max(0, min(200, fwd * 200.0)))
 
-                transform = T.Compose([
-                    T.Resize((336, 336)),
-                    T.ToTensor(),
-                    T.Normalize(mean=[0.485, 0.456, 0.406],
-                                std=[0.229, 0.224, 0.225]),
-                ])
-                img_tensor = transform(image).unsqueeze(0).to(device=device, dtype=dtype)
+        # Map yaw → radius
+        if abs(yaw) < 0.02:
+            radius = self._STRAIGHT
+        else:
+            r = int(self._YAW_TO_RADIUS / abs(yaw))
+            r = max(self._MIN_RADIUS, min(self._MAX_RADIUS, r))
+            radius = r if yaw < 0 else -r   # negative yaw = left turn
 
-                with torch.no_grad():
-                    if hasattr(self._model, "get_image_features"):
-                        visual_feats = self._model.get_image_features(img_tensor)
-                    else:
-                        visual_feats = self._model.visual(img_tensor)
-                        if hasattr(self._model, "projector"):
-                            visual_feats = self._model.projector(visual_feats)
+        reasoning = (f"cosmos_driver: fwd={fwd:.3f} yaw={yaw:.3f} "
+                     f"→ vel={vel} radius={radius}")
 
-                embed_fn    = lm.get_input_embeddings()
-                text_embeds = embed_fn(input_ids)
-                combined    = torch.cat([visual_feats, text_embeds], dim=1)
-                attn_mask   = torch.ones(1, combined.shape[1], device=device,
-                                         dtype=torch.long)
-
-                with torch.no_grad():
-                    out_ids = lm.generate(
-                        inputs_embeds=combined,
-                        attention_mask=attn_mask,
-                        max_new_tokens=self._max_new_tokens,
-                        do_sample=False,
-                        pad_token_id=self._tokenizer.eos_token_id,
-                    )
-
-                return self._tokenizer.decode(out_ids[0], skip_special_tokens=True).strip()
-
-            except Exception as e:
-                log.warning("Image-conditioned generate failed (%s) — "
-                            "trying text-only lm.generate()", e)
-
-        # ── B2: Text-only via discovered LM ──────────────────────────────────
-        if lm is not None:
-            try:
-                with torch.no_grad():
-                    out_ids = lm.generate(
-                        input_ids=input_ids,
-                        attention_mask=text_inputs.get("attention_mask"),
-                        max_new_tokens=self._max_new_tokens,
-                        do_sample=False,
-                        pad_token_id=self._tokenizer.eos_token_id,
-                    )
-                new_tokens = out_ids[0][input_ids.shape[1]:]
-                return self._tokenizer.decode(
-                    new_tokens, skip_special_tokens=True).strip()
-            except Exception as e:
-                log.warning("lm.generate() text-only failed (%s) — "
-                            "falling back to greedy forward() loop", e)
-
-        # ── B3: Last-resort greedy decode via model.forward() ─────────────────
-        # Used when no sub-module has .generate().  Apply repetition penalty
-        # manually to avoid "not not not" degenerate loops.
-        log.warning("Using slow greedy forward() decode — "
-                    "consider loading with AutoModelForCausalLM")
-        generated = input_ids.clone()
-        rep_penalty = 1.3   # penalise tokens already seen
-        with torch.no_grad():
-            for _ in range(self._max_new_tokens):
-                out    = self._model(input_ids=generated)
-                logits = out.logits if hasattr(out, "logits") else out[0]
-                next_logits = logits[:, -1, :].clone()   # [1, vocab]
-
-                # Apply repetition penalty: divide logit by penalty for seen tokens
-                for tok_id in set(generated[0].tolist()):
-                    if next_logits[0, tok_id] > 0:
-                        next_logits[0, tok_id] /= rep_penalty
-                    else:
-                        next_logits[0, tok_id] *= rep_penalty
-
-                next_token = next_logits.argmax(dim=-1, keepdim=True)
-                generated  = torch.cat([generated, next_token], dim=1)
-                if next_token.item() in (self._tokenizer.eos_token_id,
-                                         self._tokenizer.pad_token_id or -1):
-                    break
-        new_tokens = generated[0][input_ids.shape[1]:]
-        return self._tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+        return {
+            "type":      "drive",
+            "velocity":  vel,
+            "radius":    radius,
+            "reasoning": reasoning,
+            "elapsed":   elapsed,
+        }
 
 
 # ── Mode 4: AV Policy engine ───────────────────────────────────────────────────
@@ -704,28 +484,6 @@ def _describe_trajectory(actions: list, rank: int) -> str:
     lat = float(actions[0][1]) if len(actions[0]) > 1 else 0.0
     direction = "straight" if abs(lat) < 0.05 else ("left" if lat < 0 else "right")
     return f"rank {rank+1}: {direction} fwd={fwd:.2f} lat={lat:.2f}"
-
-
-# ── JSON parsing helper ────────────────────────────────────────────────────────
-
-def _parse_json_from_text(text: str) -> dict:
-    """Extract the first JSON object from a text string. Returns {} on failure."""
-    text = text.strip()
-    # Try direct parse first
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    # Find first { … } block
-    start = text.find("{")
-    end   = text.rfind("}")
-    if start != -1 and end != -1:
-        try:
-            return json.loads(text[start:end + 1])
-        except json.JSONDecodeError:
-            pass
-    log.warning("Could not parse JSON from model output: %r", text[:300])
-    return {}
 
 
 # ── Per-connection session ─────────────────────────────────────────────────────
