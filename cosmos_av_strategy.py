@@ -341,10 +341,15 @@ class CosmosAvPolicyStrategy(NavigationStrategy):
                                    vel, radius, [action], t0)
                 return
 
-        # ── Chunk exhausted — fire inference request async and return immediately ─
+        # ── Chunk exhausted — stop the Roomba while waiting for the next chunk ──
+        # Reset _last_vel to 0 so the keepalive below sends vel=0 (stopped but
+        # OI-awake) rather than continuing at the last chunk's speed.
+        self._last_vel    = 0
+        self._last_radius = _STRAIGHT
+
+        # Fire inference request async and return immediately.
         # cycle_interval=0.3s means this function is called again in 0.3s.
         # Each call sends a keepalive drive and checks if the response arrived.
-        # This keeps the Roomba watchdog satisfied without a blocking wait.
         if not self._infer_in_flight:
             self._infer_in_flight = True
             self._resp_event.clear()
