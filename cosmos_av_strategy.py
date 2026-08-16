@@ -16,8 +16,7 @@ Action mapping
   remaining 7D  → rotation / other pose components (ignored for Roomba)
 
 The mapping is intentionally simple and will need calibration once you see
-what the model actually outputs on your scene.  Adjust _AV_VEL_SCALE and
-_AV_LAT_SCALE to taste.
+what the model actually outputs on your scene.
 
 Architecture
 ────────────
@@ -65,29 +64,16 @@ _FRAME_BUFFER_LEN = 5       # number of frames kept for each policy call
 _ACTION_HZ        = 5       # rate at which buffered actions are executed
 _CHUNK_SIZE       = 16      # must match --chunk-size on the server
 
-# Action → drive mapping scales (tune after first experiment)
 # AV domain action layout (confirmed from logged output):
-#   [0] x  — forward displacement in metres (~0.01–0.03 per step at walking speed)
-#   [1] y  — lateral displacement in metres (~0.001–0.02, positive=left)
+#   [0] x  — forward displacement in metres
+#   [1] y  — lateral displacement in metres
 #   [2] z  — vertical (ignore for ground robot)
-#   [3–6]  — quaternion [qx, qy, qz, qw] (rotation, use qw~0.96 ≈ ~16° range)
-#   [7]    — velocity (normalised, ~0.94–0.97)
-#   [8]    — steering (normalised, ~-0.01 to 0.01)
-#
-# Tuning: fwd=0.02m/step. We want ~120mm/s on Roomba.
-# Scale: 120 / 0.02 = 6000  (but cap at _MAX_VEL)
-# Lateral: lat=0.01m → radius ~ 1000mm is reasonable
-# Scale: 1000 / 0.01 = 100000 — but deadband filters most of it
-_AV_VEL_SCALE     = 6000.0  # forward metres/step → mm/s
-_AV_LAT_SCALE     = 50000.0 # lateral metres/step → radius mm
-_MAX_VEL          = 200     # mm/s hard cap
-_MIN_VEL          = 80      # mm/s minimum when actions are received (never stop mid-chunk)
-_MIN_RADIUS       = 200     # mm minimum arc radius (prevent spin-in-place)
-_STRAIGHT         = 0x8000  # Roomba "straight" sentinel
-
-# Lateral deadband: treat |lat| < this as straight (metres)
-# AV domain outputs ~0.005m noise on straight paths — deadband must be above that
-_LAT_DEADBAND     = 0.015
+#   [3–6]  — quaternion [qx, qy, qz, qw]
+#   [7]    — normalised velocity  (0–1)  → mapped to 0–100 mm/s
+#   [8]    — normalised steering  (-1–1) → mapped to turn radius mm (no deadband)
+_MAX_VEL      = 100     # mm/s hard cap (user request)
+_MIN_RADIUS   = 150     # mm minimum arc radius (prevent spin-in-place)
+_STRAIGHT     = 0x8000  # Roomba "straight" sentinel
 
 
 class _ConnState(Enum):
@@ -128,38 +114,29 @@ def _annotate_frame(frame: np.ndarray, strategy_name: str, goal: str,
     return out
 
 
-def _av_action_to_drive(action: list, min_vel: int = _MIN_VEL) -> tuple[int, int]:
+def _av_action_to_drive(action: list) -> tuple[int, int]:
     """
     Map one 9D AV action vector to (velocity mm/s, radius mm).
 
-    The AV domain was trained on car dashcam data so action values are
-    normalised pose deltas — typically very small (0.001–0.1 range).
-    We log the raw values so you can tune _AV_VEL_SCALE and _AV_LAT_SCALE.
-
-    Assumed dims: [fwd, lat, z, qx, qy, qz, qw, vel, steer]
+    action[7] = normalised velocity  (0–1)  → 0–100 mm/s
+    action[8] = normalised steering  (-1–1) → radius mm, no deadband
+                positive = left, negative = right
     """
-    fwd = float(action[0]) if len(action) > 0 else 0.0
-    lat = float(action[1]) if len(action) > 1 else 0.0
+    vel_norm   = float(action[7]) if len(action) > 7 else 0.0
+    steer_norm = float(action[8]) if len(action) > 8 else 0.0
 
-    log.debug("action raw: fwd=%.4f lat=%.4f  all=%s",
-              fwd, lat, [f"{x:.3f}" for x in action])
+    log.debug("action raw: vel_norm=%.4f steer_norm=%.4f  all=%s",
+              vel_norm, steer_norm, [f"{x:.3f}" for x in action])
 
-    # Scale forward component → velocity
-    vel_raw = fwd * _AV_VEL_SCALE
-    if vel_raw >= 20:
-        vel = int(min(_MAX_VEL, vel_raw))
-    elif vel_raw > 0:
-        vel = min_vel   # small positive → minimum
-    else:
-        vel = 0         # negative or zero → stop
+    vel = int(min(_MAX_VEL, max(0, vel_norm * _MAX_VEL)))
 
-    if abs(lat) < _LAT_DEADBAND:
+    if steer_norm == 0.0:
         radius = _STRAIGHT
     else:
-        # Positive lat = left in typical ego-frame conventions
-        raw_r = int(_AV_LAT_SCALE / abs(lat))
-        raw_r = max(_MIN_RADIUS, raw_r)
-        radius = raw_r if lat > 0 else -raw_r
+        # Larger |steer_norm| → tighter turn (smaller radius)
+        raw_r  = int(_MIN_RADIUS / abs(steer_norm))
+        raw_r  = max(_MIN_RADIUS, raw_r)
+        radius = raw_r if steer_norm > 0 else -raw_r
 
     return vel, radius
 
@@ -411,7 +388,7 @@ class CosmosAvPolicyStrategy(NavigationStrategy):
         log.info("Step %d | received %d actions  cloud=%.2fs  total=%.2fs",
                  step, len(actions), cloud_s, elapsed)
 
-        # Log raw values — needed for tuning _AV_VEL_SCALE / _AV_LAT_SCALE
+        # Log raw action values for inspection
         for i, a in enumerate(actions):
             vel_i, r_i = _av_action_to_drive(a)
             log.info("  action[%02d]: raw=%s → vel=%d r=%s",
