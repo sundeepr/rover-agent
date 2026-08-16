@@ -28,15 +28,24 @@ Supports four operating modes selected at startup via --mode:
 
 Setup (cloud GPU — H100 / A100 / B200 recommended)
 ────────────────────────────────────────────────────
-    pip install diffusers transformers torch accelerate websockets
+    pip install diffusers torch accelerate websockets openai
 
-    # reasoning modes:
+    # reasoning modes — requires vLLM serving Cosmos3-Edge for text output:
+    #
+    #   docker pull vllm/vllm-openai:cosmos3
+    #   docker run --gpus all -p 8000:8000 vllm/vllm-openai:cosmos3 \\
+    #       vllm serve nvidia/Cosmos3-Edge \\
+    #       --host 0.0.0.0 --port 8000 \\
+    #       --max-model-len 131072 \\
+    #       --allowed-local-media-path / \\
+    #       --mm-processor-kwargs '{"do_resize":true,"min_pixels":4096,"max_pixels":16777216}'
+    #
     python cosmos_cloud_server.py \\
         --mode reasoning_supervisor \\
-        --model-path nvidia/Cosmos3-Edge \\
+        --vllm-url http://localhost:8000 \\
         --host 0.0.0.0 --port 8767
 
-    # av policy:
+    # av policy (uses Cosmos3OmniPipeline + CosmosActionCondition):
     python cosmos_cloud_server.py \\
         --mode av_policy \\
         --model-path nvidia/Cosmos3-Edge \\
@@ -148,172 +157,143 @@ def _load_pipeline(model_path: str):
 
 # ── Mode 1 & 2: Reasoning engine ──────────────────────────────────────────────
 #
-# Cosmos3OmniPipeline is a VIDEO DIFFUSION model — it generates pixels, not
-# text.  There is no text output path.
+# Cosmos3-Edge is an omni-model: it does text, video, image, and action.
+# Text output (reasoning) is accessed via vLLM serving Cosmos3-Edge with an
+# OpenAI-compatible chat completions API.  The diffusers pipeline handles
+# video/action modes (options 4 & 6).
 #
-# For navigation reasoning we use CosmosActionCondition(mode="policy") to get
-# the model's action prediction from the current frame, then interpret the
-# action dimensions as navigation signals:
+# Start vLLM before launching this server in reasoning mode:
 #
-#   AV 9-D action layout (inferred from Cosmos3 AV domain):
-#     [0] forward velocity  (positive = forward)
-#     [1] lateral offset    (positive = right of path, negative = left)
-#     [2] yaw rate          (positive = turn right)
-#     [3–8] other dims (height, orientation, etc.) — not used here
-#
-# reasoning_supervisor  →  interprets lateral offset as drift direction
-# reasoning_driver      →  maps forward + yaw directly to vel + radius
+#   docker pull vllm/vllm-openai:cosmos3
+#   docker run --gpus all -p 8000:8000 vllm/vllm-openai:cosmos3 \
+#       vllm serve nvidia/Cosmos3-Edge \
+#       --host 0.0.0.0 --port 8000 \
+#       --max-model-len 131072 \
+#       --allowed-local-media-path / \
+#       --mm-processor-kwargs '{"do_resize":true,"min_pixels":4096,"max_pixels":16777216}'
+
+_SUPERVISOR_PROMPT = """\
+You are a navigation assistant for a Roomba robot with a forward-facing camera.
+The robot's goal is: "{goal}"
+
+Look at the camera image and respond with ONLY a JSON object, no other text:
+{{"drift": "left"|"right"|"center", "drift_mm": <int, lateral offset mm positive=right>, "row_end": <true|false>, "observation": "<one sentence>"}}"""
+
+_DRIVER_PROMPT = """\
+You are the navigation controller for a Roomba robot.
+drive_raw(velocity mm/s 0-200, radius mm: 32767=straight, positive=left, negative=right, 1=spin).
+The robot's goal is: "{goal}"
+
+Look at the camera image and respond with ONLY a JSON object, no other text:
+{{"velocity": <int 0-200>, "radius": <int>, "reasoning": "<one sentence>"}}"""
+
+
+def _parse_json(text: str) -> dict:
+    """Extract the first JSON object from model output."""
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end != -1:
+        try:
+            return json.loads(text[start:end + 1])
+        except json.JSONDecodeError:
+            pass
+    log.warning("Could not parse JSON from: %r", text[:300])
+    return {}
 
 
 class ReasoningEngine:
     """
-    Options 1 & 2: Navigation reasoning via Cosmos3OmniPipeline action prediction.
+    Options 1 & 2: Text reasoning via vLLM serving Cosmos3-Edge.
 
-    Cosmos3 is a video diffusion model — it generates pixels, not text.
-    We use CosmosActionCondition(mode="policy", domain_name="av") to get the
-    model's predicted action from the current camera frame, then interpret
-    the action dimensions as navigation signals:
+    Cosmos3-Edge is an omni-model — it outputs text, video, image, and actions.
+    Text output is accessed via vLLM's OpenAI-compatible chat completions API
+    with multimodal (image + text) messages.
 
-      AV 9-D action (inferred layout):
-        [0] forward component  (higher = more forward motion predicted)
-        [1] lateral component  (positive = rightward, negative = leftward)
-        [2] yaw component      (positive = turn right)
-
-    reasoning_supervisor → drift direction derived from lateral component
-    reasoning_driver     → vel + radius derived from forward + yaw components
+    The vLLM server must be running before this engine is used:
+        vllm serve nvidia/Cosmos3-Edge --port 8000 ...
     """
 
-    # Thresholds for lateral drift classification
-    _LAT_DEADBAND  = 0.05   # |lat| < this → center
-    _LAT_LARGE     = 0.20   # |lat| > this → hard correction
-
-    # Scale yaw → Roomba radius (mm).  Tune by observation.
-    _YAW_TO_RADIUS = 800.0  # radius = _YAW_TO_RADIUS / |yaw|  (clamped)
-    _MIN_RADIUS    = 200
-    _MAX_RADIUS    = 3000
-    _STRAIGHT      = 32767
-
-    def __init__(self, model_path: str, mode: str):
-        self._model_path = model_path
-        self._mode       = mode   # "reasoning_supervisor" | "reasoning_driver"
-        self._pipe       = None
+    def __init__(self, mode: str, vllm_url: str = "http://localhost:8000",
+                 max_tokens: int = 256):
+        self._mode      = mode   # "reasoning_supervisor" | "reasoning_driver"
+        self._vllm_url  = vllm_url.rstrip("/")
+        self._max_tokens = max_tokens
+        self._model_id  = None   # resolved at load() from vLLM /v1/models
 
     def load(self) -> None:
-        self._pipe = _load_pipeline(self._model_path)
+        """Verify vLLM is reachable and resolve the served model ID."""
+        try:
+            import openai
+        except ImportError:
+            raise RuntimeError("pip install openai  — required for reasoning modes")
+
+        client = openai.OpenAI(api_key="EMPTY", base_url=f"{self._vllm_url}/v1")
+        try:
+            models = client.models.list()
+            self._model_id = models.data[0].id
+            log.info("ReasoningEngine connected to vLLM  model=%s  url=%s",
+                     self._model_id, self._vllm_url)
+        except Exception as e:
+            raise RuntimeError(
+                f"Cannot reach vLLM at {self._vllm_url}: {e}\n"
+                "Start vLLM first:  vllm serve nvidia/Cosmos3-Edge --port 8000 ..."
+            ) from e
+
         log.info("ReasoningEngine ready (mode=%s)", self._mode)
 
     def infer(self, frame_jpeg: bytes, goal: str) -> dict:
-        """
-        Run one inference step.  Returns a supervision or drive dict.
-        """
-        import torch
-        from PIL import Image
-        from diffusers import CosmosActionCondition
+        import openai
 
-        t0    = time.time()
-        image = Image.open(io.BytesIO(frame_jpeg)).convert("RGB")
+        t0 = time.time()
 
-        result = self._pipe(
-            prompt=goal,
-            action=CosmosActionCondition(
-                mode="policy",
-                chunk_size=8,           # only need first few steps for direction
-                domain_name="av",
-                resolution_tier=480,
-                image=image,
-                view_point="ego_view",
-            ),
-            num_frames=1,
-            height=480,
-            width=832,
-            num_inference_steps=20,    # fewer steps → faster (~8–12s on H100)
-            guidance_scale=1.0,
-            use_system_prompt=False,
-            enable_safety_check=False,
+        # Encode frame as base64 data URL
+        img_b64  = base64.b64encode(frame_jpeg).decode()
+        data_url = f"data:image/jpeg;base64,{img_b64}"
+
+        prompt = (_SUPERVISOR_PROMPT if self._mode == "reasoning_supervisor"
+                  else _DRIVER_PROMPT).format(goal=goal)
+
+        client = openai.OpenAI(api_key="EMPTY", base_url=f"{self._vllm_url}/v1")
+        response = client.chat.completions.create(
+            model=self._model_id,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                    {"type": "text",      "text": prompt},
+                ],
+            }],
+            max_tokens=self._max_tokens,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
 
-        elapsed = round(time.time() - t0, 3)
+        raw_text = response.choices[0].message.content or ""
+        elapsed  = round(time.time() - t0, 3)
+        log.info("Reasoning (%.2fs): %s", elapsed, raw_text[:200])
 
-        # Extract action chunk — shape [chunk_size, 9] or None
-        actions = result.action[0].tolist() if (
-            result.action is not None and len(result.action) > 0
-        ) else []
-
-        log.info("ReasoningEngine inference (%.2fs)  actions[0]=%s",
-                 elapsed, actions[0] if actions else "none")
+        parsed = _parse_json(raw_text)
 
         if self._mode == "reasoning_supervisor":
-            return self._to_supervision(actions, elapsed)
-        else:
-            return self._to_drive(actions, elapsed)
-
-    def _to_supervision(self, actions: list, elapsed: float) -> dict:
-        """Convert action chunk to supervision signal."""
-        if not actions:
             return {
-                "type": "supervision", "drift": "center", "drift_mm": 0,
-                "row_end": False, "observation": "no action predicted",
-                "elapsed": elapsed,
+                "type":        "supervision",
+                "drift":       parsed.get("drift", "center"),
+                "drift_mm":    int(parsed.get("drift_mm", 0)),
+                "row_end":     bool(parsed.get("row_end", False)),
+                "observation": parsed.get("observation", raw_text[:200]),
+                "elapsed":     elapsed,
             }
-
-        # Average lateral over first 4 steps for stability
-        n   = min(4, len(actions))
-        lat = sum(float(a[1]) for a in actions[:n] if len(a) > 1) / n
-        fwd = float(actions[0][0]) if len(actions[0]) > 0 else 1.0
-
-        if abs(lat) < self._LAT_DEADBAND:
-            drift = "center"
-        elif lat < 0:
-            drift = "left"
         else:
-            drift = "right"
-
-        drift_mm  = int(lat * 500)   # rough mm estimate (tune as needed)
-        row_end   = fwd < 0.05       # very low forward motion → path ending
-        obs       = (f"drift={drift} lat={lat:.3f} fwd={fwd:.3f} "
-                     f"({'row end' if row_end else 'path clear'})")
-
-        return {
-            "type":        "supervision",
-            "drift":       drift,
-            "drift_mm":    drift_mm,
-            "row_end":     row_end,
-            "observation": obs,
-            "elapsed":     elapsed,
-        }
-
-    def _to_drive(self, actions: list, elapsed: float) -> dict:
-        """Convert action chunk to vel + radius drive command."""
-        if not actions:
             return {
-                "type": "drive", "velocity": 0, "radius": self._STRAIGHT,
-                "reasoning": "no action predicted", "elapsed": elapsed,
+                "type":      "drive",
+                "velocity":  int(max(0, min(200, parsed.get("velocity", 100)))),
+                "radius":    int(parsed.get("radius", 32767)),
+                "reasoning": parsed.get("reasoning", raw_text[:200]),
+                "elapsed":   elapsed,
             }
-
-        fwd = float(actions[0][0]) if len(actions[0]) > 0 else 0.0
-        yaw = float(actions[0][2]) if len(actions[0]) > 2 else 0.0
-
-        # Map forward component → velocity (0–200 mm/s)
-        vel = int(max(0, min(200, fwd * 200.0)))
-
-        # Map yaw → radius
-        if abs(yaw) < 0.02:
-            radius = self._STRAIGHT
-        else:
-            r = int(self._YAW_TO_RADIUS / abs(yaw))
-            r = max(self._MIN_RADIUS, min(self._MAX_RADIUS, r))
-            radius = r if yaw < 0 else -r   # negative yaw = left turn
-
-        reasoning = (f"cosmos_driver: fwd={fwd:.3f} yaw={yaw:.3f} "
-                     f"→ vel={vel} radius={radius}")
-
-        return {
-            "type":      "drive",
-            "velocity":  vel,
-            "radius":    radius,
-            "reasoning": reasoning,
-            "elapsed":   elapsed,
-        }
 
 
 # ── Mode 4: AV Policy engine ───────────────────────────────────────────────────
@@ -324,10 +304,7 @@ class AvPolicyEngine:
     a 16-step action chunk from a short video clip.
     """
 
-    # How many conditioning frames to pass (keep small for latency)
-    NUM_COND_FRAMES = 5
-
-    def __init__(self, model_path: str, chunk_size: int = 16):
+    def __init__(self, model_path: str, chunk_size: int = 5):
         self._model_path = model_path
         self._chunk_size = chunk_size
         self._pipe       = None
@@ -350,7 +327,7 @@ class AvPolicyEngine:
         # Build PIL frame list (use last NUM_COND_FRAMES)
         pil_frames = [
             Image.open(io.BytesIO(j)).convert("RGB")
-            for j in frames_jpeg[-self.NUM_COND_FRAMES:]
+            for j in frames_jpeg[-self._chunk_size:]
         ]
 
         result = self._pipe(
@@ -611,14 +588,18 @@ def main() -> None:
                         help="Trajectory samples for trajectory_ranking mode (default 5)")
     parser.add_argument("--chunk-size",     default=16,  type=int,
                         help="Action chunk size for policy modes (default 16)")
-    parser.add_argument("--max-new-tokens", default=128, type=int,
-                        help="Max tokens to generate in reasoning modes (default 128)")
+    parser.add_argument("--vllm-url", default="http://localhost:8000",
+                        help="Base URL of the vLLM server for reasoning modes "
+                             "(default: http://localhost:8000)")
+    parser.add_argument("--max-tokens", default=256, type=int,
+                        help="Max tokens to generate in reasoning modes (default 256)")
     args = parser.parse_args()
 
     # Instantiate the right engine
     if args.mode in ("reasoning_supervisor", "reasoning_driver"):
-        engine = ReasoningEngine(args.model_path, args.mode,
-                                 max_new_tokens=args.max_new_tokens)
+        engine = ReasoningEngine(args.mode,
+                                 vllm_url=args.vllm_url,
+                                 max_tokens=args.max_tokens)
     elif args.mode == "av_policy":
         engine = AvPolicyEngine(args.model_path, chunk_size=args.chunk_size)
     elif args.mode == "trajectory_ranking":
