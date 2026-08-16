@@ -215,71 +215,83 @@ def _parse_json(text: str) -> dict:
 
 class ReasoningEngine:
     """
-    Options 1 & 2: Text reasoning via vLLM serving Cosmos3-Edge.
+    Options 1 & 2: Text reasoning via Cosmos3-Edge, run in-process with
+    transformers (eager mode) — NOT via vLLM.
 
-    Cosmos3-Edge is an omni-model — it outputs text, video, image, and actions.
-    Text output is accessed via vLLM's OpenAI-compatible chat completions API
-    with multimodal (image + text) messages.
-
-    The vLLM server must be running before this engine is used:
-        vllm serve nvidia/Cosmos3-Edge --port 8000 ...
+    vLLM 0.27.1's bundled Cosmos3-Edge multimodal preprocessing code has
+    multiple compatibility bugs against the installed transformers release
+    (stale import path for get_image_size, a changed Qwen3VLVideoProcessor
+    .resize() signature, and a frame-count shape mismatch in how the video
+    batch is flattened before resize) — three separate version-skew bugs
+    surfaced in a row trying to get `vllm serve` working here. Rather than
+    keep patching vendored vLLM internals we don't fully control, this loads
+    the reasoner directly via transformers' AutoModelForImageTextToText,
+    which is NVIDIA's own benchmarked path for this: the Cosmos3-Edge model
+    card's PBR section reports "Embedded-platform eager Transformers
+    benchmarks" specifically for Jetson AGX Orin (12.3 tok/s decode) as a
+    supported configuration, separate from the vLLM serving benchmarks.
+    Verified locally with the model's own assets/example_reasoning_prompt.json
+    + example_reasoning_input.png fixtures: 12.1 tok/s, coherent output.
     """
 
-    def __init__(self, mode: str, vllm_url: str = "http://localhost:8000",
+    def __init__(self, mode: str, model_path: str = "nvidia/Cosmos3-Edge",
                  max_tokens: int = 256):
-        self._mode      = mode   # "reasoning_supervisor" | "reasoning_driver"
-        self._vllm_url  = vllm_url.rstrip("/")
+        self._mode       = mode   # "reasoning_supervisor" | "reasoning_driver"
+        self._model_path = model_path
         self._max_tokens = max_tokens
-        self._model_id  = None   # resolved at load() from vLLM /v1/models
+        self._processor  = None
+        self._model      = None
 
     def load(self) -> None:
-        """Verify vLLM is reachable and resolve the served model ID."""
-        try:
-            import openai
-        except ImportError:
-            raise RuntimeError("pip install openai  — required for reasoning modes")
+        """Load the Cosmos3-Edge reasoner (processor + model) in-process."""
+        import torch
+        from transformers import AutoModelForImageTextToText, AutoProcessor
 
-        client = openai.OpenAI(api_key="EMPTY", base_url=f"{self._vllm_url}/v1")
-        try:
-            models = client.models.list()
-            self._model_id = models.data[0].id
-            log.info("ReasoningEngine connected to vLLM  model=%s  url=%s",
-                     self._model_id, self._vllm_url)
-        except Exception as e:
-            raise RuntimeError(
-                f"Cannot reach vLLM at {self._vllm_url}: {e}\n"
-                "Start vLLM first:  vllm serve nvidia/Cosmos3-Edge --port 8000 ..."
-            ) from e
-
-        log.info("ReasoningEngine ready (mode=%s)", self._mode)
+        log.info("Loading Cosmos3-Edge reasoner from %s …", self._model_path)
+        t0 = time.time()
+        self._processor = AutoProcessor.from_pretrained(
+            self._model_path, trust_remote_code=True)
+        self._model = AutoModelForImageTextToText.from_pretrained(
+            self._model_path, dtype=torch.bfloat16, device_map="cuda",
+            trust_remote_code=True)
+        log.info("ReasoningEngine ready (mode=%s) in %.1fs",
+                  self._mode, time.time() - t0)
 
     def infer(self, frame_jpeg: bytes, goal: str) -> dict:
-        import openai
+        import torch
+        from PIL import Image
 
         t0 = time.time()
 
-        # Encode frame as base64 data URL
-        img_b64  = base64.b64encode(frame_jpeg).decode()
-        data_url = f"data:image/jpeg;base64,{img_b64}"
+        image = Image.open(io.BytesIO(frame_jpeg)).convert("RGB")
 
         prompt = (_SUPERVISOR_PROMPT if self._mode == "reasoning_supervisor"
                   else _DRIVER_PROMPT).format(goal=goal)
 
-        client = openai.OpenAI(api_key="EMPTY", base_url=f"{self._vllm_url}/v1")
-        response = client.chat.completions.create(
-            model=self._model_id,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": data_url}},
-                    {"type": "text",      "text": prompt},
-                ],
-            }],
-            max_tokens=self._max_tokens,
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-        )
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image},
+                {"type": "text",  "text": prompt},
+            ],
+        }]
 
-        raw_text = response.choices[0].message.content or ""
+        inputs = self._processor.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+            enable_thinking=False,
+        ).to(self._model.device)
+
+        with torch.inference_mode():
+            output_ids = self._model.generate(
+                **inputs, max_new_tokens=self._max_tokens)
+
+        new_tokens = output_ids[:, inputs["input_ids"].shape[1]:]
+        raw_text = self._processor.batch_decode(
+            new_tokens, skip_special_tokens=True)[0]
         elapsed  = round(time.time() - t0, 3)
         log.info("Reasoning (%.2fs): %s", elapsed, raw_text[:200])
 
@@ -606,7 +618,7 @@ def main() -> None:
     # Instantiate the right engine
     if args.mode in ("reasoning_supervisor", "reasoning_driver"):
         engine = ReasoningEngine(args.mode,
-                                 vllm_url=args.vllm_url,
+                                 model_path=args.model_path,
                                  max_tokens=args.max_tokens)
     elif args.mode == "av_policy":
         engine = AvPolicyEngine(args.model_path, chunk_size=args.chunk_size)
