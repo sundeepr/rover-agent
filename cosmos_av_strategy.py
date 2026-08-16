@@ -97,57 +97,60 @@ def _draw_trajectory(out: np.ndarray, actions: list, chunk_idx: int) -> None:
     """
     Dead-reckon the remaining action chunk and draw the predicted path.
 
-    The robot starts at the bottom-center of the frame, heading straight up.
-    Each action advances the pose by vel_norm steps and turns by steer_norm.
+    chunk_idx is the index of the *next* action to execute (already incremented).
+    So actions[chunk_idx-1] is the one currently running.
 
-    Colours:
-      green  — actions already executed (behind current position)
-      yellow — next action (current)
-      cyan   — future actions in chunk
+    Colours (BGR):
+      green  (0,200,0)    — already executed
+      yellow (0,255,255)  — currently executing (chunk_idx-1)
+      white  (255,255,255)— upcoming actions
     """
     h, w = out.shape[:2]
-    # Robot starts at bottom-center, heading up (−90° in image coords)
-    px, py   = float(w // 2), float(h - 20)
-    heading  = -math.pi / 2   # radians, screen coords (y flips)
 
-    # pixels per mm at a nominal scale — tune to taste
-    # At 100mm/s × 0.3s/step the robot moves ~30mm per action.
-    # We want the full 16-step path to occupy ~40% of frame height.
-    scale = (h * 0.40) / (16 * 30.0)
+    # Robot starts at bottom-center, heading straight up in image coords
+    px, py  = float(w // 2), float(h - 20)
+    heading = -math.pi / 2   # up = negative y in screen coords
+
+    # Scale: action[7] ≈ 0.97 → 97mm/step at 0.3s/cycle.
+    # Amplify steer so small values (0.003–0.03) produce visible curves.
+    # Want full 16-step path to fill ~50% of frame height.
+    step_px   = (h * 0.50) / 16.0          # pixels per action step
+    steer_amp = 30.0                         # amplify steer_norm for visibility
 
     prev = (int(px), int(py))
     for i, action in enumerate(actions):
-        vel_norm   = float(action[7]) if len(action) > 7 else 0.0
         steer_norm = float(action[8]) if len(action) > 8 else 0.0
 
-        # Step distance in pixels
-        dist = vel_norm * 100.0 * scale   # vel_norm*100 mm → pixels
+        # Amplified heading change per step
+        heading += steer_norm * steer_amp * (math.pi / 180.0)
 
-        # Turn: steer_norm maps −1..1 to roughly ±45°/step
-        heading += steer_norm * 0.5
-
-        nx = px + dist * math.cos(heading)
-        ny = py + dist * math.sin(heading)
+        nx = px + step_px * math.cos(heading)
+        ny = py + step_px * math.sin(heading)
         pt = (int(nx), int(ny))
 
-        if i < chunk_idx:
-            color = (0, 180, 0)       # green — already executed
-        elif i == chunk_idx:
-            color = (0, 255, 255)     # yellow — current action
+        # chunk_idx is already incremented past the running action
+        if i < chunk_idx - 1:
+            color     = (0, 200, 0)       # BGR green  — done
+            thickness = 1
+        elif i == chunk_idx - 1:
+            color     = (0, 255, 255)     # BGR yellow — current
+            thickness = 3
         else:
-            color = (255, 200, 0)     # cyan — upcoming
+            color     = (255, 255, 255)   # BGR white  — upcoming
+            thickness = 2
 
-        cv2.line(out, prev, pt, (0, 0, 0), 4, cv2.LINE_AA)   # shadow
-        cv2.line(out, prev, pt, color,     2, cv2.LINE_AA)
-        cv2.circle(out, pt, 3, color, -1)
+        cv2.line(out, prev, pt, (0, 0, 0), thickness + 2, cv2.LINE_AA)  # shadow
+        cv2.line(out, prev, pt, color, thickness, cv2.LINE_AA)
+        if i == chunk_idx - 1:
+            cv2.circle(out, pt, 5, (0, 255, 255), -1)   # yellow dot on current
 
         prev = pt
         px, py = nx, ny
 
-    # Draw robot marker at start
+    # Robot marker at origin
     origin = (w // 2, h - 20)
-    cv2.circle(out, origin, 7, (0, 0, 0),   -1)
-    cv2.circle(out, origin, 5, (0, 255, 0), -1)
+    cv2.circle(out, origin, 8, (0, 0, 0),   -1)
+    cv2.circle(out, origin, 6, (0, 255, 0), -1)
 
 
 def _annotate_frame(frame: np.ndarray, strategy_name: str, goal: str,
