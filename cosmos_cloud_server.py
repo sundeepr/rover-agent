@@ -26,8 +26,8 @@ Supports four operating modes selected at startup via --mode:
       all trajectories ranked by score so the rover can pick the best one
       and display all candidates on the UI.
 
-Setup (cloud GPU — H100 / A100 / B200 recommended)
-────────────────────────────────────────────────────
+Setup (Jetson AGX — 64 GB unified memory, ARM64 + integrated GPU)
+──────────────────────────────────────────────────────────────────
     pip install diffusers torch accelerate websockets openai
 
     # reasoning modes — requires vLLM serving Cosmos3-Edge for text output:
@@ -136,7 +136,14 @@ def _decode_jpeg(b64: str):
 
 
 def _load_pipeline(model_path: str):
-    """Load Cosmos3OmniPipeline in bfloat16 on CUDA."""
+    """
+    Load Cosmos3OmniPipeline for Jetson AGX (ARM64 + integrated GPU).
+
+    Jetson-specific choices:
+      - torch.float16 instead of bfloat16 (bfloat16 not supported on Jetson GPU)
+      - .to("cuda") instead of device_map="cuda" (device_map needs accelerate
+        configured for x86; plain .to() works on Jetson)
+    """
     import torch
     from diffusers import Cosmos3OmniPipeline
     from diffusers.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
@@ -145,9 +152,9 @@ def _load_pipeline(model_path: str):
     t0 = time.time()
     pipe = Cosmos3OmniPipeline.from_pretrained(
         model_path,
-        torch_dtype=torch.bfloat16,
-        device_map="cuda",
+        torch_dtype=torch.float16,   # bfloat16 not supported on Jetson GPU
     )
+    pipe.to("cuda")                  # device_map= is x86/accelerate specific
     pipe.scheduler = UniPCMultistepScheduler.from_config(
         pipe.scheduler.config, flow_shift=10.0, use_karras_sigmas=False
     )
