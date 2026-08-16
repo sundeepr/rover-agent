@@ -393,6 +393,7 @@ class CosmosAvPolicyStrategy(NavigationStrategy):
             if self._chunk_idx < len(self._action_chunk):
                 action = self._action_chunk[self._chunk_idx]
                 self._chunk_idx += 1
+                is_last = (self._chunk_idx >= len(self._action_chunk))
                 vel, radius = _av_action_to_drive(action)
                 vel = min(vel, self._max_lin_mm_s)
                 log.info("Step %d | executing chunk action %d/%d  vel=%d r=%s",
@@ -402,6 +403,11 @@ class CosmosAvPolicyStrategy(NavigationStrategy):
                                    and state.operator_until > time.time())
                 if rover_ctrl and not state.paused.is_set() and not operator_active:
                     rover_ctrl.drive_raw(vel, radius)
+                    # Last action in chunk — send stop immediately after so the
+                    # Roomba doesn't coast for the full 0.3s until the next cycle.
+                    if is_last:
+                        rover_ctrl.drive_raw(0, _STRAIGHT)
+                        log.info("Step %d | chunk done — stopping Roomba", step)
                 _pub("executing_chunk", vel, radius,
                      [f"action {self._chunk_idx}/{len(self._action_chunk)}"])
                 self._write_result(state, step, phase, "executing_chunk",
