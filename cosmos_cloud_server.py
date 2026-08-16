@@ -344,12 +344,12 @@ class AvPolicyEngine:
                 mode="policy",
                 chunk_size=self._chunk_size,
                 domain_name="av",
-                resolution_tier=480,
+                resolution_tier=256,   # lowest tier → fastest on Jetson AGX
                 video=pil_frames,
                 view_point="ego_view",
             ),
             fps=5,
-            num_inference_steps=30,
+            num_inference_steps=5,     # 5 steps ~10s on Jetson vs 30 steps ~60s
             guidance_scale=1.0,
             use_system_prompt=False,
             enable_safety_check=False,
@@ -358,7 +358,7 @@ class AvPolicyEngine:
         actions = result.action[0].tolist() if result.action is not None else []
         return {
             "type":    "actions",
-            "actions": actions,   # list of 16 × 9 floats
+            "actions": actions,   # list of chunk_size × 9 floats
             "elapsed": round(time.time() - t0, 3),
         }
 
@@ -371,7 +371,7 @@ class TrajectoryRankingEngine:
     predicted value, and returns all candidates ranked best-first.
     """
 
-    def __init__(self, model_path: str, num_samples: int = 5, chunk_size: int = 16):
+    def __init__(self, model_path: str, num_samples: int = 3, chunk_size: int = 8):
         self._model_path  = model_path
         self._num_samples = num_samples
         self._chunk_size  = chunk_size
@@ -402,12 +402,12 @@ class TrajectoryRankingEngine:
                         mode="policy",
                         chunk_size=self._chunk_size,
                         domain_name="av",
-                        resolution_tier=480,
+                        resolution_tier=256,   # lowest tier → fastest on Jetson AGX
                         image=image,
                         view_point="ego_view",
                     ),
                     fps=5,
-                    num_inference_steps=30,
+                    num_inference_steps=5,     # 5 steps ~10s per sample on Jetson
                     guidance_scale=1.0,
                     use_system_prompt=False,
                     enable_safety_check=False,
