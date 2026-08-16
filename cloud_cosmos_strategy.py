@@ -45,6 +45,7 @@ import base64
 import io
 import json
 import logging
+import math
 import threading
 import time
 from enum import Enum, auto
@@ -76,6 +77,7 @@ _STEER_STRAIGHT    = 0x8000   # 32767
 
 # Default forward velocity (mm/s)
 _DEFAULT_VEL       = 120
+_MIN_VEL           = 100   # minimum velocity for supervisor local steer
 
 
 class _ConnState(Enum):
@@ -95,15 +97,64 @@ def _letterbox(frame: np.ndarray, w: int, h: int) -> np.ndarray:
     return out
 
 
+def _draw_steering_arrow(out: np.ndarray, vel: int, radius: int) -> None:
+    """
+    Draw a steering direction arrow at the bottom-center of the frame.
+
+    Straight ahead  → arrow points straight up
+    Turning left/right → arrow deflects in that direction
+    Arrow length scales with velocity.
+    """
+    h, w = out.shape[:2]
+
+    ox, oy  = w // 2, h - 30          # arrow origin (bottom-center)
+    max_len = h * 0.30                 # max arrow length in pixels
+    length  = max_len * min(vel, 200) / 200.0
+
+    if radius == _STEER_STRAIGHT or radius == 0:
+        angle = -math.pi / 2           # straight up
+    else:
+        # Positive radius = left turn, negative = right turn
+        # Map radius to a heading offset: tighter turn → bigger angle
+        # Clamp to ±75° so the arrow stays on screen
+        max_deflect = math.radians(75)
+        deflect = max_deflect * min(abs(radius), 2000) / 2000.0
+        if radius > 0:
+            angle = -math.pi / 2 - deflect   # left
+        else:
+            angle = -math.pi / 2 + deflect   # right
+
+    tx = int(ox + length * math.cos(angle))
+    ty = int(oy + length * math.sin(angle))
+
+    color = (0, 255, 255)   # yellow
+    # Shaft
+    cv2.line(out, (ox, oy), (tx, ty), (0, 0, 0), 5, cv2.LINE_AA)
+    cv2.line(out, (ox, oy), (tx, ty), color,      3, cv2.LINE_AA)
+    # Arrowhead
+    cv2.arrowedLine(out, (ox, oy), (tx, ty), (0, 0, 0), 5,
+                    cv2.LINE_AA, tipLength=0.3)
+    cv2.arrowedLine(out, (ox, oy), (tx, ty), color,      3,
+                    cv2.LINE_AA, tipLength=0.3)
+    # Robot dot
+    cv2.circle(out, (ox, oy), 8, (0, 0, 0),   -1)
+    cv2.circle(out, (ox, oy), 6, (0, 255, 0), -1)
+
+
 def _annotate_frame(frame: np.ndarray, strategy_name: str, goal: str,
                     vel: int, radius: int, status: str,
                     lines: list[str] | None = None) -> np.ndarray:
     """
-    Draw a HUD overlay on a copy of frame and return it.
+    Draw a HUD overlay and steering arrow on a copy of frame and return it.
     Written to state.llm_frame so the web server shows it in the LLM panel.
     """
     out  = frame.copy()
     h, w = out.shape[:2]
+
+    # Steering arrow (drawn first, HUD text on top)
+    if vel > 0:
+        _draw_steering_arrow(out, vel, radius)
+
     r_str = "straight" if radius == _STEER_STRAIGHT else f"r={radius}mm"
 
     overlay_lines = [
@@ -402,7 +453,8 @@ class CosmosReasoningSupervisorStrategy(_CosmosWebSocketMixin, NavigationStrateg
         else:
             radius = _STEER_LEFT_SOFT if abs(offset) < w * 0.15 else _STEER_LEFT_HARD
 
-        return self._max_lin_mm_s, radius
+        vel = max(_MIN_VEL, self._max_lin_mm_s)
+        return vel, radius
 
     def _run_supervision(self, frame: np.ndarray, goal: str) -> None:
         """Background thread: send frame to Cosmos, apply correction."""
@@ -615,6 +667,9 @@ class CosmosReasoningDriverStrategy(_CosmosWebSocketMixin, NavigationStrategy):
                            and state.operator_until > time.time())
         if rover_ctrl and not state.paused.is_set() and not operator_active:
             rover_ctrl.drive_raw(vel, radius)
+            # Stop immediately after — the Roomba will coast until the serial
+            # command is processed, then halt. Next response starts it again.
+            rover_ctrl.drive_raw(0, _STEER_STRAIGHT)
 
         # ── Publish annotated frame to web UI ─────────────────────────────────
         annotated = _annotate_frame(

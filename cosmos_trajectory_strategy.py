@@ -289,10 +289,14 @@ class CosmosTrajectoryStrategy(NavigationStrategy):
                          step, self._active_chunk_idx,
                          len(self._active_actions),
                          vel, "str" if radius == _STRAIGHT else str(radius))
+                is_last = (self._active_chunk_idx >= len(self._active_actions))
                 operator_active = (state.operator_control is not None
                                    and state.operator_until > time.time())
                 if rover_ctrl and not state.paused.is_set() and not operator_active:
                     rover_ctrl.drive_raw(vel, radius)
+                    if is_last:
+                        rover_ctrl.drive_raw(0, _STRAIGHT)
+                        log.info("Step %d | chunk done — stopping Roomba", step)
                 with self._traj_lock:
                     trajs = list(self._all_trajectories)
                 _pub("executing_chunk", vel, radius,
