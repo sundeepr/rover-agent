@@ -184,8 +184,8 @@ class CosmosAvPolicyStrategy(NavigationStrategy):
         self._chunk_lock   = threading.Lock()
         self._chunk_idx    = 0
 
-        # Last drive command — repeated as keepalive while waiting for cloud
-        self._last_vel    = _MIN_VEL   # start moving forward immediately
+        # Last drive command — keepalive while waiting for cloud (vel=0 = stopped but awake)
+        self._last_vel    = 0
         self._last_radius = _STRAIGHT
 
         # True while an inference request is in flight to the cloud
