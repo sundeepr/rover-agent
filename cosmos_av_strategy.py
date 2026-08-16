@@ -93,11 +93,75 @@ def _letterbox(frame: np.ndarray, w: int, h: int) -> np.ndarray:
     return out
 
 
+def _draw_trajectory(out: np.ndarray, actions: list, chunk_idx: int) -> None:
+    """
+    Dead-reckon the remaining action chunk and draw the predicted path.
+
+    The robot starts at the bottom-center of the frame, heading straight up.
+    Each action advances the pose by vel_norm steps and turns by steer_norm.
+
+    Colours:
+      green  — actions already executed (behind current position)
+      yellow — next action (current)
+      cyan   — future actions in chunk
+    """
+    h, w = out.shape[:2]
+    # Robot starts at bottom-center, heading up (−90° in image coords)
+    px, py   = float(w // 2), float(h - 20)
+    heading  = -math.pi / 2   # radians, screen coords (y flips)
+
+    # pixels per mm at a nominal scale — tune to taste
+    # At 100mm/s × 0.3s/step the robot moves ~30mm per action.
+    # We want the full 16-step path to occupy ~40% of frame height.
+    scale = (h * 0.40) / (16 * 30.0)
+
+    prev = (int(px), int(py))
+    for i, action in enumerate(actions):
+        vel_norm   = float(action[7]) if len(action) > 7 else 0.0
+        steer_norm = float(action[8]) if len(action) > 8 else 0.0
+
+        # Step distance in pixels
+        dist = vel_norm * 100.0 * scale   # vel_norm*100 mm → pixels
+
+        # Turn: steer_norm maps −1..1 to roughly ±45°/step
+        heading += steer_norm * 0.5
+
+        nx = px + dist * math.cos(heading)
+        ny = py + dist * math.sin(heading)
+        pt = (int(nx), int(ny))
+
+        if i < chunk_idx:
+            color = (0, 180, 0)       # green — already executed
+        elif i == chunk_idx:
+            color = (0, 255, 255)     # yellow — current action
+        else:
+            color = (255, 200, 0)     # cyan — upcoming
+
+        cv2.line(out, prev, pt, (0, 0, 0), 4, cv2.LINE_AA)   # shadow
+        cv2.line(out, prev, pt, color,     2, cv2.LINE_AA)
+        cv2.circle(out, pt, 3, color, -1)
+
+        prev = pt
+        px, py = nx, ny
+
+    # Draw robot marker at start
+    origin = (w // 2, h - 20)
+    cv2.circle(out, origin, 7, (0, 0, 0),   -1)
+    cv2.circle(out, origin, 5, (0, 255, 0), -1)
+
+
 def _annotate_frame(frame: np.ndarray, strategy_name: str, goal: str,
                     vel: int, radius: int, status: str,
-                    lines: list[str] | None = None) -> np.ndarray:
-    """Draw HUD overlay and return annotated copy for state.llm_frame."""
+                    lines: list[str] | None = None,
+                    actions: list | None = None,
+                    chunk_idx: int = 0) -> np.ndarray:
+    """Draw HUD overlay (and optional trajectory) and return annotated copy."""
     out   = frame.copy()
+
+    # Trajectory overlay (drawn first so HUD text sits on top)
+    if actions:
+        _draw_trajectory(out, actions, chunk_idx)
+
     r_str = "straight" if radius == _STRAIGHT else f"r={radius}mm"
     overlay = [
         f"{strategy_name}  [{status}]",
@@ -293,8 +357,11 @@ class CosmosAvPolicyStrategy(NavigationStrategy):
 
         def _pub(status: str, vel: int = 0, radius: int = _STRAIGHT,
                  lines: list | None = None) -> None:
+            with self._chunk_lock:
+                actions   = list(self._action_chunk)
+                chunk_idx = self._chunk_idx
             ann = _annotate_frame(frame, self.name, self._goal, vel, radius,
-                                  status, lines)
+                                  status, lines, actions, chunk_idx)
             with state.llm_lock:
                 state.llm_frame = ann
 
