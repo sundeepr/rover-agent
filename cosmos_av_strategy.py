@@ -69,6 +69,7 @@ _CHUNK_SIZE       = 16      # must match --chunk-size on the server
 _AV_VEL_SCALE     = 150.0   # normalised forward → mm/s (dim 0)
 _AV_LAT_SCALE     = 2000.0  # normalised lateral  → radius mm (dim 1)
 _MAX_VEL          = 200     # mm/s hard cap
+_MIN_VEL          = 80      # mm/s minimum when actions are received (never stop mid-chunk)
 _MIN_RADIUS       = 200     # mm minimum arc radius (prevent spin-in-place)
 _STRAIGHT         = 0x8000  # Roomba "straight" sentinel
 
@@ -114,15 +115,33 @@ def _annotate_frame(frame: np.ndarray, strategy_name: str, goal: str,
     return out
 
 
-def _av_action_to_drive(action: list) -> tuple[int, int]:
+def _av_action_to_drive(action: list, min_vel: int = _MIN_VEL) -> tuple[int, int]:
     """
     Map one 9D AV action vector to (velocity mm/s, radius mm).
-    Dims: [fwd, lat, z, qx, qy, qz, qw, vel, steer] (assumed — verify empirically).
+
+    The AV domain was trained on car dashcam data so action values are
+    normalised pose deltas — typically very small (0.001–0.1 range).
+    We log the raw values so you can tune _AV_VEL_SCALE and _AV_LAT_SCALE.
+
+    Assumed dims: [fwd, lat, z, qx, qy, qz, qw, vel, steer]
     """
     fwd = float(action[0]) if len(action) > 0 else 0.0
     lat = float(action[1]) if len(action) > 1 else 0.0
 
-    vel = int(min(_MAX_VEL, max(0, fwd * _AV_VEL_SCALE)))
+    log.debug("action raw: fwd=%.4f lat=%.4f  all=%s",
+              fwd, lat, [f"{x:.3f}" for x in action])
+
+    # Scale forward component → velocity, with minimum so rover keeps moving
+    vel_raw = fwd * _AV_VEL_SCALE
+    if vel_raw > 10:
+        # Model predicts meaningful forward motion
+        vel = int(min(_MAX_VEL, vel_raw))
+    elif vel_raw > 0:
+        # Very small positive value — clamp to minimum so we don't stop
+        vel = min_vel
+    else:
+        # Negative or zero — stop
+        vel = 0
 
     if abs(lat) < _LAT_DEADBAND:
         radius = _STRAIGHT
@@ -165,8 +184,18 @@ class CosmosAvPolicyStrategy(NavigationStrategy):
         self._chunk_lock   = threading.Lock()
         self._chunk_idx    = 0
 
+        # Last drive command — repeated as keepalive while waiting for cloud
+        self._last_vel    = _MIN_VEL   # start moving forward immediately
+        self._last_radius = _STRAIGHT
+
+        # True while an inference request is in flight to the cloud
+        self._infer_in_flight = False
+
         threading.Thread(target=self._run_loop, daemon=True,
                          name="cosmos-av-ws").start()
+
+    # Fast cycle so the agent loop sends keepalive drives while waiting for cloud
+    cycle_interval = 0.3   # seconds between run_query() calls
 
     @property
     def name(self) -> str:
@@ -325,60 +354,71 @@ class CosmosAvPolicyStrategy(NavigationStrategy):
                                    vel, radius, [action], t0)
                 return
 
-        # ── Chunk exhausted — request a new one ────────────────────────────────
-        self._resp_event.clear()
-        self._pending = None
-        try:
-            asyncio.run_coroutine_threadsafe(
-                self._send_infer_async(frames_b64, self._goal), self._loop
-            ).result(timeout=5.0)
-        except Exception as e:
-            log.warning("Step %d | send failed: %s", step, e)
-            self._write_result(state, step, phase, "send_error", 0, _STRAIGHT, [], t0)
-            return
+        # ── Chunk exhausted — fire inference request async and return immediately ─
+        # cycle_interval=0.3s means this function is called again in 0.3s.
+        # Each call sends a keepalive drive and checks if the response arrived.
+        # This keeps the Roomba watchdog satisfied without a blocking wait.
+        if not self._infer_in_flight:
+            self._infer_in_flight = True
+            self._resp_event.clear()
+            self._pending = None
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._send_infer_async(frames_b64, self._goal), self._loop
+                ).result(timeout=5.0)
+                log.info("Step %d | inference request sent, waiting for chunk…", step)
+            except Exception as e:
+                log.warning("Step %d | send failed: %s", step, e)
+                self._infer_in_flight = False
 
-        budget = max(self._response_timeout,
-                     state.query_interval - (time.time() - t0))
-        log.info("Step %d | waiting for AV action chunk (budget=%.1fs)…",
-                 step, budget)
-        if not self._resp_event.wait(timeout=budget):
-            log.warning("Step %d | Cosmos AV timed out", step)
-            self._write_result(state, step, phase, "timeout", 0, _STRAIGHT, [], t0)
-            return
+        # ── Send keepalive drive while waiting for cloud response ─────────────
+        operator_active = (state.operator_control is not None
+                           and state.operator_until > time.time())
+        if rover_ctrl and not state.paused.is_set() and not operator_active:
+            rover_ctrl.drive_raw(self._last_vel, self._last_radius)
+        _pub("waiting_chunk", self._last_vel, self._last_radius,
+             ["waiting for cosmos chunk…"])
+        self._write_result(state, step, phase, "waiting_chunk",
+                           self._last_vel, self._last_radius, [], t0)
 
+        # ── Check if response has arrived ──────────────────────────────────────
+        if not self._resp_event.is_set():
+            return   # not yet — come back next cycle
+
+        self._infer_in_flight = False
         resp = self._pending
         if resp is None or resp.get("type") != "actions":
             msg = resp.get("message", "unknown") if resp else "disconnected"
             log.warning("Step %d | unexpected response: %s", step, msg)
-            self._write_result(state, step, phase, "error", 0, _STRAIGHT, [], t0)
+            self._write_result(state, step, phase, "error",
+                               self._last_vel, self._last_radius, [], t0)
             return
 
-        actions   = resp.get("actions", [])
-        cloud_s   = resp.get("elapsed", 0.0)
-        elapsed   = time.time() - t0
+        actions = resp.get("actions", [])
+        cloud_s = resp.get("elapsed", 0.0)
+        elapsed = time.time() - t0
 
         log.info("Step %d | received %d actions  cloud=%.2fs  total=%.2fs",
                  step, len(actions), cloud_s, elapsed)
 
-        # Log all actions for inspection
+        # Log raw values — needed for tuning _AV_VEL_SCALE / _AV_LAT_SCALE
         for i, a in enumerate(actions):
             vel_i, r_i = _av_action_to_drive(a)
-            log.debug("  action[%02d]: raw=%s → vel=%d r=%s",
-                      i, [f"{x:.3f}" for x in a],
-                      vel_i, "str" if r_i == _STRAIGHT else str(r_i))
+            log.info("  action[%02d]: raw=%s → vel=%d r=%s",
+                     i, [f"{x:.4f}" for x in a],
+                     vel_i, "straight" if r_i == _STRAIGHT else str(r_i))
 
         with self._chunk_lock:
             self._action_chunk = actions
             self._chunk_idx    = 0
 
-        # Execute first action immediately
         if actions:
             first_vel, first_radius = _av_action_to_drive(actions[0])
             first_vel = min(first_vel, self._max_lin_mm_s)
+            self._last_vel    = first_vel
+            self._last_radius = first_radius
             with self._chunk_lock:
                 self._chunk_idx = 1
-            operator_active = (state.operator_control is not None
-                               and state.operator_until > time.time())
             if rover_ctrl and not state.paused.is_set() and not operator_active:
                 rover_ctrl.drive_raw(first_vel, first_radius)
             _pub("navigating", first_vel, first_radius,
@@ -386,8 +426,9 @@ class CosmosAvPolicyStrategy(NavigationStrategy):
             self._write_result(state, step, phase, "navigating",
                                first_vel, first_radius, actions, t0)
         else:
-            _pub("no_actions")
-            self._write_result(state, step, phase, "no_actions", 0, _STRAIGHT, [], t0)
+            _pub("no_actions", self._last_vel, self._last_radius)
+            self._write_result(state, step, phase, "no_actions",
+                               self._last_vel, self._last_radius, [], t0)
 
     def _write_result(self, state, step, phase, status, vel, radius, actions, t0) -> None:
         elapsed = time.time() - t0
