@@ -66,15 +66,28 @@ _ACTION_HZ        = 5       # rate at which buffered actions are executed
 _CHUNK_SIZE       = 16      # must match --chunk-size on the server
 
 # Action → drive mapping scales (tune after first experiment)
-_AV_VEL_SCALE     = 150.0   # normalised forward → mm/s (dim 0)
-_AV_LAT_SCALE     = 2000.0  # normalised lateral  → radius mm (dim 1)
+# AV domain action layout (confirmed from logged output):
+#   [0] x  — forward displacement in metres (~0.01–0.03 per step at walking speed)
+#   [1] y  — lateral displacement in metres (~0.001–0.02, positive=left)
+#   [2] z  — vertical (ignore for ground robot)
+#   [3–6]  — quaternion [qx, qy, qz, qw] (rotation, use qw~0.96 ≈ ~16° range)
+#   [7]    — velocity (normalised, ~0.94–0.97)
+#   [8]    — steering (normalised, ~-0.01 to 0.01)
+#
+# Tuning: fwd=0.02m/step. We want ~120mm/s on Roomba.
+# Scale: 120 / 0.02 = 6000  (but cap at _MAX_VEL)
+# Lateral: lat=0.01m → radius ~ 1000mm is reasonable
+# Scale: 1000 / 0.01 = 100000 — but deadband filters most of it
+_AV_VEL_SCALE     = 6000.0  # forward metres/step → mm/s
+_AV_LAT_SCALE     = 50000.0 # lateral metres/step → radius mm
 _MAX_VEL          = 200     # mm/s hard cap
 _MIN_VEL          = 80      # mm/s minimum when actions are received (never stop mid-chunk)
 _MIN_RADIUS       = 200     # mm minimum arc radius (prevent spin-in-place)
 _STRAIGHT         = 0x8000  # Roomba "straight" sentinel
 
-# Lateral deadband: treat |lat| < this as straight
-_LAT_DEADBAND     = 0.03
+# Lateral deadband: treat |lat| < this as straight (metres)
+# AV domain outputs ~0.005m noise on straight paths — deadband must be above that
+_LAT_DEADBAND     = 0.015
 
 
 class _ConnState(Enum):
@@ -131,17 +144,14 @@ def _av_action_to_drive(action: list, min_vel: int = _MIN_VEL) -> tuple[int, int
     log.debug("action raw: fwd=%.4f lat=%.4f  all=%s",
               fwd, lat, [f"{x:.3f}" for x in action])
 
-    # Scale forward component → velocity, with minimum so rover keeps moving
+    # Scale forward component → velocity
     vel_raw = fwd * _AV_VEL_SCALE
-    if vel_raw > 10:
-        # Model predicts meaningful forward motion
+    if vel_raw >= 20:
         vel = int(min(_MAX_VEL, vel_raw))
     elif vel_raw > 0:
-        # Very small positive value — clamp to minimum so we don't stop
-        vel = min_vel
+        vel = min_vel   # small positive → minimum
     else:
-        # Negative or zero — stop
-        vel = 0
+        vel = 0         # negative or zero → stop
 
     if abs(lat) < _LAT_DEADBAND:
         radius = _STRAIGHT
