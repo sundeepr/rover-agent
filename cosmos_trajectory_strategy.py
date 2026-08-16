@@ -264,6 +264,9 @@ class CosmosTrajectoryStrategy(NavigationStrategy):
             with state.llm_lock:
                 state.llm_frame = ann
 
+        # Always publish the current frame immediately so the web UI stays live
+        _pub("running")
+
         if conn == _ConnState.CONNECTING:
             log.info("Step %d | waiting for Cosmos server…", step)
             _pub("connecting")
