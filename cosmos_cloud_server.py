@@ -143,10 +143,13 @@ def _load_pipeline(model_path: str):
       - torch.float16 instead of bfloat16 (bfloat16 not supported on Jetson GPU)
       - .to("cuda") instead of device_map="cuda" (device_map needs accelerate
         configured for x86; plain .to() works on Jetson)
+
+    Do NOT override the scheduler — the pipeline's built-in scheduler handles
+    both video generation and action policy modes correctly. Overriding with
+    UniPCMultistepScheduler breaks action mode (assert this_order > 0 fails).
     """
     import torch
     from diffusers import Cosmos3OmniPipeline
-    from diffusers.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
 
     log.info("Loading Cosmos3OmniPipeline from %s …", model_path)
     t0 = time.time()
@@ -155,10 +158,8 @@ def _load_pipeline(model_path: str):
         torch_dtype=torch.float16,   # bfloat16 not supported on Jetson GPU
     )
     pipe.to("cuda")                  # device_map= is x86/accelerate specific
-    pipe.scheduler = UniPCMultistepScheduler.from_config(
-        pipe.scheduler.config, flow_shift=10.0, use_karras_sigmas=False
-    )
-    log.info("Pipeline loaded in %.1fs", time.time() - t0)
+    log.info("Pipeline loaded in %.1fs  scheduler=%s",
+             time.time() - t0, type(pipe.scheduler).__name__)
     return pipe
 
 
