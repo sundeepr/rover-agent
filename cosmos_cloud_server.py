@@ -210,32 +210,52 @@ class ReasoningEngine:
                  self._model_path, transformers.__version__)
         t0 = time.time()
 
-        # Try AutoModelForVision2Seq first (transformers ≥ 4.45); fall back to
-        # AutoModel with trust_remote_code for older versions in the cosmos venv.
+        _load_kwargs = dict(
+            torch_dtype=torch.bfloat16,
+            device_map="cuda",
+            trust_remote_code=True,
+        )
+
+        self._model         = None
+        self._processor     = None
+        self._use_processor = False
+
+        # ── Attempt 1: AutoModelForCausalLM ──────────────────────────────────
+        # With trust_remote_code=True this resolves the model_type from config
+        # and loads Cosmos3EdgeForCausalLM (or equivalent) which HAS .generate().
         try:
-            from transformers import AutoModelForVision2Seq, AutoProcessor
-            self._processor = AutoProcessor.from_pretrained(
-                self._model_path, trust_remote_code=True)
-            self._model = AutoModelForVision2Seq.from_pretrained(
-                self._model_path,
-                torch_dtype=torch.bfloat16,
-                device_map="cuda",
-                trust_remote_code=True,
-            )
-            self._use_processor = True
-            log.info("Loaded via AutoModelForVision2Seq + AutoProcessor")
-        except (ImportError, Exception) as e:
-            log.warning("AutoModelForVision2Seq unavailable (%s) — trying AutoModel", e)
-            from transformers import AutoModel
-            self._processor = None
-            self._model = AutoModel.from_pretrained(
-                self._model_path,
-                torch_dtype=torch.bfloat16,
-                device_map="cuda",
-                trust_remote_code=True,
-            )
+            from transformers import AutoModelForCausalLM
+            self._model = AutoModelForCausalLM.from_pretrained(
+                self._model_path, **_load_kwargs)
             self._use_processor = False
-            log.info("Loaded via AutoModel")
+            log.info("Loaded via AutoModelForCausalLM (class=%s)",
+                     type(self._model).__name__)
+        except Exception as e:
+            log.warning("AutoModelForCausalLM failed (%s)", e)
+
+        # ── Attempt 2: AutoModelForVision2Seq + AutoProcessor ────────────────
+        if self._model is None:
+            try:
+                from transformers import AutoModelForVision2Seq, AutoProcessor
+                self._processor = AutoProcessor.from_pretrained(
+                    self._model_path, trust_remote_code=True)
+                self._model = AutoModelForVision2Seq.from_pretrained(
+                    self._model_path, **_load_kwargs)
+                self._use_processor = True
+                log.info("Loaded via AutoModelForVision2Seq + AutoProcessor (class=%s)",
+                         type(self._model).__name__)
+            except Exception as e:
+                log.warning("AutoModelForVision2Seq failed (%s)", e)
+
+        # ── Attempt 3: AutoModel (last resort — likely gives Cosmos3EdgeModel
+        #    which has no .generate(); we'll rely on the greedy B3 path) ──────
+        if self._model is None:
+            from transformers import AutoModel
+            self._model = AutoModel.from_pretrained(
+                self._model_path, **_load_kwargs)
+            self._use_processor = False
+            log.info("Loaded via AutoModel (class=%s) — no .generate() expected",
+                     type(self._model).__name__)
 
         self._tokenizer = AutoTokenizer.from_pretrained(
             self._model_path, trust_remote_code=True)
@@ -370,6 +390,20 @@ class ReasoningEngine:
         device = next(self._model.parameters()).device
         dtype  = next(self._model.parameters()).dtype
 
+        # ── Apply chat template if the tokenizer supports it ──────────────────
+        # This ensures the model sees the correct special tokens (im_start etc.)
+        if hasattr(self._tokenizer, "apply_chat_template"):
+            try:
+                messages = [
+                    {"role": "system", "content": prompt.split("\n\n")[0]},
+                    {"role": "user",   "content": "\n\n".join(prompt.split("\n\n")[1:])
+                                                  or prompt},
+                ]
+                prompt = self._tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True)
+            except Exception:
+                pass  # keep original prompt if template fails
+
         # ── Path A: standard VLM (AutoModelForVision2Seq + AutoProcessor) ─────
         if self._use_processor and self._processor is not None:
             try:
@@ -474,18 +508,29 @@ class ReasoningEngine:
                             "falling back to greedy forward() loop", e)
 
         # ── B3: Last-resort greedy decode via model.forward() ─────────────────
-        # Some custom models only expose forward() and not generate().
-        # We do a simple greedy decode loop using the top-level model.
+        # Used when no sub-module has .generate().  Apply repetition penalty
+        # manually to avoid "not not not" degenerate loops.
         log.warning("Using slow greedy forward() decode — "
                     "consider loading with AutoModelForCausalLM")
         generated = input_ids.clone()
+        rep_penalty = 1.3   # penalise tokens already seen
         with torch.no_grad():
             for _ in range(self._max_new_tokens):
-                out = self._model(input_ids=generated)
+                out    = self._model(input_ids=generated)
                 logits = out.logits if hasattr(out, "logits") else out[0]
-                next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+                next_logits = logits[:, -1, :].clone()   # [1, vocab]
+
+                # Apply repetition penalty: divide logit by penalty for seen tokens
+                for tok_id in set(generated[0].tolist()):
+                    if next_logits[0, tok_id] > 0:
+                        next_logits[0, tok_id] /= rep_penalty
+                    else:
+                        next_logits[0, tok_id] *= rep_penalty
+
+                next_token = next_logits.argmax(dim=-1, keepdim=True)
                 generated  = torch.cat([generated, next_token], dim=1)
-                if next_token.item() == self._tokenizer.eos_token_id:
+                if next_token.item() in (self._tokenizer.eos_token_id,
+                                         self._tokenizer.pad_token_id or -1):
                     break
         new_tokens = generated[0][input_ids.shape[1]:]
         return self._tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
