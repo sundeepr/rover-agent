@@ -695,9 +695,10 @@ class CosmosReasoningDriverStrategy(_CosmosWebSocketMixin, NavigationStrategy):
             return
 
         # ── Execute drive command ──────────────────────────────────────────────
+        # No immediate stop needed — next keepalive cycle (300ms) sends
+        # drive_raw(0) naturally, giving the Roomba time to actually move.
         if rover_ctrl and not state.paused.is_set() and not operator_active:
             rover_ctrl.drive_raw(vel, radius)
-            rover_ctrl.drive_raw(0, _STEER_STRAIGHT)
 
         _pub("navigating", vel, radius, [f"cosmos: {reasoning[:80]}"])
         self._write_result(state, step, phase, "navigating", vel, radius, reasoning, t0)
