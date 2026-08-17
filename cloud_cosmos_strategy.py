@@ -552,10 +552,6 @@ class CosmosReasoningDriverStrategy(_CosmosWebSocketMixin, NavigationStrategy):
     calls drive_raw(). Between cloud responses the last command is held.
     """
 
-    # Fast cycle — same pattern as cosmos_av: fire request, return, keepalive
-    # each cycle, check response next cycle. Never block waiting for cloud.
-    cycle_interval = 0.3
-
     def __init__(self, server_url: str, goal: str = "",
                  max_lin_mm_s: int = _DEFAULT_VEL,
                  response_timeout: float = 60.0):
@@ -567,7 +563,6 @@ class CosmosReasoningDriverStrategy(_CosmosWebSocketMixin, NavigationStrategy):
         self._last_radius    = _STEER_STRAIGHT
         self._last_reasoning = ""
         self._goal_reached   = False
-        self._infer_in_flight = False
 
         self._ws_init(server_url)
         if goal:
@@ -579,10 +574,9 @@ class CosmosReasoningDriverStrategy(_CosmosWebSocketMixin, NavigationStrategy):
         return "cosmos_driver"
 
     def on_reset(self) -> None:
-        self._last_vel        = 0
-        self._last_radius     = _STEER_STRAIGHT
-        self._goal_reached    = False
-        self._infer_in_flight = False
+        self._last_vel     = 0
+        self._last_radius  = _STEER_STRAIGHT
+        self._goal_reached = False
         log.info("CosmosReasoningDriverStrategy reset")
 
     def run_query(self, state: AgentState, frame: np.ndarray,
@@ -629,34 +623,31 @@ class CosmosReasoningDriverStrategy(_CosmosWebSocketMixin, NavigationStrategy):
                                _STEER_STRAIGHT, self._last_reasoning, t0)
             return
 
-        # ── Fire inference request (non-blocking) ─────────────────────────────
-        if not self._infer_in_flight:
-            self._infer_in_flight = True
-            self._response_event.clear()
-            self._pending_resp = None
-            frame_b64 = self._encode_frame(frame)
-            try:
-                self._send_infer_sync(frame_b64, self._goal, timeout=5.0)
-                log.info("Step %d | inference request sent, waiting for response…", step)
-            except Exception as e:
-                log.warning("Step %d | send failed: %s", step, e)
-                self._infer_in_flight = False
+        # ── Encode and send ────────────────────────────────────────────────────
+        frame_b64 = self._encode_frame(frame)
+        try:
+            self._send_infer_sync(frame_b64, self._goal, timeout=5.0)
+            log.info("Step %d | inference request sent, waiting for response…", step)
+        except Exception as e:
+            log.warning("Step %d | send failed: %s", step, e)
+            self._write_result(state, step, phase, "send_error",
+                               self._last_vel, self._last_radius, self._last_reasoning, t0)
+            return
 
-        # ── Send keepalive drive while waiting (vel=0, stays OI-awake) ────────
+        # ── Poll for response, sending keepalive every 200ms ──────────────────
+        # drive_raw(0) every 200ms keeps the Roomba OI watchdog alive (~500ms).
+        deadline = time.time() + self._response_timeout
         operator_active = (state.operator_control is not None
                            and state.operator_until > time.time())
-        if rover_ctrl and not state.paused.is_set() and not operator_active:
-            rover_ctrl.drive_raw(0, _STEER_STRAIGHT)
-        _pub("waiting_response", self._last_vel, self._last_radius,
-             ["waiting for cosmos response…"])
-        self._write_result(state, step, phase, "waiting_response",
-                           0, _STEER_STRAIGHT, self._last_reasoning, t0)
+        while not self._response_event.wait(timeout=0.2):
+            if time.time() >= deadline:
+                log.warning("Step %d | Cosmos timed out", step)
+                self._write_result(state, step, phase, "timeout",
+                                   self._last_vel, self._last_radius, self._last_reasoning, t0)
+                return
+            if rover_ctrl and not state.paused.is_set() and not operator_active:
+                rover_ctrl.drive_raw(0, _STEER_STRAIGHT)
 
-        # ── Check if response has arrived ──────────────────────────────────────
-        if not self._response_event.is_set():
-            return   # not yet — come back next cycle
-
-        self._infer_in_flight = False
         resp = self._pending_resp
         if resp is None or resp.get("type") != "drive":
             msg = resp.get("message", "unknown") if resp else "disconnected"
