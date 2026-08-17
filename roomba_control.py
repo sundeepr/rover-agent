@@ -64,6 +64,10 @@ class Roomba:
         self.ser = serial.Serial(self.port, self.baud, timeout=self.timeout)
         # Give the serial interface a moment to settle
         time.sleep(0.1)
+        # Flush any stale bytes left in buffers from a previous session
+        # (e.g. partial commands from a Ctrl+C mid-write)
+        self.ser.reset_input_buffer()
+        self.ser.reset_output_buffer()
         try:
             yield self
         finally:
