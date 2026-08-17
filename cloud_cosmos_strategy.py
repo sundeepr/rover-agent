@@ -68,6 +68,27 @@ _RECONNECT_MAX     = 30.0
 # How many local steps to hold a supervisor correction before re-centering
 _CORRECTION_HOLD_STEPS = 10
 
+# Minimum turn radius — prevents spin-in-place for small angles
+_MIN_TURN_RADIUS = 150   # mm
+
+
+def _steering_angle_to_radius(angle_deg: float) -> int:
+    """
+    Convert a steering angle (degrees) to a Roomba OI radius (mm).
+
+    angle_deg:  0 = straight, positive = left, negative = right
+                clamped to [-45, 45]
+    Returns Roomba radius: 32767=straight, positive=left, negative=right
+    """
+    if abs(angle_deg) < 0.5:
+        return _STEER_STRAIGHT
+    angle_rad = math.radians(abs(angle_deg))
+    # radius = wheelbase / (2 * sin(angle)) — simplified for differential drive
+    # Use 235mm as Roomba wheelbase
+    radius = int(235.0 / (2.0 * math.sin(angle_rad)))
+    radius = max(_MIN_TURN_RADIUS, radius)
+    return radius if angle_deg > 0 else -radius
+
 # Steering radii for supervisor corrections (Roomba OI, mm)
 _STEER_LEFT_HARD   =  600
 _STEER_LEFT_SOFT   = 1200
@@ -676,7 +697,8 @@ class CosmosReasoningDriverStrategy(_CosmosWebSocketMixin, NavigationStrategy):
             return
 
         vel           = int(max(0, min(self._max_lin_mm_s, resp.get("velocity", 0))))
-        radius        = int(resp.get("radius", _STEER_STRAIGHT))
+        angle         = float(resp.get("steering_angle", 0.0))
+        radius        = _steering_angle_to_radius(angle)
         reasoning     = resp.get("reasoning", "")
         goal_achieved = bool(resp.get("goal_achieved", False))
         cloud_s       = resp.get("elapsed", 0.0)
@@ -686,18 +708,18 @@ class CosmosReasoningDriverStrategy(_CosmosWebSocketMixin, NavigationStrategy):
         self._last_radius    = radius
         self._last_reasoning = reasoning
 
-        # Append to history so next prompt includes this observation
+        # Append to history — log angle so model gets intuitive feedback
         self._history.append({
-            "velocity":  vel,
-            "radius":    radius,
-            "reasoning": reasoning,
+            "velocity":       vel,
+            "steering_angle": angle,
+            "reasoning":      reasoning,
         })
         if len(self._history) > self._history_maxlen:
             self._history.pop(0)
 
         r_str = "straight" if radius == _STEER_STRAIGHT else f"r={radius}mm"
-        log.info("Step %d | vel=%d %s | goal_achieved=%s | history=%d | cloud=%.2fs",
-                 step, vel, r_str, goal_achieved, len(self._history), cloud_s)
+        log.info("Step %d | vel=%d angle=%.1f° %s | goal_achieved=%s | history=%d | cloud=%.2fs",
+                 step, vel, angle, r_str, goal_achieved, len(self._history), cloud_s)
         log.info("Step %d | full response: %s", step, json.dumps(resp))
 
         # ── Goal achieved ──────────────────────────────────────────────────────

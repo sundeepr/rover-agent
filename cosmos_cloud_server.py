@@ -87,11 +87,11 @@ Server → Client
 
   -- reasoning_driver --
   {"type": "drive",
-   "velocity":      <int mm/s>,
-   "radius":        <int mm>,   (32767 = straight)
-   "reasoning":     "<text>",
-   "goal_achieved": true|false,
-   "elapsed":       <float>}
+   "velocity":       <int mm/s>,
+   "steering_angle": <float degrees, -45=hard right, 0=straight, +45=hard left>,
+   "reasoning":      "<text>",
+   "goal_achieved":  true|false,
+   "elapsed":        <float>}
 
   -- av_policy --
   {"type": "actions",
@@ -190,14 +190,14 @@ Look at the camera image and respond with ONLY a JSON object, no other text:
 
 _DRIVER_PROMPT = """\
 You are the navigation controller for a Roomba robot.
-drive_raw(velocity mm/s 0-200, radius mm: 32767=straight, positive=left, negative=right, 1=spin).
 The robot's goal is: "{goal}"
 
 {history}
 Look at the current camera image and decide the next action.
 Respond with ONLY a JSON object, no other text:
-{{"velocity": <int 0-200>, "radius": <int>, "reasoning": "<one sentence describing what you observe and why you chose this action>", "goal_achieved": <true|false>}}
+{{"velocity": <int mm/s, 0-200>, "steering_angle": <float degrees, -45=hard right, 0=straight, +45=hard left>, "reasoning": "<one sentence describing what you observe and why you chose this action>", "goal_achieved": <true|false>}}
 
+steering_angle examples: 0=straight, 10=gentle left, -10=gentle right, 30=sharp left, -30=sharp right.
 Set goal_achieved to true ONLY when the goal has been fully completed and the robot should stop permanently."""
 
 _DRIVER_HISTORY_HEADER = """\
@@ -286,7 +286,7 @@ class ReasoningEngine:
         else:
             if history:
                 steps = "\n".join(
-                    f"- Step {i+1}: vel={h['velocity']} radius={h['radius']} → \"{h['reasoning']}\""
+                    f"- Step {i+1}: vel={h['velocity']} steering_angle={h.get('steering_angle', 0.0):.1f}° → \"{h['reasoning']}\""
                     for i, h in enumerate(history)
                 )
                 history_block = _DRIVER_HISTORY_HEADER.format(steps=steps)
@@ -335,12 +335,12 @@ class ReasoningEngine:
             }
         else:
             return {
-                "type":          "drive",
-                "velocity":      int(max(0, min(200, parsed.get("velocity", 100)))),
-                "radius":        int(parsed.get("radius", 32767)),
-                "reasoning":     parsed.get("reasoning", raw_text[:200]),
-                "goal_achieved": bool(parsed.get("goal_achieved", False)),
-                "elapsed":       elapsed,
+                "type":           "drive",
+                "velocity":       int(max(0, min(200, parsed.get("velocity", 100)))),
+                "steering_angle": float(max(-45.0, min(45.0, parsed.get("steering_angle", 0.0)))),
+                "reasoning":      parsed.get("reasoning", raw_text[:200]),
+                "goal_achieved":  bool(parsed.get("goal_achieved", False)),
+                "elapsed":        elapsed,
             }
 
 
