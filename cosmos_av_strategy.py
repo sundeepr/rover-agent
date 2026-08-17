@@ -443,7 +443,7 @@ class CosmosAvPolicyStrategy(NavigationStrategy):
         operator_active = (state.operator_control is not None
                            and state.operator_until > time.time())
         if rover_ctrl and not state.paused.is_set() and not operator_active:
-            rover_ctrl.drive_raw(self._last_vel, self._last_radius)
+            rover_ctrl.keepalive()
         _pub("waiting_chunk", self._last_vel, self._last_radius,
              ["waiting for cosmos chunk…"])
         self._write_result(state, step, phase, "waiting_chunk",

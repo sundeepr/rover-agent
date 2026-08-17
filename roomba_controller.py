@@ -174,6 +174,18 @@ class RoombaController:
                 "vel": velocity, "radius": radius,
             })
 
+    def keepalive(self) -> None:
+        """Reset the Roomba OI watchdog without moving.
+
+        The Roomba watchdog drops to passive mode (~500ms with no serial
+        activity). This sends START+SAFE to re-assert OI mode if it dropped,
+        then DRIVE(0) to reset the watchdog timer. Safe to call repeatedly.
+        """
+        if self._roomba is not None and not self.dry_run:
+            self._roomba.start()
+            self._roomba.safe()
+            self._roomba.drive(0, 0x8000)
+
     def stop(self) -> None:
         """Stop all wheel motion."""
         self._send_drive(0, 0x8000)

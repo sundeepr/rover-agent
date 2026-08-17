@@ -640,15 +640,17 @@ class CosmosReasoningDriverStrategy(_CosmosWebSocketMixin, NavigationStrategy):
                                self._last_reasoning, t0)
             return
 
-        # ── Wait for drive response, sending keepalive every 400ms ───────────
-        # Roomba OI watchdog shuts down if no serial command within ~500ms.
-        # Poll in short intervals and send drive_raw(0) to keep it awake.
+        # ── Wait for drive response, sending keepalive every 200ms ───────────
+        # Roomba OI watchdog fires at ~500ms with no serial activity and drops
+        # the robot to passive mode (drive commands ignored until re-init).
+        # Poll every 200ms — well inside the watchdog window — and send a
+        # drive(0) each time to reset the watchdog timer.
         budget    = max(self._response_timeout, state.query_interval - (time.time() - t0))
         deadline  = time.time() + budget
         log.info("Step %d | waiting for Cosmos drive command (budget=%.1fs)…",
                  step, budget)
         while True:
-            signalled = self._response_event.wait(timeout=0.4)
+            signalled = self._response_event.wait(timeout=0.2)
             if signalled:
                 break
             if time.time() >= deadline:
@@ -657,11 +659,9 @@ class CosmosReasoningDriverStrategy(_CosmosWebSocketMixin, NavigationStrategy):
                                    self._last_vel, self._last_radius,
                                    self._last_reasoning, t0)
                 return
-            # Send keepalive — vel=0 keeps OI awake without moving
-            operator_active = (state.operator_control is not None
-                               and state.operator_until > time.time())
-            if rover_ctrl and not state.paused.is_set() and not operator_active:
-                rover_ctrl.drive_raw(0, _STEER_STRAIGHT)
+            # Keepalive: START+SAFE+DRIVE(0) re-asserts OI and resets watchdog
+            if rover_ctrl and not state.paused.is_set():
+                rover_ctrl.keepalive()
 
         resp = self._pending_resp
         if resp is None or resp.get("type") != "drive":
