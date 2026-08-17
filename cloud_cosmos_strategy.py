@@ -672,8 +672,9 @@ class CosmosReasoningDriverStrategy(_CosmosWebSocketMixin, NavigationStrategy):
         self._last_reasoning = reasoning
 
         r_str = "straight" if radius == _STEER_STRAIGHT else f"r={radius}mm"
-        log.info("Step %d | vel=%d %s | goal_achieved=%s | '%s' | cloud=%.2fs total=%.2fs",
-                 step, vel, r_str, goal_achieved, reasoning[:60], cloud_s, elapsed)
+        log.info("Step %d | vel=%d %s | goal_achieved=%s | cloud=%.2fs total=%.2fs",
+                 step, vel, r_str, goal_achieved, cloud_s, elapsed)
+        log.info("Step %d | full response: %s", step, json.dumps(resp))
 
         # ── Goal achieved: model explicitly signalled completion ──────────────
         if goal_achieved:

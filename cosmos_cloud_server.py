@@ -297,9 +297,10 @@ class ReasoningEngine:
         raw_text = self._processor.batch_decode(
             new_tokens, skip_special_tokens=True)[0]
         elapsed  = round(time.time() - t0, 3)
-        log.info("Reasoning (%.2fs): %s", elapsed, raw_text[:200])
+        log.info("Reasoning (%.2fs) raw: %s", elapsed, raw_text)
 
         parsed = _parse_json(raw_text)
+        log.info("Reasoning parsed: %s", json.dumps(parsed))
 
         if self._mode == "reasoning_supervisor":
             return {
