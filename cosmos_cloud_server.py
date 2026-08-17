@@ -193,11 +193,23 @@ You are the navigation controller for a Roomba robot.
 drive_raw(velocity mm/s 0-200, radius mm: 32767=straight, positive=left, negative=right, 1=spin).
 The robot's goal is: "{goal}"
 
-Look at the camera image and respond with ONLY a JSON object, no other text:
-{{"velocity": <int 0-200>, "radius": <int>, "reasoning": "<one sentence>", "goal_achieved": <true|false>}}
+{history}
+Look at the current camera image and decide the next action.
+Respond with ONLY a JSON object, no other text:
+{{"velocity": <int 0-200>, "radius": <int>, "reasoning": "<one sentence describing what you observe and why you chose this action>", "goal_achieved": <true|false>}}
 
-Set goal_achieved to true ONLY when the goal has been fully completed and the robot should stop permanently.
-Set velocity to 0 and goal_achieved to true together when done."""""
+Set goal_achieved to true ONLY when the goal has been fully completed and the robot should stop permanently."""
+
+_DRIVER_HISTORY_HEADER = """\
+Your action history (most recent last):
+{steps}
+
+"""
+
+_DRIVER_NO_HISTORY = """\
+This is your first observation. Start by assessing the scene.
+
+"""
 
 
 def _parse_json(text: str) -> dict:
@@ -261,7 +273,7 @@ class ReasoningEngine:
         log.info("ReasoningEngine ready (mode=%s) in %.1fs",
                   self._mode, time.time() - t0)
 
-    def infer(self, frame_jpeg: bytes, goal: str) -> dict:
+    def infer(self, frame_jpeg: bytes, goal: str, history: list | None = None) -> dict:
         import torch
         from PIL import Image
 
@@ -269,8 +281,18 @@ class ReasoningEngine:
 
         image = Image.open(io.BytesIO(frame_jpeg)).convert("RGB")
 
-        prompt = (_SUPERVISOR_PROMPT if self._mode == "reasoning_supervisor"
-                  else _DRIVER_PROMPT).format(goal=goal)
+        if self._mode == "reasoning_supervisor":
+            prompt = _SUPERVISOR_PROMPT.format(goal=goal)
+        else:
+            if history:
+                steps = "\n".join(
+                    f"- Step {i+1}: vel={h['velocity']} radius={h['radius']} → \"{h['reasoning']}\""
+                    for i, h in enumerate(history)
+                )
+                history_block = _DRIVER_HISTORY_HEADER.format(steps=steps)
+            else:
+                history_block = _DRIVER_NO_HISTORY
+            prompt = _DRIVER_PROMPT.format(goal=goal, history=history_block)
 
         messages = [{
             "role": "user",
@@ -563,9 +585,10 @@ class ConnectionSession:
                     {"type": "error", "message": "missing frame_b64"}))
                 return
             frame_jpeg = base64.b64decode(frame_b64)
+            history   = msg.get("history", None)
             try:
                 result = await self._loop.run_in_executor(
-                    None, self._engine.infer, frame_jpeg, goal)
+                    None, self._engine.infer, frame_jpeg, goal, history)
             except Exception as e:
                 log.error("Inference error: %s", e, exc_info=True)
                 await websocket.send(json.dumps({"type": "error", "message": str(e)}))

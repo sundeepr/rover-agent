@@ -250,15 +250,15 @@ class _CosmosWebSocketMixin:
         except Exception as e:
             log.debug("Goal send failed: %s", e)
 
-    async def _ws_send_infer(self, frame_b64: str, goal: str) -> None:
+    async def _ws_send_infer(self, frame_b64: str, goal: str,
+                             history: list | None = None) -> None:
         ws = self._ws
         if ws is None:
             raise ConnectionError("Not connected to Cosmos server")
-        await ws.send(json.dumps({
-            "type":      "infer",
-            "goal":      goal,
-            "frame_b64": frame_b64,
-        }))
+        msg = {"type": "infer", "goal": goal, "frame_b64": frame_b64}
+        if history:
+            msg["history"] = history
+        await ws.send(json.dumps(msg))
 
     def _encode_frame(self, frame: np.ndarray) -> str:
         send = _letterbox(frame, _SEND_W, _SEND_H)
@@ -266,11 +266,13 @@ class _CosmosWebSocketMixin:
                               [cv2.IMWRITE_JPEG_QUALITY, _JPEG_QUALITY])
         return base64.b64encode(buf.tobytes()).decode()
 
-    def _send_infer_sync(self, frame_b64: str, goal: str, timeout: float = 5.0) -> None:
+    def _send_infer_sync(self, frame_b64: str, goal: str,
+                         history: list | None = None,
+                         timeout: float = 5.0) -> None:
         self._response_event.clear()
         self._pending_resp = None
         asyncio.run_coroutine_threadsafe(
-            self._ws_send_infer(frame_b64, goal), self._loop
+            self._ws_send_infer(frame_b64, goal, history), self._loop
         ).result(timeout=timeout)
 
     def set_goal(self, goal: str) -> None:
@@ -566,6 +568,9 @@ class CosmosReasoningDriverStrategy(_CosmosWebSocketMixin, NavigationStrategy):
         self._last_reasoning  = ""
         self._goal_reached    = False
         self._infer_in_flight = False
+        # Rolling history of last N responses fed back into each prompt
+        self._history: list   = []
+        self._history_maxlen  = 5
 
         self._ws_init(server_url)
         if goal:
@@ -581,6 +586,7 @@ class CosmosReasoningDriverStrategy(_CosmosWebSocketMixin, NavigationStrategy):
         self._last_radius     = _STEER_STRAIGHT
         self._goal_reached    = False
         self._infer_in_flight = False
+        self._history         = []
         log.info("CosmosReasoningDriverStrategy reset")
 
     def run_query(self, state: AgentState, frame: np.ndarray,
@@ -636,9 +642,12 @@ class CosmosReasoningDriverStrategy(_CosmosWebSocketMixin, NavigationStrategy):
             self._response_event.clear()
             self._pending_resp = None
             frame_b64 = self._encode_frame(frame)
+            history = list(self._history) if self._history else None
             try:
-                self._send_infer_sync(frame_b64, self._goal, timeout=5.0)
-                log.info("Step %d | inference request sent, waiting for response…", step)
+                self._send_infer_sync(frame_b64, self._goal,
+                                      history=history, timeout=5.0)
+                log.info("Step %d | inference request sent (history=%d steps)…",
+                         step, len(self._history))
             except Exception as e:
                 log.warning("Step %d | send failed: %s", step, e)
                 self._infer_in_flight = False
@@ -677,9 +686,18 @@ class CosmosReasoningDriverStrategy(_CosmosWebSocketMixin, NavigationStrategy):
         self._last_radius    = radius
         self._last_reasoning = reasoning
 
+        # Append to history so next prompt includes this observation
+        self._history.append({
+            "velocity":  vel,
+            "radius":    radius,
+            "reasoning": reasoning,
+        })
+        if len(self._history) > self._history_maxlen:
+            self._history.pop(0)
+
         r_str = "straight" if radius == _STEER_STRAIGHT else f"r={radius}mm"
-        log.info("Step %d | vel=%d %s | goal_achieved=%s | cloud=%.2fs total=%.2fs",
-                 step, vel, r_str, goal_achieved, cloud_s, elapsed)
+        log.info("Step %d | vel=%d %s | goal_achieved=%s | history=%d | cloud=%.2fs",
+                 step, vel, r_str, goal_achieved, len(self._history), cloud_s)
         log.info("Step %d | full response: %s", step, json.dumps(resp))
 
         # ── Goal achieved ──────────────────────────────────────────────────────
