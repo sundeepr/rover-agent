@@ -87,10 +87,11 @@ Server → Client
 
   -- reasoning_driver --
   {"type": "drive",
-   "velocity":   <int mm/s>,
-   "radius":     <int mm>,   (32767 = straight)
-   "reasoning":  "<text>",
-   "elapsed":    <float>}
+   "velocity":      <int mm/s>,
+   "radius":        <int mm>,   (32767 = straight)
+   "reasoning":     "<text>",
+   "goal_achieved": true|false,
+   "elapsed":       <float>}
 
   -- av_policy --
   {"type": "actions",
@@ -193,7 +194,10 @@ drive_raw(velocity mm/s 0-200, radius mm: 32767=straight, positive=left, negativ
 The robot's goal is: "{goal}"
 
 Look at the camera image and respond with ONLY a JSON object, no other text:
-{{"velocity": <int 0-200>, "radius": <int>, "reasoning": "<one sentence>"}}"""
+{{"velocity": <int 0-200>, "radius": <int>, "reasoning": "<one sentence>", "goal_achieved": <true|false>}}
+
+Set goal_achieved to true ONLY when the goal has been fully completed and the robot should stop permanently.
+Set velocity to 0 and goal_achieved to true together when done."""""
 
 
 def _parse_json(text: str) -> dict:
@@ -308,11 +312,12 @@ class ReasoningEngine:
             }
         else:
             return {
-                "type":      "drive",
-                "velocity":  int(max(0, min(200, parsed.get("velocity", 100)))),
-                "radius":    int(parsed.get("radius", 32767)),
-                "reasoning": parsed.get("reasoning", raw_text[:200]),
-                "elapsed":   elapsed,
+                "type":          "drive",
+                "velocity":      int(max(0, min(200, parsed.get("velocity", 100)))),
+                "radius":        int(parsed.get("radius", 32767)),
+                "reasoning":     parsed.get("reasoning", raw_text[:200]),
+                "goal_achieved": bool(parsed.get("goal_achieved", False)),
+                "elapsed":       elapsed,
             }
 
 

@@ -564,6 +564,9 @@ class CosmosReasoningDriverStrategy(_CosmosWebSocketMixin, NavigationStrategy):
         self._last_radius = _STEER_STRAIGHT
         self._last_reasoning = ""
 
+        # Set to True when model returns vel=0 — stops further inference
+        self._goal_reached = False
+
         self._ws_init(server_url)
         if goal:
             with self._conn_lock:
@@ -574,8 +577,9 @@ class CosmosReasoningDriverStrategy(_CosmosWebSocketMixin, NavigationStrategy):
         return "cosmos_driver"
 
     def on_reset(self) -> None:
-        self._last_vel    = 0
-        self._last_radius = _STEER_STRAIGHT
+        self._last_vel     = 0
+        self._last_radius  = _STEER_STRAIGHT
+        self._goal_reached = False
         log.info("CosmosReasoningDriverStrategy reset")
 
     def run_query(self, state: AgentState, frame: np.ndarray,
@@ -618,6 +622,13 @@ class CosmosReasoningDriverStrategy(_CosmosWebSocketMixin, NavigationStrategy):
                                _STEER_STRAIGHT, "", t0)
             return
 
+        if self._goal_reached:
+            log.debug("Step %d | goal already achieved — not sending inference", step)
+            _publish_status("goal_achieved")
+            self._write_result(state, step, phase, "goal_achieved", 0,
+                               _STEER_STRAIGHT, self._last_reasoning, t0)
+            return
+
         # ── Encode and send ────────────────────────────────────────────────────
         frame_b64 = self._encode_frame(frame)
         try:
@@ -649,26 +660,42 @@ class CosmosReasoningDriverStrategy(_CosmosWebSocketMixin, NavigationStrategy):
                                self._last_reasoning, t0)
             return
 
-        vel       = int(max(0, min(self._max_lin_mm_s, resp.get("velocity", 0))))
-        radius    = int(resp.get("radius", _STEER_STRAIGHT))
-        reasoning = resp.get("reasoning", "")
-        cloud_s   = resp.get("elapsed", 0.0)
-        elapsed   = time.time() - t0
+        vel           = int(max(0, min(self._max_lin_mm_s, resp.get("velocity", 0))))
+        radius        = int(resp.get("radius", _STEER_STRAIGHT))
+        reasoning     = resp.get("reasoning", "")
+        goal_achieved = bool(resp.get("goal_achieved", False))
+        cloud_s       = resp.get("elapsed", 0.0)
+        elapsed       = time.time() - t0
 
         self._last_vel       = vel
         self._last_radius    = radius
         self._last_reasoning = reasoning
 
         r_str = "straight" if radius == _STEER_STRAIGHT else f"r={radius}mm"
-        log.info("Step %d | vel=%d %s | '%s' | cloud=%.2fs total=%.2fs",
-                 step, vel, r_str, reasoning[:60], cloud_s, elapsed)
+        log.info("Step %d | vel=%d %s | goal_achieved=%s | '%s' | cloud=%.2fs total=%.2fs",
+                 step, vel, r_str, goal_achieved, reasoning[:60], cloud_s, elapsed)
+
+        # ── Goal achieved: model explicitly signalled completion ──────────────
+        if goal_achieved:
+            self._goal_reached = True
+            log.info("Step %d | goal_achieved — stopping and halting inference", step)
+            if rover_ctrl and not state.paused.is_set():
+                rover_ctrl.drive_raw(0, _STEER_STRAIGHT)
+            annotated = _annotate_frame(
+                frame, self.name, self._goal, 0, _STEER_STRAIGHT, "goal_achieved",
+                lines=[f"cosmos: {reasoning[:80]}"],
+            )
+            with state.llm_lock:
+                state.llm_frame = annotated
+            self._write_result(state, step, phase, "goal_achieved",
+                               0, _STEER_STRAIGHT, reasoning, t0)
+            return
 
         operator_active = (state.operator_control is not None
                            and state.operator_until > time.time())
         if rover_ctrl and not state.paused.is_set() and not operator_active:
             rover_ctrl.drive_raw(vel, radius)
-            # Stop immediately after — the Roomba will coast until the serial
-            # command is processed, then halt. Next response starts it again.
+            # Stop immediately after so Roomba doesn't coast during next inference
             rover_ctrl.drive_raw(0, _STEER_STRAIGHT)
 
         # ── Publish annotated frame to web UI ─────────────────────────────────
