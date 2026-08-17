@@ -271,6 +271,19 @@ class _CosmosWebSocketMixin:
         except Exception as e:
             log.debug("Goal send failed: %s", e)
 
+    async def _ws_send_feedback(self, message: str) -> None:
+        ws = self._ws
+        if ws is None:
+            return
+        try:
+            await ws.send(json.dumps({"type": "feedback", "message": message}))
+        except Exception as e:
+            log.debug("Feedback send failed: %s", e)
+
+    def _send_feedback(self, message: str) -> None:
+        asyncio.run_coroutine_threadsafe(
+            self._ws_send_feedback(message), self._loop)
+
     async def _ws_send_infer(self, frame_b64: str, goal: str,
                              history: list | None = None) -> None:
         ws = self._ws
@@ -704,16 +717,55 @@ class CosmosReasoningDriverStrategy(_CosmosWebSocketMixin, NavigationStrategy):
         cloud_s       = resp.get("elapsed", 0.0)
         elapsed       = time.time() - t0
 
+        # ── Client-side validation of goal_achieved ────────────────────────────
+        # 1. progress < 90 → override regardless of goal_achieved flag
+        # 2. If line positions reported, verify midpoint independently
+        # In both cases send feedback to server so next prompt knows why
+        progress  = int(resp.get("progress", 0))
+        left_pct  = resp.get("left_line_pct")
+        right_pct = resp.get("right_line_pct")
+
+        if goal_achieved:
+            override_reason = None
+
+            if progress < 90:
+                override_reason = (f"goal_achieved rejected: progress={progress}% "
+                                   f"is below the required 90% threshold. "
+                                   f"Keep working toward the goal.")
+
+            if left_pct is not None and right_pct is not None:
+                left_pct  = int(left_pct)
+                right_pct = int(right_pct)
+                midpoint  = (left_pct + right_pct) / 2.0
+                spread    = right_pct - left_pct
+                if not (45.0 <= midpoint <= 55.0 and spread >= 20):
+                    override_reason = (f"goal_achieved rejected: left={left_pct}% "
+                                       f"right={right_pct}% midpoint={midpoint:.1f}% "
+                                       f"— robot is not centered between the lines.")
+
+            if override_reason:
+                log.warning("Step %d | goal_achieved OVERRIDDEN — %s", step, override_reason)
+                goal_achieved = False
+                reasoning     = f"[client override] {override_reason}"
+                self._send_feedback(override_reason)
+            else:
+                log.info("Step %d | goal_achieved validated (progress=%d%%)", step, progress)
+
         self._last_vel       = vel
         self._last_radius    = radius
         self._last_reasoning = reasoning
 
-        # Append to history — log angle so model gets intuitive feedback
-        self._history.append({
+        # Append to history — log angle, progress and line positions for model feedback
+        history_entry = {
             "velocity":       vel,
             "steering_angle": angle,
+            "progress":       progress,
             "reasoning":      reasoning,
-        })
+        }
+        if left_pct is not None and right_pct is not None:
+            history_entry["left_line_pct"]  = left_pct
+            history_entry["right_line_pct"] = right_pct
+        self._history.append(history_entry)
         if len(self._history) > self._history_maxlen:
             self._history.pop(0)
 

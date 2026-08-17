@@ -192,13 +192,13 @@ _DRIVER_PROMPT = """\
 You are the navigation controller for a Roomba robot.
 The robot's goal is: "{goal}"
 
-{history}
-Look at the current camera image and decide the next action.
+{history}{feedback}Look at the current camera image and decide the next action.
 Respond with ONLY a JSON object, no other text:
-{{"velocity": <int mm/s, 0-200>, "steering_angle": <float degrees, -45=hard right, 0=straight, +45=hard left>, "reasoning": "<one sentence describing what you observe and why you chose this action>", "goal_achieved": <true|false>}}
+{{"velocity": <int mm/s, 0-200>, "steering_angle": <float degrees, -45=hard right, 0=straight, +45=hard left>, "progress": <int 0-100, how close to goal completion>, "reasoning": "<one sentence describing what you observe and why you chose this action>", "goal_achieved": <true|false>}}
 
 steering_angle examples: 0=straight, 10=gentle left, -10=gentle right, 30=sharp left, -30=sharp right.
-Set goal_achieved to true ONLY when the goal has been fully completed and the robot should stop permanently."""
+progress: 0=not started, 50=halfway, 90=almost done, 100=complete.
+Set goal_achieved to true ONLY when progress is 100 and the goal is fully and permanently complete."""
 
 _DRIVER_HISTORY_HEADER = """\
 Your action history (most recent last):
@@ -208,6 +208,12 @@ Your action history (most recent last):
 
 _DRIVER_NO_HISTORY = """\
 This is your first observation. Start by assessing the scene.
+
+"""
+
+_DRIVER_FEEDBACK = """\
+IMPORTANT — client feedback on your last response: {message}
+Take this into account before deciding your next action.
 
 """
 
@@ -273,7 +279,8 @@ class ReasoningEngine:
         log.info("ReasoningEngine ready (mode=%s) in %.1fs",
                   self._mode, time.time() - t0)
 
-    def infer(self, frame_jpeg: bytes, goal: str, history: list | None = None) -> dict:
+    def infer(self, frame_jpeg: bytes, goal: str, history: list | None = None,
+              feedback: str = "") -> dict:
         import torch
         from PIL import Image
 
@@ -285,14 +292,23 @@ class ReasoningEngine:
             prompt = _SUPERVISOR_PROMPT.format(goal=goal)
         else:
             if history:
-                steps = "\n".join(
-                    f"- Step {i+1}: vel={h['velocity']} steering_angle={h.get('steering_angle', 0.0):.1f}° → \"{h['reasoning']}\""
-                    for i, h in enumerate(history)
-                )
+                def _fmt(i, h):
+                    base = (f"- Step {i+1}: vel={h['velocity']} "
+                            f"steering_angle={h.get('steering_angle', 0.0):.1f}° "
+                            f"progress={h.get('progress', '?')}%")
+                    if "left_line_pct" in h and "right_line_pct" in h:
+                        mid = (h["left_line_pct"] + h["right_line_pct"]) / 2.0
+                        base += (f" left={h['left_line_pct']}% right={h['right_line_pct']}%"
+                                 f" midpoint={mid:.1f}%")
+                    base += f" → \"{h['reasoning']}\""
+                    return base
+                steps = "\n".join(_fmt(i, h) for i, h in enumerate(history))
                 history_block = _DRIVER_HISTORY_HEADER.format(steps=steps)
             else:
                 history_block = _DRIVER_NO_HISTORY
-            prompt = _DRIVER_PROMPT.format(goal=goal, history=history_block)
+            feedback_block = _DRIVER_FEEDBACK.format(message=feedback) if feedback else ""
+            prompt = _DRIVER_PROMPT.format(goal=goal, history=history_block,
+                                           feedback=feedback_block)
 
         messages = [{
             "role": "user",
@@ -516,10 +532,11 @@ def _describe_trajectory(actions: list, rank: int) -> str:
 class ConnectionSession:
 
     def __init__(self, engine, mode: str, loop: asyncio.AbstractEventLoop):
-        self._engine = engine
-        self._mode   = mode
-        self._loop   = loop
-        self._goal   = ""
+        self._engine   = engine
+        self._mode     = mode
+        self._loop     = loop
+        self._goal     = ""
+        self._feedback = ""   # injected into next prompt, then cleared
 
     async def handle(self, websocket) -> None:
         addr = getattr(websocket, "remote_address", "?")
@@ -543,6 +560,11 @@ class ConnectionSession:
         if mtype == "goal":
             self._goal = msg.get("goal", "")
             log.info("Goal updated: '%s'", self._goal)
+            return
+
+        if mtype == "feedback":
+            self._feedback = msg.get("message", "")
+            log.info("Client feedback received: '%s'", self._feedback)
             return
 
         if mtype != "infer":
@@ -585,10 +607,12 @@ class ConnectionSession:
                     {"type": "error", "message": "missing frame_b64"}))
                 return
             frame_jpeg = base64.b64decode(frame_b64)
-            history   = msg.get("history", None)
+            history  = msg.get("history", None)
+            feedback = self._feedback
+            self._feedback = ""   # consume — only injected once
             try:
                 result = await self._loop.run_in_executor(
-                    None, self._engine.infer, frame_jpeg, goal, history)
+                    None, self._engine.infer, frame_jpeg, goal, history, feedback)
             except Exception as e:
                 log.error("Inference error: %s", e, exc_info=True)
                 await websocket.send(json.dumps({"type": "error", "message": str(e)}))
