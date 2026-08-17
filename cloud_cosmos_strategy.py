@@ -552,20 +552,22 @@ class CosmosReasoningDriverStrategy(_CosmosWebSocketMixin, NavigationStrategy):
     calls drive_raw(). Between cloud responses the last command is held.
     """
 
+    # Fast cycle — same pattern as cosmos_av: fire request, return, keepalive
+    # each cycle, check response next cycle. Never block waiting for cloud.
+    cycle_interval = 0.3
+
     def __init__(self, server_url: str, goal: str = "",
                  max_lin_mm_s: int = _DEFAULT_VEL,
-                 response_timeout: float = 30.0):
+                 response_timeout: float = 60.0):
         self._goal             = goal
         self._max_lin_mm_s     = max_lin_mm_s
         self._response_timeout = response_timeout
 
-        # Hold last drive command between cloud updates
-        self._last_vel    = 0
-        self._last_radius = _STEER_STRAIGHT
+        self._last_vel       = 0
+        self._last_radius    = _STEER_STRAIGHT
         self._last_reasoning = ""
-
-        # Set to True when model returns vel=0 — stops further inference
-        self._goal_reached = False
+        self._goal_reached   = False
+        self._infer_in_flight = False
 
         self._ws_init(server_url)
         if goal:
@@ -577,9 +579,10 @@ class CosmosReasoningDriverStrategy(_CosmosWebSocketMixin, NavigationStrategy):
         return "cosmos_driver"
 
     def on_reset(self) -> None:
-        self._last_vel     = 0
-        self._last_radius  = _STEER_STRAIGHT
-        self._goal_reached = False
+        self._last_vel        = 0
+        self._last_radius     = _STEER_STRAIGHT
+        self._goal_reached    = False
+        self._infer_in_flight = False
         log.info("CosmosReasoningDriverStrategy reset")
 
     def run_query(self, state: AgentState, frame: np.ndarray,
@@ -588,8 +591,6 @@ class CosmosReasoningDriverStrategy(_CosmosWebSocketMixin, NavigationStrategy):
             self._do_query(state, frame, rover_ctrl)
         except Exception as e:
             log.error("CosmosDriver error: %s", e, exc_info=True)
-            with state.result_lock:
-                state.llm_query_start = 0.0
         finally:
             state.query_in_flight.clear()
 
@@ -603,66 +604,59 @@ class CosmosReasoningDriverStrategy(_CosmosWebSocketMixin, NavigationStrategy):
         with self._conn_lock:
             conn = self._conn_state
 
-        def _publish_status(status: str) -> None:
-            ann = _annotate_frame(frame, self.name, self._goal, 0, _STEER_STRAIGHT, status)
+        def _pub(status: str, vel: int = 0, radius: int = _STEER_STRAIGHT,
+                 lines: list | None = None) -> None:
+            ann = _annotate_frame(frame, self.name, self._goal, vel, radius,
+                                  status, lines)
             with state.llm_lock:
                 state.llm_frame = ann
 
+        _pub("running")
+
         if conn == _ConnState.CONNECTING:
-            log.info("Step %d | waiting for Cosmos server…", step)
-            _publish_status("connecting")
-            self._write_result(state, step, phase, "connecting", 0,
-                               _STEER_STRAIGHT, "", t0)
+            _pub("connecting")
+            self._write_result(state, step, phase, "connecting", 0, _STEER_STRAIGHT, "", t0)
             return
 
         if not self._goal:
-            log.info("Step %d | no goal yet", step)
-            _publish_status("waiting_goal")
-            self._write_result(state, step, phase, "waiting_goal", 0,
-                               _STEER_STRAIGHT, "", t0)
+            _pub("waiting_goal")
+            self._write_result(state, step, phase, "waiting_goal", 0, _STEER_STRAIGHT, "", t0)
             return
 
         if self._goal_reached:
-            log.debug("Step %d | goal already achieved — not sending inference", step)
-            _publish_status("goal_achieved")
+            _pub("goal_achieved", lines=[f"cosmos: {self._last_reasoning[:80]}"])
             self._write_result(state, step, phase, "goal_achieved", 0,
                                _STEER_STRAIGHT, self._last_reasoning, t0)
             return
 
-        # ── Encode and send ────────────────────────────────────────────────────
-        frame_b64 = self._encode_frame(frame)
-        try:
-            self._send_infer_sync(frame_b64, self._goal, timeout=5.0)
-        except Exception as e:
-            log.warning("Step %d | send failed: %s", step, e)
-            self._write_result(state, step, phase, "send_error",
-                               self._last_vel, self._last_radius,
-                               self._last_reasoning, t0)
-            return
+        # ── Fire inference request (non-blocking) ─────────────────────────────
+        if not self._infer_in_flight:
+            self._infer_in_flight = True
+            self._response_event.clear()
+            self._pending_resp = None
+            frame_b64 = self._encode_frame(frame)
+            try:
+                self._send_infer_sync(frame_b64, self._goal, timeout=5.0)
+                log.info("Step %d | inference request sent, waiting for response…", step)
+            except Exception as e:
+                log.warning("Step %d | send failed: %s", step, e)
+                self._infer_in_flight = False
 
-        # ── Wait for drive response, sending keepalive every 200ms ───────────
-        # Roomba OI watchdog fires at ~500ms with no serial activity and drops
-        # the robot to passive mode (drive commands ignored until re-init).
-        # Poll every 200ms — well inside the watchdog window — and send a
-        # drive(0) each time to reset the watchdog timer.
-        budget    = max(self._response_timeout, state.query_interval - (time.time() - t0))
-        deadline  = time.time() + budget
-        log.info("Step %d | waiting for Cosmos drive command (budget=%.1fs)…",
-                 step, budget)
-        while True:
-            signalled = self._response_event.wait(timeout=0.2)
-            if signalled:
-                break
-            if time.time() >= deadline:
-                log.warning("Step %d | Cosmos timed out", step)
-                self._write_result(state, step, phase, "timeout",
-                                   self._last_vel, self._last_radius,
-                                   self._last_reasoning, t0)
-                return
-            # Keepalive: START+SAFE+DRIVE(0) re-asserts OI and resets watchdog
-            if rover_ctrl and not state.paused.is_set():
-                rover_ctrl.keepalive()
+        # ── Send keepalive drive while waiting (vel=0, stays OI-awake) ────────
+        operator_active = (state.operator_control is not None
+                           and state.operator_until > time.time())
+        if rover_ctrl and not state.paused.is_set() and not operator_active:
+            rover_ctrl.drive_raw(0, _STEER_STRAIGHT)
+        _pub("waiting_response", self._last_vel, self._last_radius,
+             ["waiting for cosmos response…"])
+        self._write_result(state, step, phase, "waiting_response",
+                           0, _STEER_STRAIGHT, self._last_reasoning, t0)
 
+        # ── Check if response has arrived ──────────────────────────────────────
+        if not self._response_event.is_set():
+            return   # not yet — come back next cycle
+
+        self._infer_in_flight = False
         resp = self._pending_resp
         if resp is None or resp.get("type") != "drive":
             msg = resp.get("message", "unknown") if resp else "disconnected"
@@ -688,39 +682,25 @@ class CosmosReasoningDriverStrategy(_CosmosWebSocketMixin, NavigationStrategy):
                  step, vel, r_str, goal_achieved, cloud_s, elapsed)
         log.info("Step %d | full response: %s", step, json.dumps(resp))
 
-        # ── Goal achieved: model explicitly signalled completion ──────────────
+        # ── Goal achieved ──────────────────────────────────────────────────────
         if goal_achieved:
             self._goal_reached = True
-            log.info("Step %d | goal_achieved — stopping and halting inference", step)
-            if rover_ctrl and not state.paused.is_set():
+            log.info("Step %d | goal_achieved — stopping", step)
+            if rover_ctrl and not state.paused.is_set() and not operator_active:
                 rover_ctrl.drive_raw(0, _STEER_STRAIGHT)
-            annotated = _annotate_frame(
-                frame, self.name, self._goal, 0, _STEER_STRAIGHT, "goal_achieved",
-                lines=[f"cosmos: {reasoning[:80]}"],
-            )
-            with state.llm_lock:
-                state.llm_frame = annotated
+            _pub("goal_achieved", 0, _STEER_STRAIGHT,
+                 [f"cosmos: {reasoning[:80]}"])
             self._write_result(state, step, phase, "goal_achieved",
                                0, _STEER_STRAIGHT, reasoning, t0)
             return
 
-        operator_active = (state.operator_control is not None
-                           and state.operator_until > time.time())
+        # ── Execute drive command ──────────────────────────────────────────────
         if rover_ctrl and not state.paused.is_set() and not operator_active:
             rover_ctrl.drive_raw(vel, radius)
-            # Stop immediately after so Roomba doesn't coast during next inference
             rover_ctrl.drive_raw(0, _STEER_STRAIGHT)
 
-        # ── Publish annotated frame to web UI ─────────────────────────────────
-        annotated = _annotate_frame(
-            frame, self.name, self._goal, vel, radius, "navigating",
-            lines=[f"cosmos: {reasoning[:80]}"],
-        )
-        with state.llm_lock:
-            state.llm_frame = annotated
-
-        self._write_result(state, step, phase, "navigating",
-                           vel, radius, reasoning, t0)
+        _pub("navigating", vel, radius, [f"cosmos: {reasoning[:80]}"])
+        self._write_result(state, step, phase, "navigating", vel, radius, reasoning, t0)
 
     def _write_result(self, state, step, phase, status,
                       vel, radius, reasoning, t0) -> None:
