@@ -2,10 +2,10 @@
 """
 arm_trace_y_line.py — Trace a line parallel to the Y axis at fixed X and Z.
 
-Defaults to X = 350 mm, Z = 350 mm, sweeping Y across the arm's lateral bounds
-from positive to negative (250 → -250 mm). Note that X=350 and Z=350 both sit
+Defaults to X = 400 mm, Z = 100 mm, sweeping Y across the arm's lateral bounds
+from positive to negative (450 → -450 mm). Note that X=400 and Y=±450 both sit
 outside the workspace limits declared in arm_controller.py (X max 300,
-Z max 300) — by default those values are clamped. Pass --no-clamp to send them
+Y max ±250) — by default those values are clamped. Pass --no-clamp to send them
 raw and let the arm firmware decide.
 
 Motion is streamed rather than stepped: many small waypoints are sent at a
@@ -21,7 +21,7 @@ computing this from --steps and --delay.
 
 Usage
 ─────
-    # Dry-run the default line (X=350, Z=350, Y from 250 to -250):
+    # Dry-run the default line (X=400, Z=100, Y from 450 to -450):
     python experimental/arm_trace_y_line.py --dry-run
 
     # Preview the trajectory:
@@ -198,14 +198,14 @@ def run(pts, speed: int, delay: float, port: str, dry_run: bool) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Trace a line parallel to Y at fixed X and Z (RoArm-M2-S)")
-    parser.add_argument("--x",       type=float, default=350,
-                        help="Fixed X in mm (default: 350)")
-    parser.add_argument("--z",       type=float, default=350,
-                        help="Fixed Z in mm (default: 350)")
-    parser.add_argument("--y-start", type=float, default=ARM_Y_MAX,
-                        help=f"Y start in mm (default: {ARM_Y_MAX})")
-    parser.add_argument("--y-end",   type=float, default=ARM_Y_MIN,
-                        help=f"Y end in mm (default: {ARM_Y_MIN})")
+    parser.add_argument("--x",       type=float, default=400,
+                        help="Fixed X in mm (default: 400)")
+    parser.add_argument("--z",       type=float, default=100,
+                        help="Fixed Z in mm (default: 100)")
+    parser.add_argument("--y-start", type=float, default=450,
+                        help="Y start in mm (default: 450)")
+    parser.add_argument("--y-end",   type=float, default=-450,
+                        help="Y end in mm (default: -450)")
     parser.add_argument("--steps",   type=int,   default=200,
                         help="Steps per pass — more, smaller steps move more "
                              "smoothly (default: 200)")
@@ -238,10 +238,13 @@ def main() -> None:
         sys.exit("--passes must be >= 1")
 
     clamp = not args.no_clamp
-    if clamp and (args.x > ARM_X_MAX or args.z > ARM_Z_MAX):
-        print(f"[warn] X={args.x:.0f} Z={args.z:.0f} exceed workspace limits "
-              f"(X<={ARM_X_MAX}, Z<={ARM_Z_MAX}) — clamping. "
-              f"Use --no-clamp to send raw.")
+    if clamp and (args.x > ARM_X_MAX or args.z > ARM_Z_MAX
+                  or args.y_start > ARM_Y_MAX or args.y_start < ARM_Y_MIN
+                  or args.y_end   > ARM_Y_MAX or args.y_end   < ARM_Y_MIN):
+        print(f"[warn] requested X={args.x:.0f} Z={args.z:.0f} "
+              f"Y={args.y_start:.0f}→{args.y_end:.0f} exceed workspace limits "
+              f"(X<={ARM_X_MAX}, Z<={ARM_Z_MAX}, {ARM_Y_MIN}<=Y<={ARM_Y_MAX}) "
+              f"— clamping. Use --no-clamp to send raw.")
 
     pts = generate_waypoints(args.x, args.z, args.y_start, args.y_end,
                              args.steps, args.passes, clamp, args.ease)
