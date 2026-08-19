@@ -832,8 +832,8 @@ def main():
         "--serial",
         dest="right_serial",
         type=str,
-        default=SERIAL_PORT,
-        help="right-arm serial device",
+        default=None,
+        help="right-arm serial device; omit for rover-only operation",
     )
     parser.add_argument(
         "--left-serial",
@@ -863,19 +863,35 @@ def main():
             parser.error("--cert / --key are only used with --socket-type wss")
         ssl_ctx = None
 
-    serial_paths = {"right": args.right_serial}
+    serial_paths = {}
+    if args.right_serial:
+        serial_paths["right"] = args.right_serial
     if args.left_serial:
         serial_paths["left"] = args.left_serial
 
     serial_ports = {}
     for name, path in serial_paths.items():
         print(f"Opening {name} arm serial {path} @ {args.baud}")
-        serial_ports[name] = serial.Serial(path, args.baud, timeout=0.05)
-    time.sleep(2)
-    states = {
-        name: initialize_arm(name, ser)
-        for name, ser in serial_ports.items()
-    }
+        try:
+            serial_ports[name] = serial.Serial(path, args.baud, timeout=0.05)
+        except (OSError, serial.SerialException) as error:
+            print(f"[!] {name} arm unavailable on {path}: {error}")
+
+    states = {}
+    if serial_ports:
+        time.sleep(2)
+    for name, ser in list(serial_ports.items()):
+        try:
+            states[name] = initialize_arm(name, ser)
+        except Exception as error:
+            print(f"[!] {name} arm initialization failed: {error}")
+            try:
+                ser.close()
+            except Exception:
+                pass
+            del serial_ports[name]
+    if not serial_ports:
+        print("[init] no robot arms connected; continuing in rover-only mode")
     rover_context = None
     rover_ctrl = None
     rover_state = RoverDriveState()
