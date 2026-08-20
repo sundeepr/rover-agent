@@ -42,6 +42,15 @@ fire-and-forget streaming used by arm_trace_y_line.py — expect a slower,
 uneven cadence (some Y positions settle in one read, others take many),
 not smooth continuous motion.
 
+Startup sequence (hardware only, skip with --skip-home)
+─────────────────────────────────────────────────────────
+1. Home all joints (T:122, same pose as arm_base_sweep.py) — so every run
+   starts from a known joint configuration instead of wherever the arm was
+   last left, which matters here since the control loop's first move could
+   otherwise be an unpredictable jump from an arbitrary pose.
+2. Move to the trace's starting XYZ as a separate step.
+3. Only then does the pressure-control loop begin reading torque.
+
 Usage
 ─────
     # No hardware needed — simulate a wavy surface and see if the
@@ -68,6 +77,13 @@ import time
 ARM_X_MIN, ARM_X_MAX =   50, 410
 ARM_Y_MIN, ARM_Y_MAX = -250, 250
 ARM_Z_MIN, ARM_Z_MAX =   30, 300
+
+# Default/home joint pose — matches arm_base_sweep.py's CMD_JOINTS_ANGLE_CTRL
+# (T:122) home: base=0 shoulder=0 elbow=90 hand=180 (closed).
+HOME_BASE_DEG     =   0
+HOME_SHOULDER_DEG =   0
+HOME_ELBOW_DEG    =  90
+HOME_EOAT_DEG     = 180
 
 SERVO_STEPS_PER_REV = 4096   # 12-bit encoder: one revolution = 4096 steps
 WRIST_ANGLE = 0
@@ -116,6 +132,40 @@ def build_command(x: float, y: float, z: float, speed: int) -> str:
         "t":   WRIST_ANGLE,
         "spd": speed,
     })
+
+
+def build_home_command(spd: int, acc: int) -> str:
+    return json.dumps({
+        "T":   122,
+        "b":   HOME_BASE_DEG,
+        "s":   HOME_SHOULDER_DEG,
+        "e":   HOME_ELBOW_DEG,
+        "h":   HOME_EOAT_DEG,
+        "spd": spd,
+        "acc": acc,
+    })
+
+
+def go_home(ser, spd: int, acc: int, dwell: float, log=print) -> None:
+    """Move all joints to the default/home pose (T:122) before anything else,
+    so every run starts from the same known joint configuration instead of
+    wherever the arm happened to be left."""
+    log(f"-- Homing (base={HOME_BASE_DEG} shoulder={HOME_SHOULDER_DEG} "
+        f"elbow={HOME_ELBOW_DEG} hand={HOME_EOAT_DEG}) --")
+    ser.write((build_home_command(spd, acc) + "\n").encode())
+    ser.flush()
+    time.sleep(dwell)
+
+
+def move_to_start(ser, x: float, y: float, z: float, spd: int,
+                  dwell: float, log=print) -> None:
+    """Move to the trace's starting XYZ as an explicit step after homing,
+    rather than letting the first control-loop iteration do it implicitly —
+    keeps homing and the approach-to-surface visibly separate."""
+    log(f"-- Moving to start (x={x:.1f} y={y:.1f} z={z:.1f}) --")
+    ser.write((build_command(x, y, z, spd) + "\n").encode())
+    ser.flush()
+    time.sleep(dwell)
 
 
 def request_feedback(ser, timeout: float = FEEDBACK_TIMEOUT_S) -> dict | None:
@@ -450,12 +500,19 @@ def run(args) -> None:
         try:
             import serial
             ser = serial.Serial(args.port, 115200, timeout=0.1)
-            if not args.curses:
-                print(f"Serial opened: {args.port}")
+            print(f"Serial opened: {args.port}")
             time.sleep(2)   # allow ESP32 to boot after serial open
             ser.reset_input_buffer()
         except Exception as e:
             sys.exit(f"Cannot open {args.port}: {e}")
+
+        # Home first, then move to the trace's starting XYZ as a separate,
+        # visible step — both happen before curses (if any) takes over the
+        # terminal, and before the first pressure reading, so the arm
+        # always approaches the surface from the same known pose.
+        if not args.skip_home:
+            go_home(ser, args.home_speed, args.home_accel, args.home_dwell)
+        move_to_start(ser, x0, y_start, z, speed, args.start_dwell)
 
     if not args.curses:
         mode = "SIMULATE" if args.simulate else "HARDWARE"
@@ -541,6 +598,23 @@ def main() -> None:
                         help="Serial port (default: /dev/ttyUSB0)")
     parser.add_argument("--no-clamp", action="store_true",
                         help="Send X/Y/Z raw instead of clamping to workspace limits")
+
+    parser.add_argument("--skip-home", action="store_true",
+                        help="Skip homing (T:122) and go straight to the "
+                             "trace's starting XYZ. Off by default — every "
+                             "run homes first so it starts from a known pose.")
+    parser.add_argument("--home-speed", type=int, default=30,
+                        help="Homing speed in deg/s, matches arm_base_sweep.py "
+                             "(default: 30)")
+    parser.add_argument("--home-accel", type=int, default=10,
+                        help="Homing acceleration in deg/s^2 (default: 10)")
+    parser.add_argument("--home-dwell", type=float, default=3.0,
+                        help="Seconds to wait after the home command before "
+                             "moving on (default: 3.0)")
+    parser.add_argument("--start-dwell", type=float, default=2.0,
+                        help="Seconds to wait after moving to the starting "
+                             "XYZ, before the first pressure reading "
+                             "(default: 2.0)")
     parser.add_argument("--plot",    action="store_true",
                         help="Show matplotlib summary of X/torque vs. step "
                              "(after the run finishes)")
