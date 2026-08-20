@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-arm_trace_y_line.py — Trace a line parallel to the Y axis at fixed X and Z.
+arm_trace_y_line.py — Trace a line parallel to the Y axis at fixed X, with Z
+either fixed or riding a triangular profile synced to the Y sweep.
 
 Defaults to X = 400 mm, Z = 155 mm, sweeping Y across the arm's lateral bounds
 from positive to negative (450 → -450 mm). Note that X=400 and Y=±450 both sit
@@ -38,6 +39,11 @@ Usage
 
     # Sweep back and forth twice:
     python experimental/arm_trace_y_line.py --port /dev/ttyUSB0 --passes 2
+
+    # Ride Z up 100mm over the first half of the sweep and back down over the
+    # second half (triangular Z profile), synced to Y's progress:
+    python experimental/arm_trace_y_line.py --port /dev/ttyUSB0 \\
+        --steps 200 --z-rise 100
 """
 
 import argparse
@@ -121,17 +127,32 @@ def _ease(t: float, mode: str) -> float:
     return t
 
 
+def _tent(t: float) -> float:
+    """Triangle envelope over t∈[0,1]: 0 at the ends, 1 at the midpoint."""
+    return 1.0 - abs(2.0 * t - 1.0)
+
+
 def generate_waypoints(x: float, z: float,
                        y_start: float, y_end: float,
                        steps: int, passes: int,
                        clamp: bool,
-                       ease: str = "linear") -> list[tuple[float, float, float]]:
-    """Y sweep at constant X/Z. Each extra pass reverses direction."""
+                       ease: str = "linear",
+                       z_rise: float = 0.0) -> list[tuple[float, float, float]]:
+    """
+    Y sweep at constant X. Each extra pass reverses direction.
+
+    z_rise != 0 rides a triangular Z profile on top of the base Z: Z climbs
+    by z_rise mm over the first half of each pass and comes back down over
+    the second half, in step with Y's progress (not wall-clock time) — e.g.
+    with steps=200, z_rise=100 that's +1mm of Z per step for the first 100
+    steps, then -1mm per step for the next 100, landing back at base Z
+    exactly when Y reaches the far end.
+    """
     if clamp:
         x = _clamp(x, ARM_X_MIN, ARM_X_MAX)
-        z = _clamp(z, ARM_Z_MIN, ARM_Z_MAX)
         y_start = _clamp(y_start, ARM_Y_MIN, ARM_Y_MAX)
         y_end   = _clamp(y_end,   ARM_Y_MIN, ARM_Y_MAX)
+        # z is no longer fixed when z_rise != 0, so it's clamped per-point below
 
     pts = []
     for p in range(passes):
@@ -139,8 +160,12 @@ def generate_waypoints(x: float, z: float,
         # Skip the duplicated endpoint when reversing
         first = 1 if p > 0 else 0
         for i in range(first, steps + 1):
-            y = lo + (hi - lo) * _ease(i / steps, ease)
-            pts.append((x, y, z))
+            t = i / steps
+            y = lo + (hi - lo) * _ease(t, ease)
+            zi = z + z_rise * _tent(t)
+            if clamp:
+                zi = _clamp(zi, ARM_Z_MIN, ARM_Z_MAX)
+            pts.append((x, y, zi))
     return pts
 
 
@@ -155,10 +180,12 @@ def plot_trajectory(pts: list[tuple[float, float, float]]) -> None:
     ys = [p[1] for p in pts]
     zs = [p[2] for p in pts]
     steps = list(range(len(pts)))
+    z_varies = max(zs) - min(zs) > 1e-6
 
-    fig = plt.figure(figsize=(14, 5))
+    ncols = 4 if z_varies else 3
+    fig = plt.figure(figsize=(14 if not z_varies else 18, 5))
 
-    ax3 = fig.add_subplot(1, 3, 1, projection='3d')
+    ax3 = fig.add_subplot(1, ncols, 1, projection='3d')
     ax3.plot(xs, ys, zs, 'o-', color='steelblue', markersize=6)
     ax3.scatter([xs[0]], [ys[0]], [zs[0]], color='green', s=80, label='start')
     ax3.scatter([xs[-1]], [ys[-1]], [zs[-1]], color='red', s=80, label='end')
@@ -166,7 +193,7 @@ def plot_trajectory(pts: list[tuple[float, float, float]]) -> None:
     ax3.set_title('3-D view')
     ax3.legend(fontsize=8)
 
-    ax2 = fig.add_subplot(1, 3, 2)
+    ax2 = fig.add_subplot(1, ncols, 2)
     ax2.plot(steps, ys, 's-', color='tomato', markersize=6)
     ax2.axhline(ARM_Y_MIN, color='grey', ls='--', lw=1)
     ax2.axhline(ARM_Y_MAX, color='grey', ls='--', lw=1)
@@ -174,7 +201,7 @@ def plot_trajectory(pts: list[tuple[float, float, float]]) -> None:
     ax2.set_title('Y profile (moving axis)')
     ax2.grid(True, alpha=0.3)
 
-    ax1 = fig.add_subplot(1, 3, 3)
+    ax1 = fig.add_subplot(1, ncols, 3)
     ax1.plot(xs, ys, 'o-', color='mediumseagreen', markersize=6)
     ax1.scatter([xs[0]], [ys[0]], color='green', s=80)
     ax1.scatter([xs[-1]], [ys[-1]], color='red', s=80)
@@ -183,7 +210,17 @@ def plot_trajectory(pts: list[tuple[float, float, float]]) -> None:
     ax1.grid(True, alpha=0.3)
     ax1.set_aspect('equal')
 
-    plt.suptitle(f'arm_trace_y_line — X={pts[0][0]:.1f}mm  Z={pts[0][2]:.1f}mm',
+    if z_varies:
+        ax4 = fig.add_subplot(1, ncols, 4)
+        ax4.plot(steps, zs, '^-', color='darkorange', markersize=6)
+        ax4.axhline(ARM_Z_MIN, color='grey', ls='--', lw=1)
+        ax4.axhline(ARM_Z_MAX, color='grey', ls='--', lw=1)
+        ax4.set_xlabel('Step'); ax4.set_ylabel('Z (mm)')
+        ax4.set_title('Z profile (triangular rise)')
+        ax4.grid(True, alpha=0.3)
+
+    z_label = f'Z={pts[0][2]:.1f}-{max(zs):.1f}mm' if z_varies else f'Z={pts[0][2]:.1f}mm'
+    plt.suptitle(f'arm_trace_y_line — X={pts[0][0]:.1f}mm  {z_label}',
                  fontsize=12)
     plt.tight_layout()
     plt.show()
@@ -201,9 +238,14 @@ def run(pts, speed: int, delay: float, port: str, dry_run: bool) -> None:
             sys.exit(f"Cannot open {port}: {e}")
 
     ys = [p[1] for p in pts]
+    zs = [p[2] for p in pts]
+    z_varies = max(zs) - min(zs) > 1e-6
     print(f"\nTracing {len(pts)} points along Y  speed={speed}  delay={delay}s")
     print(f"  X: {pts[0][0]:.1f} mm  (fixed)")
-    print(f"  Z: {pts[0][2]:.1f} mm  (fixed)")
+    if z_varies:
+        print(f"  Z: {min(zs):.1f} → {max(zs):.1f} mm  ← triangular, in step with Y")
+    else:
+        print(f"  Z: {pts[0][2]:.1f} mm  (fixed)")
     print(f"  Y: {ys[0]:.1f} → {ys[-1]:.1f} mm  ← moving\n")
 
     # Stream on a fixed wall-clock schedule rather than sleeping a fixed amount
@@ -246,7 +288,14 @@ def main() -> None:
     parser.add_argument("--x",       type=float, default=400,
                         help="Fixed X in mm (default: 400)")
     parser.add_argument("--z",       type=float, default=155,
-                        help="Fixed Z in mm (default: 155)")
+                        help="Base Z in mm (default: 155)")
+    parser.add_argument("--z-rise",  type=float, default=0,
+                        help="Triangular Z profile synced to Y progress: Z rises "
+                             "by this many mm over the first half of each pass "
+                             "and returns to base Z over the second half — e.g. "
+                             "--steps 200 --z-rise 100 climbs Z by 1mm/step for "
+                             "100 steps then descends 1mm/step for the next 100 "
+                             "(default: 0, i.e. flat Z)")
     parser.add_argument("--y-start", type=float, default=450,
                         help="Y start in mm (default: 450)")
     parser.add_argument("--y-end",   type=float, default=-450,
@@ -284,17 +333,20 @@ def main() -> None:
     if args.passes < 1:
         sys.exit("--passes must be >= 1")
 
+    z_peak = args.z + args.z_rise   # z_rise is >= 0 in normal use
     clamp = not args.no_clamp
-    if clamp and (args.x > ARM_X_MAX or args.z > ARM_Z_MAX
+    if clamp and (args.x > ARM_X_MAX or args.z > ARM_Z_MAX or z_peak > ARM_Z_MAX
                   or args.y_start > ARM_Y_MAX or args.y_start < ARM_Y_MIN
                   or args.y_end   > ARM_Y_MAX or args.y_end   < ARM_Y_MIN):
-        print(f"[warn] requested X={args.x:.0f} Z={args.z:.0f} "
+        print(f"[warn] requested X={args.x:.0f} Z={args.z:.0f}"
+              f"{f'→{z_peak:.0f}' if args.z_rise else ''} "
               f"Y={args.y_start:.0f}→{args.y_end:.0f} exceed workspace limits "
               f"(X<={ARM_X_MAX}, Z<={ARM_Z_MAX}, {ARM_Y_MIN}<=Y<={ARM_Y_MAX}) "
               f"— clamping. Use --no-clamp to send raw.")
 
     pts = generate_waypoints(args.x, args.z, args.y_start, args.y_end,
-                             args.steps, args.passes, clamp, args.ease)
+                             args.steps, args.passes, clamp, args.ease,
+                             args.z_rise)
 
     if args.plot:
         plot_trajectory(pts)
