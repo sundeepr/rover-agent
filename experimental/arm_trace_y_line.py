@@ -16,8 +16,10 @@ of decelerating to a stop at each one.
 revolution), and `spd: 0` means *maximum* speed, not "unlimited/smooth" — with
 spd:0 the arm bolts to each target, arrives early, idles, and reads as jumping
 between extremes rather than tracing the line. Too slow and it lags behind the
-stream; too fast and it jumps. See arm_rover_trace_y.py's auto_speed() for
-computing this from --steps and --delay.
+stream; too fast and it jumps. By default `--speed` is auto-computed (see
+auto_speed(), mirrored from arm_rover_trace_y.py) from --steps/--delay/--ease
+so the arm stays in motion between waypoints instead of stopping and idling
+at each one. Pass --speed explicitly to override.
 
 Usage
 ─────
@@ -49,11 +51,54 @@ ARM_X_MIN, ARM_X_MAX =   50, 410
 ARM_Y_MIN, ARM_Y_MAX = -250, 250
 ARM_Z_MIN, ARM_Z_MAX =   30, 300
 
+SERVO_STEPS_PER_REV = 4096   # 12-bit encoder: one revolution = 4096 steps
+
 WRIST_ANGLE = 0
 
 
 def _clamp(v, lo, hi):
     return max(lo, min(hi, v))
+
+
+def auto_speed(x: float, y_start: float, y_end: float,
+                steps: int, delay: float, ease: str) -> int:
+    """
+    Pick a `spd` (servo steps/sec) so each waypoint move takes roughly one
+    command period.
+
+    `spd: 0` does NOT mean "track smoothly" — per the Waveshare docs it means
+    *maximum* speed, so the arm bolts to each target, arrives early, and idles
+    until the next command lands. With targets arriving every `delay` seconds
+    that reads as slamming between extremes rather than tracing the line.
+    Sizing spd to the step rate keeps the arm still moving when the next
+    target lands, which is what actually blends the waypoints into a
+    continuous path. Mirrors arm_rover_trace_y.py's auto_speed().
+    """
+    if delay <= 0 or steps < 1:
+        return 0
+
+    # The Y sweep is driven mainly by base rotation, so size spd from the
+    # base angle swept per step rather than from linear mm — a fixed mm/s
+    # rate under-drives the servo near the ends of a wide sweep like this
+    # one, which is what reads as jerky/non-smooth motion.
+    a_start = math.atan2(y_start, x)
+    a_end   = math.atan2(y_end, x)
+    total_rad = abs(a_end - a_start)
+    if total_rad > math.pi:          # took the wrong way round the circle
+        total_rad = 2 * math.pi - total_rad
+    if total_rad <= 0:
+        return 0
+
+    mean_rad_per_step = total_rad / steps
+    if ease == "cosine":
+        # Cosine easing peaks at ~pi/2 times the mean rate; size for the
+        # peak so the arm does not fall behind mid-sweep.
+        mean_rad_per_step *= math.pi / 2
+
+    rad_per_s = mean_rad_per_step / delay
+    spd = rad_per_s / (2 * math.pi) * SERVO_STEPS_PER_REV
+    # Small headroom so the arm can absorb jitter without falling behind.
+    return max(10, int(spd * 1.2))
 
 
 def build_command(x: float, y: float, z: float, speed: int) -> str:
@@ -211,11 +256,13 @@ def main() -> None:
                              "smoothly (default: 200)")
     parser.add_argument("--passes",  type=int,   default=1,
                         help="Sweeps along the line, alternating direction (default: 1)")
-    parser.add_argument("--speed",   type=int,   default=300,
+    parser.add_argument("--speed",   type=int,   default=None,
                         help="Arm speed in servo steps/sec (4096 = one servo "
                              "revolution). Do NOT use 0 — per the Waveshare docs "
                              "that means MAXIMUM speed, so the arm jumps between "
-                             "targets instead of tracing the line (default: 300)")
+                             "targets instead of tracing the line. Default: "
+                             "auto-computed from --steps/--delay/--ease so the "
+                             "arm stays in motion between waypoints.")
     parser.add_argument("--delay",   type=float, default=0.05,
                         help="Seconds between steps — the streaming period "
                              "(default: 0.05, i.e. 20 Hz)")
@@ -252,7 +299,21 @@ def main() -> None:
     if args.plot:
         plot_trajectory(pts)
 
-    run(pts, args.speed, args.delay, args.port, args.dry_run)
+    x0 = pts[0][0]
+    y_lo, y_hi = (args.y_start, args.y_end)
+    if clamp:
+        y_lo = _clamp(y_lo, ARM_Y_MIN, ARM_Y_MAX)
+        y_hi = _clamp(y_hi, ARM_Y_MIN, ARM_Y_MAX)
+    speed = args.speed
+    if speed is None:
+        speed = auto_speed(x0, y_lo, y_hi, args.steps, args.delay, args.ease)
+        print(f"[auto-speed] spd={speed} (from --steps={args.steps} "
+              f"--delay={args.delay} --ease={args.ease})")
+        if speed == 0:
+            print("    [warn] auto-speed computed 0 — the arm will jump "
+                  "between targets rather than trace the line.")
+
+    run(pts, speed, args.delay, args.port, args.dry_run)
 
 
 if __name__ == "__main__":
