@@ -22,20 +22,25 @@ want, and read off the torS/torE values it reports.
 
 Control loop
 ────────────
-At each Y step: move to (x, y, z), let the servo settle, read torque
-feedback, and nudge X for the *next* step by a proportional term:
+At each Y waypoint, Y is held fixed while X is corrected repeatedly until
+torque *settles*, only then does Y advance to the next waypoint:
 
     x += kp * (target_torque - measured_torque)
 
 Too much measured torque (pressing too hard) -> shrink x (retract).
-Too little (losing contact) -> grow x (press in). --max-step caps how far
-x can move in one step so a bad reading can't slam the arm into the
-surface. --deadband ignores small error so it doesn't hunt/oscillate on
-noise.
+Too little (losing contact) -> grow x (press in). "Settled" means
+--stabilize-consecutive torque readings in a row landed inside --deadband;
+--stabilize-tries caps how many correction attempts we'll make at one Y
+position before giving up and advancing anyway (with a warning), so a
+Y position the controller can't converge at doesn't stall the whole run.
+--max-step caps how far x can move in one correction so a bad reading can't
+slam the arm into the surface.
 
-Because each step needs a full move + settle + feedback round-trip, this is
-NOT the fire-and-forget streaming used by arm_trace_y_line.py — expect a
-slower, per-step cadence, not smooth continuous motion.
+Because each correction needs a full move + settle + feedback round-trip,
+and Y won't advance until pressure has actually stabilized, this is NOT the
+fire-and-forget streaming used by arm_trace_y_line.py — expect a slower,
+uneven cadence (some Y positions settle in one read, others take many),
+not smooth continuous motion.
 
 Usage
 ─────
@@ -181,60 +186,79 @@ def generate_steps(args, ser, clamp: bool, x0: float, z: float,
     move + settle + feedback + control-update work. Pacing (--delay) and
     Ctrl-C both happen inside this generator.
     """
+    def measure(x, y):
+        if args.simulate:
+            tor_s, tor_e = simulate_torque(
+                x, y, args.sim_surface_x, args.sim_surface_amp,
+                args.sim_surface_freq, y_start, y_end,
+                args.sim_stiffness, args.sim_idle_torque, args.sim_noise)
+            return tor_s, tor_e, abs(tor_s) + abs(tor_e)
+
+        cmd = build_command(x, y, z, speed)
+        ser.write((cmd + "\n").encode())
+        ser.flush()
+        time.sleep(args.settle)
+        fb = request_feedback(ser, args.feedback_timeout)
+        if fb:
+            return fb.get("torS"), fb.get("torE"), combine_torque(fb)
+        return None, None, None
+
     x = x0
     start_t = time.monotonic()
     for i in range(args.steps + 1):
         t = i / args.steps
         y = y_start + (y_end - y_start) * _ease(t, args.ease)
 
-        tor_s = tor_e = None
-        if args.simulate:
-            tor_s, tor_e = simulate_torque(
-                x, y, args.sim_surface_x, args.sim_surface_amp,
-                args.sim_surface_freq, y_start, y_end,
-                args.sim_stiffness, args.sim_idle_torque, args.sim_noise)
-            measured = abs(tor_s) + abs(tor_e)
-        else:
-            cmd = build_command(x, y, z, speed)
-            ser.write((cmd + "\n").encode())
-            ser.flush()
-            time.sleep(args.settle)
-            fb = request_feedback(ser, args.feedback_timeout)
-            if fb:
-                tor_s, tor_e = fb.get("torS"), fb.get("torE")
-                measured = combine_torque(fb)
+        # Hold Y fixed at this waypoint and keep correcting X until torque
+        # settles (>= --stabilize-consecutive readings inside the deadband
+        # in a row), instead of advancing Y every iteration regardless of
+        # whether the pressure loop has converged. --stabilize-tries caps
+        # how long we'll wait before giving up and moving on anyway.
+        consecutive_stable = 0
+        for settle_iter in range(args.stabilize_tries):
+            tor_s, tor_e, measured = measure(x, y)
+
+            state = {
+                "i": i, "steps": args.steps, "x": x, "y": y, "z": z,
+                "tor_s": tor_s, "tor_e": tor_e, "torque": measured,
+                "target": args.target_torque, "deadband": args.deadband,
+                "miss": measured is None, "error": None,
+                "delta": 0.0, "in_deadband": False, "x_next": x,
+                "elapsed": time.monotonic() - start_t,
+                "settle_iter": settle_iter, "stable": False,
+                "gave_up": False,
+            }
+
+            if measured is not None:
+                error = args.target_torque - measured
+                state["error"] = error
+                if abs(error) <= args.deadband:
+                    state["in_deadband"] = True
+                    consecutive_stable += 1
+                    if consecutive_stable >= args.stabilize_consecutive:
+                        state["stable"] = True
+                else:
+                    consecutive_stable = 0
+                    delta = _clamp(args.kp * error, -args.max_step, args.max_step)
+                    x_next = x + delta
+                    if clamp:
+                        x_next = _clamp(x_next, ARM_X_MIN, ARM_X_MAX)
+                    state["delta"] = x_next - x
+                    state["x_next"] = x_next
+                    x = x_next
             else:
-                measured = None
+                consecutive_stable = 0
 
-        state = {
-            "i": i, "steps": args.steps, "x": x, "y": y, "z": z,
-            "tor_s": tor_s, "tor_e": tor_e, "torque": measured,
-            "target": args.target_torque, "deadband": args.deadband,
-            "miss": measured is None, "error": None,
-            "delta": 0.0, "in_deadband": False, "x_next": x,
-            "elapsed": time.monotonic() - start_t,
-        }
+            gave_up = (not state["stable"]
+                      and settle_iter == args.stabilize_tries - 1)
+            state["gave_up"] = gave_up
 
-        if measured is not None:
-            error = args.target_torque - measured
-            state["error"] = error
-            if abs(error) > args.deadband:
-                delta = _clamp(args.kp * error, -args.max_step, args.max_step)
-                x_next = x + delta
-                if clamp:
-                    x_next = _clamp(x_next, ARM_X_MIN, ARM_X_MAX)
-                state["delta"] = x_next - x
-                state["x_next"] = x_next
-                x = x_next
-            else:
-                state["in_deadband"] = True
+            yield state
 
-        yield state
+            if state["stable"] or gave_up:
+                break
 
-        if i < args.steps:
-            sleep_for = (start_t + (i + 1) * args.delay) - time.monotonic()
-            if sleep_for > 0:
-                time.sleep(sleep_for)
+            time.sleep(args.delay)
 
 
 def plot_run(steps_log: list[dict]) -> None:
@@ -244,29 +268,32 @@ def plot_run(steps_log: list[dict]) -> None:
         print("[warn] matplotlib not installed — skipping plot")
         return
 
-    idx = [s["i"] for s in steps_log]
+    # Use a sequential read-index rather than waypoint `i` for the X axis:
+    # each Y waypoint can take several settle iterations (same `i`, `y`)
+    # while X hunts for the target torque, so `i` alone repeats.
+    idx = list(range(len(steps_log)))
     xs = [s["x"] for s in steps_log]
     ys = [s["y"] for s in steps_log]
     torques = [s["torque"] for s in steps_log if s["torque"] is not None]
-    torque_idx = [s["i"] for s in steps_log if s["torque"] is not None]
+    torque_idx = [n for n, s in enumerate(steps_log) if s["torque"] is not None]
     target = steps_log[0]["target"]
 
     fig, axes = plt.subplots(1, 3, figsize=(16, 4.5))
 
     axes[0].plot(idx, ys, 's-', color='tomato', markersize=4)
-    axes[0].set_xlabel('Step'); axes[0].set_ylabel('Y (mm)')
+    axes[0].set_xlabel('Read #'); axes[0].set_ylabel('Y (mm)')
     axes[0].set_title('Y profile (moving axis)')
     axes[0].grid(True, alpha=0.3)
 
     axes[1].plot(idx, xs, 'o-', color='steelblue', markersize=4)
-    axes[1].set_xlabel('Step'); axes[1].set_ylabel('X (mm)')
+    axes[1].set_xlabel('Read #'); axes[1].set_ylabel('X (mm)')
     axes[1].set_title('X — controller output (depth)')
     axes[1].grid(True, alpha=0.3)
 
     axes[2].plot(torque_idx, torques, '^-', color='darkorange', markersize=4,
                 label='measured')
     axes[2].axhline(target, color='grey', ls='--', lw=1.5, label='target')
-    axes[2].set_xlabel('Step'); axes[2].set_ylabel('Torque (|torS|+|torE|)')
+    axes[2].set_xlabel('Read #'); axes[2].set_ylabel('Torque (|torS|+|torE|)')
     axes[2].set_title('Pressure signal vs. target')
     axes[2].legend(fontsize=8)
     axes[2].grid(True, alpha=0.3)
@@ -278,13 +305,20 @@ def plot_run(steps_log: list[dict]) -> None:
 
 def _print_step(state: dict) -> None:
     i, steps = state["i"], state["steps"]
+    tag = f"Step {i:03d}/{steps}.{state['settle_iter']:02d}"
     if state["miss"]:
-        print(f"Step {i:03d}/{steps}  y={state['y']:7.1f}  x={state['x']:7.1f}  "
+        print(f"{tag}  y={state['y']:7.1f}  x={state['x']:7.1f}  "
               f"[warn] no/incomplete feedback")
         return
-    tail = ("(in deadband)" if state["in_deadband"]
-            else f"-> x_next={state['x_next']:7.1f}")
-    print(f"Step {i:03d}/{steps}  y={state['y']:7.1f}  x={state['x']:7.1f}  "
+    if state["stable"]:
+        tail = "STABLE -> advancing Y"
+    elif state["gave_up"]:
+        tail = "[warn] gave up waiting to stabilize -> advancing Y anyway"
+    elif state["in_deadband"]:
+        tail = "in deadband, confirming..."
+    else:
+        tail = f"-> x_next={state['x_next']:7.1f}  (waiting for Y to advance)"
+    print(f"{tag}  y={state['y']:7.1f}  x={state['x']:7.1f}  "
           f"torque={state['torque']:7.1f}  err={state['error']:+7.1f}  {tail}")
 
 
@@ -301,7 +335,7 @@ def run_plain(args, ser, clamp, x0, z, y_start, y_end, speed) -> list[dict]:
         print("\nInterrupted.")
 
     if not args.simulate and misses:
-        print(f"\n[warn] {misses}/{args.steps + 1} steps had no feedback — "
+        print(f"\n[warn] {misses}/{len(steps_log)} reads had no feedback — "
               f"increase --feedback-timeout or --settle if this is frequent.")
     print("\nDone.")
     return steps_log
@@ -350,6 +384,7 @@ def run_curses(args, ser, clamp, x0, z, y_start, y_end, speed) -> list[dict]:
             line(f" ARM SURFACE TRACE — [{mode}]  ('q' to quit)", curses.A_BOLD)
             line("─" * 60)
             line(f" Step:      {state['i']:4d} / {state['steps']}"
+                f"   Settle try: {state['settle_iter']+1:3d} / {args.stabilize_tries}"
                 f"   Elapsed: {state['elapsed']:6.1f}s")
             line()
             line(" Position (mm)")
@@ -374,12 +409,16 @@ def run_curses(args, ser, clamp, x0, z, y_start, y_end, speed) -> list[dict]:
             line()
             if state["miss"]:
                 status = "NO FEEDBACK"
+            elif state["stable"]:
+                status = "STABLE — advancing Y"
+            elif state["gave_up"]:
+                status = "[warn] gave up waiting to stabilize — advancing Y anyway"
             elif state["in_deadband"]:
-                status = "IN DEADBAND — holding X"
+                status = "in deadband, confirming... (Y held)"
             elif state["delta"] > 0:
-                status = f"LOSING CONTACT — advancing X by {state['delta']:+.2f}mm"
+                status = f"LOSING CONTACT — advancing X by {state['delta']:+.2f}mm (Y held)"
             elif state["delta"] < 0:
-                status = f"PRESSING TOO HARD — retracting X by {state['delta']:+.2f}mm"
+                status = f"PRESSING TOO HARD — retracting X by {state['delta']:+.2f}mm (Y held)"
             else:
                 status = "—"
             line(f" Status: {status}", curses.A_BOLD)
@@ -473,13 +512,24 @@ def main() -> None:
                         help="Ignore torque error smaller than this — avoids "
                              "hunting/oscillation on measurement noise "
                              "(default: 10.0)")
+    parser.add_argument("--stabilize-consecutive", type=int, default=2,
+                        help="Torque readings in a row that must land inside "
+                             "the deadband before Y is allowed to advance to "
+                             "the next waypoint (default: 2)")
+    parser.add_argument("--stabilize-tries", type=int, default=20,
+                        help="Max X-correction attempts at one Y position "
+                             "before giving up and advancing anyway (with a "
+                             "warning) — a safety cap against stalling "
+                             "forever on a Y position the controller can't "
+                             "settle at (default: 20)")
 
     parser.add_argument("--speed",   type=int,   default=None,
                         help="Servo steps/sec for the Y move (default: "
                              "auto-computed, see arm_trace_y_line.py)")
     parser.add_argument("--delay",   type=float, default=0.15,
-                        help="Target seconds per step, including the "
-                             "move+settle+feedback round-trip (default: 0.15)")
+                        help="Seconds between X-correction attempts while "
+                             "waiting for torque to settle at a Y position "
+                             "(default: 0.15)")
     parser.add_argument("--settle",  type=float, default=0.08,
                         help="Seconds to wait after each move before reading "
                              "feedback, so the servo has actually loaded up "
