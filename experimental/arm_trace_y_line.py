@@ -2,7 +2,7 @@
 """
 arm_trace_y_line.py — Trace a line parallel to the Y axis at fixed X and Z.
 
-Defaults to X = 400 mm, Z = 100 mm, sweeping Y across the arm's lateral bounds
+Defaults to X = 400 mm, Z = 155 mm, sweeping Y across the arm's lateral bounds
 from positive to negative (450 → -450 mm). Note that X=400 and Y=±450 both sit
 outside the workspace limits declared in arm_controller.py (X max 300,
 Y max ±250) — by default those values are clamped. Pass --no-clamp to send them
@@ -21,7 +21,7 @@ computing this from --steps and --delay.
 
 Usage
 ─────
-    # Dry-run the default line (X=400, Z=100, Y from 450 to -450):
+    # Dry-run the default line (X=400, Z=155, Y from 450 to -450):
     python experimental/arm_trace_y_line.py --dry-run
 
     # Preview the trajectory:
@@ -45,7 +45,7 @@ import sys
 import time
 
 # Arm workspace limits (mm) — mirrors arm_controller.py
-ARM_X_MIN, ARM_X_MAX =   50, 300
+ARM_X_MIN, ARM_X_MAX =   50, 410
 ARM_Y_MIN, ARM_Y_MAX = -250, 250
 ARM_Z_MIN, ARM_Z_MAX =   30, 300
 
@@ -200,8 +200,8 @@ def main() -> None:
         description="Trace a line parallel to Y at fixed X and Z (RoArm-M2-S)")
     parser.add_argument("--x",       type=float, default=400,
                         help="Fixed X in mm (default: 400)")
-    parser.add_argument("--z",       type=float, default=100,
-                        help="Fixed Z in mm (default: 100)")
+    parser.add_argument("--z",       type=float, default=155,
+                        help="Fixed Z in mm (default: 155)")
     parser.add_argument("--y-start", type=float, default=450,
                         help="Y start in mm (default: 450)")
     parser.add_argument("--y-end",   type=float, default=-450,

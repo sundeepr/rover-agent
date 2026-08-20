@@ -30,7 +30,7 @@ SERIAL_PORT = "/dev/ttyUSB0"
 BAUD_RATE   = 115200
 
 # ── Arm workspace (mm) — adjust from Waveshare spec ──────────────────────────
-ARM_X_MIN, ARM_X_MAX =   50, 300   # forward reach from base
+ARM_X_MIN, ARM_X_MAX =   50, 410   # forward reach from base
 ARM_Y_MIN, ARM_Y_MAX = -200, 200   # lateral (left/right)
 ARM_Z_MIN, ARM_Z_MAX =   30, 300   # height above base
 
