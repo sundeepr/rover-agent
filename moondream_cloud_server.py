@@ -15,15 +15,22 @@ Setup
         --model-path /path/to/moondream2 \\
         --host 0.0.0.0 --port 8767
 
-Protocol (identical to qwen_cloud_server.py)
-────────────────────────────────────────────
+Protocol (identical to qwen_cloud_server.py, plus a "detect" message type)
+──────────────────────────────────────────────────────────────────────────
 Client → Server
-  {"type": "infer", "instruction": "<text>", "frame_b64": "<base64 JPEG>"}
+  {"type": "infer",  "instruction": "<text>", "frame_b64": "<base64 JPEG>"}
+  {"type": "detect", "object": "<text>",      "frame_b64": "<base64 JPEG>"}
 
 Server → Client
   {"type": "ready"}
-  {"type": "response", "text": "<answer>", "elapsed": <float>}
-  {"type": "error",    "message": "<text>"}
+  {"type": "response",   "text": "<answer>", "elapsed": <float>}
+  {"type": "detections", "objects": [{"x_min":.., "y_min":.., "x_max":.., "y_max":..}, ...], "elapsed": <float>}
+  {"type": "error",      "message": "<text>"}
+
+"detect" uses Moondream2's native .detect() grounding API — it returns
+normalized (0-1) box coordinates, converted here to pixel coords using the
+frame's actual width/height (the frame the client sent, not the resized
+inference copy).
 """
 
 import argparse
@@ -127,6 +134,40 @@ class InferenceEngine:
 
         return {"text": answer.strip(), "elapsed": round(time.time() - t0, 3)}
 
+    def detect(self, frame_jpeg: bytes, object_name: str) -> dict:
+        """
+        Object-grounding via Moondream2's native .detect() API.
+
+        Unlike infer(), the frame is NOT resized — .detect() box coordinates
+        come back normalized (0-1), and the caller needs them converted to
+        pixel coordinates of the frame it actually sent, so we keep the
+        original resolution here rather than the fixed inference size used
+        for VQA.
+        """
+        from PIL import Image as PIL_Image
+        import torch
+
+        t0 = time.time()
+
+        pil_img = PIL_Image.open(io.BytesIO(frame_jpeg)).convert("RGB")
+        w, h = pil_img.size
+
+        with torch.no_grad():
+            result = self._model.detect(pil_img, object_name)
+
+        # Moondream2's .detect() returns {"objects": [{"x_min":.., "y_min":..,
+        # "x_max":.., "y_max":..}, ...]} with normalized (0-1) coordinates.
+        objects = []
+        for obj in result.get("objects", []):
+            objects.append({
+                "x_min": obj["x_min"] * w,
+                "y_min": obj["y_min"] * h,
+                "x_max": obj["x_max"] * w,
+                "y_max": obj["y_max"] * h,
+            })
+
+        return {"objects": objects, "elapsed": round(time.time() - t0, 3)}
+
 
 # ── Per-connection session ────────────────────────────────────────────────────
 
@@ -175,6 +216,28 @@ class ConnectionSession:
                 log.info("  RESPONSE: %s", result["text"])
             except Exception as e:
                 log.error("Inference error: %s", e, exc_info=True)
+                await websocket.send(json.dumps({"type": "error", "message": str(e)}))
+            return
+
+        if mtype == "detect":
+            frame_b64   = msg.get("frame_b64", "")
+            object_name = msg.get("object", "")
+            if not frame_b64:
+                await websocket.send(json.dumps({"type": "error", "message": "missing frame_b64"}))
+                return
+            if not object_name:
+                await websocket.send(json.dumps({"type": "error", "message": "missing object"}))
+                return
+
+            frame_bytes = base64.b64decode(frame_b64)
+            try:
+                result = await self._loop.run_in_executor(
+                    None, self._engine.detect, frame_bytes, object_name)
+                await websocket.send(json.dumps({"type": "detections", **result}))
+                log.info("Detect OK  object=%r  found=%d  elapsed=%.2fs",
+                         object_name, len(result["objects"]), result["elapsed"])
+            except Exception as e:
+                log.error("Detect error: %s", e, exc_info=True)
                 await websocket.send(json.dumps({"type": "error", "message": str(e)}))
             return
 
