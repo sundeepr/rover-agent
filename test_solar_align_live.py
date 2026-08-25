@@ -28,8 +28,11 @@ State machine
   PROBE   Coordinate-descent (Hooke-Jeeves style) hill-climb on aspect
           ratio: try a step left, undo, try a step right, undo, commit to
           whichever improved (re-centering after every move), or halve the
-          step size if neither did. Terminates when the step shrinks below
-          --probe-min-step-mm (converged) or --max-probe-iterations is hit.
+          probe duration if neither did. Terminates when the duration
+          shrinks below --probe-min-duration-s (converged) or
+          --max-probe-iterations is hit. Probe arcs are driven by
+          (duration, %power) — the Atlas has no wheel encoders, so
+          distance/mm is not a real controllable quantity here.
   DONE    Stop and hold. Ctrl-C / any exception also stops the rover.
 
 Usage
@@ -90,6 +93,22 @@ def _build_rover_ctrl(rover: str, port: str, dry_run: bool):
 _LEFT  = 1
 _RIGHT = -1
 
+# The Atlas board has no wheel encoders — it only accepts %power per wheel
+# (see atlas_controller.py's $CMD,L=,R=,AUX=# protocol). drive_raw() still
+# takes a nominal velocity_mm_s + radius_mm (to share one interface with
+# RoombaController, which DOES take real mm/s), but internally that
+# velocity is only ever used as velocity_mm_s / _MAX_VELOCITY_REF_MM_S to
+# produce a %power — there is no distance feedback of any kind. So this
+# script's probe motion is parameterized directly as (duration_s,
+# power_pct) instead of a fictional "step_mm" — power_pct is converted to
+# the vel_mm_s drive_raw() expects using Atlas's own reference constant,
+# so the number you pass is close to the real wheel %power.
+_ATLAS_POWER_REF_MM_S = atlas_controller._MAX_VELOCITY_REF_MM_S
+
+
+def _power_pct_to_vel_mm_s(power_pct: float) -> float:
+    return power_pct / 100.0 * _ATLAS_POWER_REF_MM_S
+
 _BOX_COLOR     = (0, 255, 255)   # bright yellow (BGR)
 _BOX_THICKNESS = 4
 _CORNER_LEN    = 24
@@ -149,14 +168,20 @@ def _spin(rover_ctrl, direction: int, duration_s: float, settle_s: float) -> Non
     time.sleep(settle_s)
 
 
-def _arc(rover_ctrl, direction: int, step_mm: float, radius_mm: float,
-        vel_mm_s: float, settle_s: float) -> None:
-    """direction: _LEFT (+radius) or _RIGHT (-radius). step_mm is arc-length driven."""
+def _arc(rover_ctrl, direction: int, duration_s: float, radius_mm: float,
+        power_pct: float, settle_s: float) -> None:
+    """
+    direction: _LEFT (+radius) or _RIGHT (-radius). Drives for duration_s —
+    the actual controllable quantity on a board with no distance feedback —
+    at approximately power_pct on the faster (outer) wheel. radius_mm only
+    controls the L/R wheel-speed RATIO (how tight the curve is), which is
+    real geometry independent of any distance/speed calibration.
+    """
     signed_radius = radius_mm if direction == _LEFT else -radius_mm
-    duration = abs(step_mm) / abs(vel_mm_s)
+    vel_mm_s = _power_pct_to_vel_mm_s(power_pct)
     if rover_ctrl:
-        rover_ctrl.drive_raw(vel_mm_s, int(signed_radius))
-    time.sleep(duration)
+        rover_ctrl.drive_raw(int(vel_mm_s), int(signed_radius))
+    time.sleep(duration_s)
     if rover_ctrl:
         rover_ctrl.stop()
     time.sleep(settle_s)
@@ -181,7 +206,7 @@ def _measure(state: AgentState, client: MoondreamClient, object_name: str,
 # ── HUD annotation ────────────────────────────────────────────────────────────
 
 def _annotate(frame, box, phase: _Phase, bearing_deg: float,
-              aspect_ratio: float, best_ar: float, probe_step_mm: float) -> "any":
+              aspect_ratio: float, best_ar: float, probe_duration_s: float) -> "any":
     out = frame.copy()
     h, w = out.shape[:2]
 
@@ -206,7 +231,7 @@ def _annotate(frame, box, phase: _Phase, bearing_deg: float,
         f"phase={phase.name}",
         f"bearing={bearing_deg:+.1f}deg" if box is not None else "bearing=--",
         f"AR={aspect_ratio:.3f}  best={best_ar:.3f}" if box is not None else "AR=--",
-        f"probe_step={probe_step_mm:.0f}mm",
+        f"probe_dur={probe_duration_s:.2f}s",
     ]
     cv2.rectangle(out, (0, 0), (w, 22 * len(lines) + 10), (30, 30, 30), -1)
     for i, text in enumerate(lines):
@@ -216,8 +241,8 @@ def _annotate(frame, box, phase: _Phase, bearing_deg: float,
 
 
 def _publish(state: AgentState, frame, box, phase: _Phase, bearing_deg: float,
-            aspect_ratio: float, best_ar: float, probe_step_mm: float) -> None:
-    annotated = _annotate(frame, box, phase, bearing_deg, aspect_ratio, best_ar, probe_step_mm)
+            aspect_ratio: float, best_ar: float, probe_duration_s: float) -> None:
+    annotated = _annotate(frame, box, phase, bearing_deg, aspect_ratio, best_ar, probe_duration_s)
     with state.llm_lock:
         state.llm_frame = annotated
     with state.result_lock:
@@ -228,7 +253,7 @@ def _publish(state: AgentState, frame, box, phase: _Phase, bearing_deg: float,
             "bearing_deg":  bearing_deg,
             "aspect_ratio": aspect_ratio,
             "best_ar":      best_ar,
-            "probe_step_mm": probe_step_mm,
+            "probe_duration_s": probe_duration_s,
             "found":        box is not None,
         }
         state.step += 1
@@ -270,7 +295,7 @@ def _align_loop(state: AgentState, client: MoondreamClient, rover_ctrl,
             return
         box, frame = _measure(state, client, args.object, timeout=30.0)
         if frame is not None:
-            _publish(state, frame, box, phase, bearing, ar, best_ar, args.probe_step_mm)
+            _publish(state, frame, box, phase, bearing, ar, best_ar, args.probe_duration_s)
         if box is not None:
             log.info("[SEARCH] found leftmost box after %d spin(s): %s", i, box)
             break
@@ -280,7 +305,7 @@ def _align_loop(state: AgentState, client: MoondreamClient, rover_ctrl,
         log.error("[SEARCH] no '%s' found after %d spins — giving up",
                  args.object, args.max_search_spins)
         if frame is not None:
-            _publish(state, frame, None, phase, 0.0, 0.0, 0.0, args.probe_step_mm)
+            _publish(state, frame, None, phase, 0.0, 0.0, 0.0, args.probe_duration_s)
         return
 
     def _center(label: str) -> "dict | None":
@@ -298,7 +323,7 @@ def _align_loop(state: AgentState, client: MoondreamClient, rover_ctrl,
             last_box = b
             img_w = f.shape[1]
             bearing = _bearing_deg(_box_center_x(b), img_w, args.camera_hfov_deg)
-            _publish(state, f, b, phase, bearing, ar, best_ar, args.probe_step_mm)
+            _publish(state, f, b, phase, bearing, ar, best_ar, args.probe_duration_s)
             log.info("[CENTER/%s] attempt %d/%d  bearing=%+.1fdeg",
                      label, i + 1, args.max_center_attempts, bearing)
             if abs(bearing) <= args.center_tolerance_deg:
@@ -326,16 +351,16 @@ def _align_loop(state: AgentState, client: MoondreamClient, rover_ctrl,
 
     # ── PROBE ─────────────────────────────────────────────────────────────
     phase = _Phase.PROBE
-    step = args.probe_step_mm
+    step = args.probe_duration_s   # "step" = how long each probe arc runs, in seconds
     iterations = 0
-    while (step >= args.probe_min_step_mm
+    while (step >= args.probe_min_duration_s
           and iterations < args.max_probe_iterations
           and running.is_set()):
         iterations += 1
-        log.info("[PROBE] iteration %d  step=%.0fmm  best_AR=%.3f",
-                 iterations, step, best_ar)
+        log.info("[PROBE] iteration %d  duration=%.2fs  power=%.0f%%  best_AR=%.3f",
+                 iterations, step, args.probe_power_pct, best_ar)
 
-        _arc(rover_ctrl, _LEFT, step, args.probe_radius_mm, args.probe_vel, args.settle_s)
+        _arc(rover_ctrl, _LEFT, step, args.probe_radius_mm, args.probe_power_pct, args.settle_s)
         _center("probe-left")
         b, f = _measure(state, client, args.object, timeout=30.0)
         ar_left = _aspect_ratio(b) if b is not None else -1.0
@@ -343,10 +368,10 @@ def _align_loop(state: AgentState, client: MoondreamClient, rover_ctrl,
             _publish(state, f, b, phase, bearing, ar_left, best_ar, step)
         log.info("[PROBE] left  AR=%.3f", ar_left)
 
-        _arc(rover_ctrl, _RIGHT, step, args.probe_radius_mm, args.probe_vel, args.settle_s)
+        _arc(rover_ctrl, _RIGHT, step, args.probe_radius_mm, args.probe_power_pct, args.settle_s)
         _center("undo-left")
 
-        _arc(rover_ctrl, _RIGHT, step, args.probe_radius_mm, args.probe_vel, args.settle_s)
+        _arc(rover_ctrl, _RIGHT, step, args.probe_radius_mm, args.probe_power_pct, args.settle_s)
         _center("probe-right")
         b, f = _measure(state, client, args.object, timeout=30.0)
         ar_right = _aspect_ratio(b) if b is not None else -1.0
@@ -354,23 +379,23 @@ def _align_loop(state: AgentState, client: MoondreamClient, rover_ctrl,
             _publish(state, f, b, phase, bearing, ar_right, best_ar, step)
         log.info("[PROBE] right AR=%.3f", ar_right)
 
-        _arc(rover_ctrl, _LEFT, step, args.probe_radius_mm, args.probe_vel, args.settle_s)
+        _arc(rover_ctrl, _LEFT, step, args.probe_radius_mm, args.probe_power_pct, args.settle_s)
         _center("undo-right")
 
         if (ar_left > best_ar + args.aspect_improve_threshold
               and ar_left >= ar_right):
             log.info("[PROBE] committing LEFT (AR %.3f > best %.3f)", ar_left, best_ar)
-            _arc(rover_ctrl, _LEFT, step, args.probe_radius_mm, args.probe_vel, args.settle_s)
+            _arc(rover_ctrl, _LEFT, step, args.probe_radius_mm, args.probe_power_pct, args.settle_s)
             _center("commit-left")
             best_ar = ar_left
         elif ar_right > best_ar + args.aspect_improve_threshold:
             log.info("[PROBE] committing RIGHT (AR %.3f > best %.3f)", ar_right, best_ar)
-            _arc(rover_ctrl, _RIGHT, step, args.probe_radius_mm, args.probe_vel, args.settle_s)
+            _arc(rover_ctrl, _RIGHT, step, args.probe_radius_mm, args.probe_power_pct, args.settle_s)
             _center("commit-right")
             best_ar = ar_right
         else:
             step /= 2.0
-            log.info("[PROBE] neither side improved — halving step to %.0fmm", step)
+            log.info("[PROBE] neither side improved — halving duration to %.2fs", step)
 
     # ── DONE ──────────────────────────────────────────────────────────────
     phase = _Phase.DONE
@@ -383,7 +408,7 @@ def _align_loop(state: AgentState, client: MoondreamClient, rover_ctrl,
     if f is not None:
         _publish(state, f, b, phase, final_bearing, final_ar, best_ar, step)
     log.info("[DONE] aligned — bearing=%+.1fdeg  aspect_ratio=%.3f  "
-            "iterations=%d  final_step=%.0fmm",
+            "iterations=%d  final_duration=%.2fs",
             final_bearing, final_ar, iterations, step)
 
 
@@ -424,14 +449,21 @@ def main():
     parser.add_argument("--search-spin-s", type=float, default=0.3, metavar="SECS",
                         help="Spin duration per SEARCH increment (default 0.3s)")
 
-    parser.add_argument("--probe-step-mm", type=float, default=300.0, metavar="MM",
-                        help="Initial lateral probe arc length — NEEDS TUNING (default 300)")
-    parser.add_argument("--probe-min-step-mm", type=float, default=30.0, metavar="MM",
-                        help="Stop refining once the step shrinks below this (default 30)")
+    parser.add_argument("--probe-duration-s", type=float, default=2.0, metavar="SECS",
+                        help="Initial lateral probe arc duration — the Atlas has no "
+                             "distance feedback, so time is the real controllable "
+                             "quantity, not distance. NEEDS TUNING (default 2.0)")
+    parser.add_argument("--probe-min-duration-s", type=float, default=0.3, metavar="SECS",
+                        help="Stop refining once the probe duration shrinks below this "
+                             "(default 0.3)")
     parser.add_argument("--probe-radius-mm", type=float, default=800.0, metavar="MM",
-                        help="Arc radius used for probe steps — NEEDS TUNING (default 800)")
-    parser.add_argument("--probe-vel", type=int, default=40, metavar="MM_S",
-                        help="Drive speed during probe arcs (default 40)")
+                        help="Arc radius used for probe steps — a real geometric "
+                             "quantity (controls the L/R wheel-speed ratio), independent "
+                             "of any speed/distance calibration. NEEDS TUNING (default 800)")
+    parser.add_argument("--probe-power-pct", type=float, default=15.0, metavar="PCT",
+                        help="Approx. %% power on the faster wheel during probe arcs "
+                             "(default 15.0 — conservative; motor deadband is ~8%%, so "
+                             "below that the rover won't move at all)")
     parser.add_argument("--aspect-improve-threshold", type=float, default=0.03, metavar="RATIO",
                         help="Minimum aspect-ratio delta to count as real improvement, "
                              "not detection jitter (default 0.03)")
