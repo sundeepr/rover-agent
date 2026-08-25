@@ -176,14 +176,24 @@ class AtlasController:
         """Attach a SessionRecorder so every motor command is auto-recorded."""
         self._recorder = recorder
 
-    def drive_raw(self, velocity: int, radius: int) -> None:
+    def drive_raw(self, velocity: int, radius: int,
+                  spin_power_pct: float | None = None) -> None:
         """
         Send a continuous drive command without sleeping.
 
         Converts Roomba-style (velocity_mm_s, radius_mm) to Atlas L/R %
         so OmniVLA can use AtlasController identically to RoombaController.
+
+        spin_power_pct: only used when radius is the in-place spin sentinel
+        (1 or -1). Overrides the hardcoded DRIVE_SPEED_PCT for that one
+        command — the spin sentinel branch otherwise ignores `velocity`
+        entirely and always spins at DRIVE_SPEED_PCT (60% by default),
+        which callers that need a gentler/faster spin (e.g. a probe/align
+        loop tuning against real hardware) can't otherwise control.
+        Existing callers that don't pass this keep the old behavior
+        unchanged.
         """
-        L, R = self._velocity_radius_to_lr(velocity, radius)
+        L, R = self._velocity_radius_to_lr(velocity, radius, spin_power_pct)
         self._send_cmd(L, R)
         if self._recorder:
             self._recorder.write_event({
@@ -248,8 +258,8 @@ class AtlasController:
         time.sleep(duration)
         self._send_cmd(0, 0)
 
-    def _velocity_radius_to_lr(self, velocity_mm_s: int,
-                                radius_mm: int) -> tuple[int, int]:
+    def _velocity_radius_to_lr(self, velocity_mm_s: int, radius_mm: int,
+                                spin_power_pct: float | None = None) -> tuple[int, int]:
         """
         Convert Roomba OI (velocity_mm_s, radius_mm) to Atlas (L%, R%).
 
@@ -257,6 +267,9 @@ class AtlasController:
           0x8000 → straight
           1      → spin clockwise (right)
           -1     → spin counter-clockwise (left)
+
+        spin_power_pct overrides DRIVE_SPEED_PCT for the spin cases only
+        (clamped to 0-100); None keeps the existing hardcoded-speed behavior.
         """
         if velocity_mm_s == 0:
             return 0, 0
@@ -281,11 +294,14 @@ class AtlasController:
             p   = _apply_deadband(pct)
             return p, p
 
+        spin_pct = (DRIVE_SPEED_PCT if spin_power_pct is None
+                   else _clamp(int(spin_power_pct), 0, 100))
+
         if radius_mm == 1:               # spin right in place
-            return DRIVE_SPEED_PCT, -DRIVE_SPEED_PCT
+            return spin_pct, -spin_pct
 
         if radius_mm == -1:              # spin left in place
-            return -DRIVE_SPEED_PCT, DRIVE_SPEED_PCT
+            return -spin_pct, spin_pct
 
         # General curve: differential drive kinematics
         # v_r = v * (1 + W / (2R)),  v_l = v * (1 - W / (2R))

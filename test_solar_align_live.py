@@ -157,11 +157,23 @@ def _leftmost_box(objects: "list[dict]") -> "dict | None":
 
 # ── Motion primitives (blocking, mirrors row_change_strategy's shape) ───────
 
-def _spin(rover_ctrl, direction: int, duration_s: float, settle_s: float) -> None:
-    """direction: _LEFT or _RIGHT. Spin sentinel: radius=1 -> right, radius=-1 -> left."""
+def _spin(rover_ctrl, direction: int, duration_s: float, settle_s: float,
+         power_pct: float | None = None) -> None:
+    """
+    direction: _LEFT or _RIGHT. Spin sentinel: radius=1 -> right, radius=-1 -> left.
+
+    power_pct is passed through to AtlasController.drive_raw()'s
+    spin_power_pct kwarg — without it, Atlas hardcodes spin power to
+    DRIVE_SPEED_PCT (60% by default) regardless of any velocity argument.
+    RoombaController doesn't accept this kwarg, so it's only forwarded when
+    the controller supports it.
+    """
     radius = 1 if direction == _RIGHT else -1
     if rover_ctrl:
-        rover_ctrl.drive_raw(1, radius)
+        if power_pct is not None and isinstance(rover_ctrl, atlas_controller.AtlasController):
+            rover_ctrl.drive_raw(1, radius, spin_power_pct=power_pct)
+        else:
+            rover_ctrl.drive_raw(1, radius)
     time.sleep(duration_s)
     if rover_ctrl:
         rover_ctrl.stop()
@@ -299,7 +311,7 @@ def _align_loop(state: AgentState, client: MoondreamClient, rover_ctrl,
         if box is not None:
             log.info("[SEARCH] found leftmost box after %d spin(s): %s", i, box)
             break
-        _spin(rover_ctrl, _RIGHT, args.search_spin_s, args.settle_s)
+        _spin(rover_ctrl, _RIGHT, args.search_spin_s, args.settle_s, args.spin_power_pct)
     else:
         phase = _Phase.FAILED
         log.error("[SEARCH] no '%s' found after %d spins — giving up",
@@ -330,7 +342,7 @@ def _align_loop(state: AgentState, client: MoondreamClient, rover_ctrl,
                 return last_box
             turn_duration = abs(bearing) / args.turn_deg_per_sec
             direction = _RIGHT if bearing > 0 else _LEFT
-            _spin(rover_ctrl, direction, turn_duration, args.settle_s)
+            _spin(rover_ctrl, direction, turn_duration, args.settle_s, args.spin_power_pct)
         log.warning("[CENTER/%s] did not converge after %d attempts",
                    label, args.max_center_attempts)
         return last_box
@@ -440,8 +452,13 @@ def main():
                         help="Camera horizontal field of view in degrees (default 138, "
                              "matches atlas_controller's default — recalibrate per camera)")
     parser.add_argument("--turn-deg-per-sec", type=float, default=20.0, metavar="DEG/S",
-                        help="Empirical in-place spin rate — NEEDS CALIBRATION per rover "
-                             "(default 20.0)")
+                        help="Empirical in-place spin rate at --spin-power-pct — NEEDS "
+                             "CALIBRATION per rover (default 20.0). Retune this whenever "
+                             "you change --spin-power-pct — deg/s scales with spin power.")
+    parser.add_argument("--spin-power-pct", type=float, default=25.0, metavar="PCT",
+                        help="%% power for in-place spins (SEARCH/CENTER), Atlas only — "
+                             "overrides atlas_controller.py's hardcoded 60%% default "
+                             "(default 25.0; motor deadband is ~8%%)")
     parser.add_argument("--center-tolerance-deg", type=float, default=3.0, metavar="DEG",
                         help="Bearing considered 'centered' (default 3.0)")
     parser.add_argument("--max-center-attempts", type=int, default=6, metavar="N")
