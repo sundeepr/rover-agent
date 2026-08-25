@@ -46,6 +46,11 @@ log = logging.getLogger("moondream_cloud_server")
 
 _INFER_W, _INFER_H = 320, 240   # resize before inference
 
+# device_map values that route through accelerate's multi-device dispatch.
+# Anything else (e.g. "cuda:0", "cpu") is treated as a concrete single
+# device and loaded with .to() instead — see InferenceEngine.load().
+_MULTI_DEVICE_STRATEGIES = {"auto", "balanced", "balanced_low_0", "sequential"}
+
 
 def _patch_py38(src: str) -> str:
     """
@@ -109,14 +114,32 @@ class InferenceEngine:
 
         self._tokenizer = AutoTokenizer.from_pretrained(
             str(self._model_path), trust_remote_code=True)
-        self._model = AutoModelForCausalLM.from_pretrained(
-            str(self._model_path),
-            trust_remote_code=True,
-            torch_dtype=torch.float16,
-            device_map=self._device_map,
-        )
+
+        if self._device_map in _MULTI_DEVICE_STRATEGIES:
+            self._model = AutoModelForCausalLM.from_pretrained(
+                str(self._model_path),
+                trust_remote_code=True,
+                torch_dtype=torch.float16,
+                device_map=self._device_map,
+            )
+        else:
+            # A concrete single device (e.g. "cuda:0", "cpu") — load fully,
+            # then move as one atomic .to() instead of letting accelerate's
+            # device_map machinery place it. This model's trust_remote_code
+            # forward pass (text.py's text_encoder etc.) is hand-written and
+            # assumes every tensor lives on one device; accelerate's "auto"
+            # placement can still split weights across CPU/GPU on
+            # unified-memory boards (e.g. Jetson) even when the whole model
+            # would comfortably fit on the GPU, producing
+            # "tensors on different devices" crashes mid-inference.
+            self._model = AutoModelForCausalLM.from_pretrained(
+                str(self._model_path),
+                trust_remote_code=True,
+                torch_dtype=torch.float16,
+            )
+            self._model = self._model.to(self._device_map)
         self._model.eval()
-        log.info("Moondream2 loaded")
+        log.info("Moondream2 loaded  device_map=%s", self._device_map)
 
     def infer(self, frame_jpeg: bytes, instruction: str) -> dict:
         from PIL import Image as PIL_Image
@@ -277,7 +300,11 @@ def main() -> None:
     parser.add_argument("--port",       default=8767, type=int,
                         help="WebSocket port (default: 8767)")
     parser.add_argument("--device-map", default="auto",
-                        help="HuggingFace device_map (default: auto)")
+                        help="HuggingFace device_map (default: auto). On single-GPU / "
+                             "unified-memory boards (e.g. Jetson), pass a concrete device "
+                             "like 'cuda:0' instead — 'auto' can split this model's weights "
+                             "across CPU/GPU and crash mid-inference with a "
+                             "'tensors on different devices' error.")
     args = parser.parse_args()
 
     engine = InferenceEngine(model_path=args.model_path, device_map=args.device_map)

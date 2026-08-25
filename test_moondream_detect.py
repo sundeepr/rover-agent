@@ -97,7 +97,11 @@ def main():
     parser.add_argument("--object", type=str, default="solar panel",
                         help="Object name to ground/detect (default 'solar panel')")
     parser.add_argument("--device-map", default="auto",
-                        help="HuggingFace device_map (default: auto)")
+                        help="HuggingFace device_map (default: auto). On single-GPU / "
+                             "unified-memory boards (e.g. Jetson), pass a concrete device "
+                             "like 'cuda:0' instead — 'auto' can split this model's weights "
+                             "across CPU/GPU and crash mid-inference with a "
+                             "'tensors on different devices' error.")
     args = parser.parse_args()
 
     log.info("Loading Moondream2 from %s (this can take a while)…", args.model_path)

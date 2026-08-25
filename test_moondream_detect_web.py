@@ -193,7 +193,11 @@ def main():
                         help="Seconds between detect() calls (default 2.0 — "
                              "detect is too slow to run every frame)")
     parser.add_argument("--device-map", default="auto",
-                        help="HuggingFace device_map (default: auto)")
+                        help="HuggingFace device_map (default: auto). On single-GPU / "
+                             "unified-memory boards (e.g. Jetson), pass a concrete device "
+                             "like 'cuda:0' instead — 'auto' can split this model's weights "
+                             "across CPU/GPU and crash mid-inference with a "
+                             "'tensors on different devices' error.")
     parser.add_argument("--web-server", type=str, default="http://localhost:5001",
                         metavar="URL",
                         help="URL of the running web_server.py (default: "
