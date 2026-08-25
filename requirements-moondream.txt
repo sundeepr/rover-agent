@@ -1,0 +1,17 @@
+# Extra dependencies for moondream_cloud_server.py (Moondream2 VQA + .detect() grounding)
+# Install with: pip install -r requirements-moondream.txt
+#
+# transformers MUST stay below 5.0 — Moondream2's trust_remote_code=True model
+# class (HfMoondream) predates transformers 5.x's accelerate device-mapping
+# changes. transformers>=5 crashes on load (both device_map="auto" and a
+# pinned device string) with:
+#   AttributeError: 'HfMoondream' object has no attribute 'all_tied_weights_keys'
+# Verified working combo below on JetPack (Jetson Orin, CUDA 13.2, aarch64).
+torch
+torchvision
+transformers<5
+websockets
+pillow
+einops
+accelerate
+huggingface_hub
