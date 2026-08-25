@@ -57,17 +57,42 @@ def _device(value: str):
         return value
 
 
+_BOX_COLOR    = (0, 255, 255)   # bright yellow (BGR) — high contrast against sky/panel/vegetation
+_CORNER_LEN   = 24
+_BOX_THICKNESS = 4
+
+
 def _annotate(frame, objects: list[dict], object_name: str, elapsed: float):
     out = frame.copy()
     h, w = out.shape[:2]
 
     for obj in objects:
-        x1, y1, x2, y2 = (int(obj["x_min"]), int(obj["y_min"]),
-                          int(obj["x_max"]), int(obj["y_max"]))
-        cv2.rectangle(out, (x1, y1), (x2, y2), (0, 220, 80), 2)
+        # Clamp well inside the frame — boxes that touch y=0/y=h exactly (common
+        # when Moondream's box spans the full visible height) get their top/bottom
+        # edges drawn right on the frame border, where they're easy to miss or get
+        # clipped by downstream JPEG/video resizing. Inset by a couple px so every
+        # edge is guaranteed to render on visible pixels.
+        x1 = max(2, min(int(obj["x_min"]), w - 3))
+        y1 = max(2, min(int(obj["y_min"]), h - 3))
+        x2 = max(x1 + 1, min(int(obj["x_max"]), w - 2))
+        y2 = max(y1 + 1, min(int(obj["y_max"]), h - 2))
+
+        cv2.rectangle(out, (x1, y1), (x2, y2), _BOX_COLOR, _BOX_THICKNESS)
+        # Corner markers in a contrasting outline so the box reads even if an
+        # edge lands on a similarly-coloured background.
+        for cx, cy, dx, dy in ((x1, y1, 1, 1), (x2, y1, -1, 1),
+                               (x1, y2, 1, -1), (x2, y2, -1, -1)):
+            cv2.line(out, (cx, cy), (cx + dx * _CORNER_LEN, cy), (0, 0, 0), _BOX_THICKNESS + 2)
+            cv2.line(out, (cx, cy), (cx, cy + dy * _CORNER_LEN), (0, 0, 0), _BOX_THICKNESS + 2)
+            cv2.line(out, (cx, cy), (cx + dx * _CORNER_LEN, cy), _BOX_COLOR, _BOX_THICKNESS)
+            cv2.line(out, (cx, cy), (cx, cy + dy * _CORNER_LEN), _BOX_COLOR, _BOX_THICKNESS)
+
         area = (x2 - x1) * (y2 - y1)
-        cv2.putText(out, f"{object_name} ({area}px^2)", (x1 + 4, max(y1 - 8, 16)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 220, 80), 2, cv2.LINE_AA)
+        label_y = y1 - 10 if y1 > 30 else y2 + 26
+        cv2.putText(out, f"{object_name} ({area}px^2)", (x1 + 4, label_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4, cv2.LINE_AA)
+        cv2.putText(out, f"{object_name} ({area}px^2)", (x1 + 4, label_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, _BOX_COLOR, 2, cv2.LINE_AA)
 
     status = (f"'{object_name}': {len(objects)} found  elapsed={elapsed:.2f}s"
               if objects else f"'{object_name}': NONE found  elapsed={elapsed:.2f}s")
