@@ -108,6 +108,7 @@ class AtlasController:
         self._ser: "serial.Serial | None" = None
         self._aux      = 0     # current AUX value — persists across drive_raw calls
         self._recorder = None  # set via set_recorder() after connect()
+        
 
     # ── Connection ────────────────────────────────────────────────────────────
 
@@ -124,6 +125,15 @@ class AtlasController:
             baudrate=self.baud,
             timeout=0.2,
             write_timeout=0.2,
+            parity=serial.PARITY_NONE,
+            stopbits=serial.STOPBITS_ONE,
+            bytesize=serial.EIGHTBITS,
+    
+            # --- ADD THESE TWO LINES TO DISABLE THE HANDSHAKE ---
+            rtscts=False,  # Disables RTS/CTS hardware flow control
+            dsrdtr=False  # Disables DSR/DTR hardware flow control
+            # ----------------------------------------------------
+    
         )
         time.sleep(0.2)   # let the port settle after open
         log.info("Atlas connected on %s", self.port)
