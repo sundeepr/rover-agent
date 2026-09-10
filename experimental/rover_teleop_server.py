@@ -58,7 +58,7 @@ import websockets
 
 
 LISTEN_HOST = "0.0.0.0"
-LISTEN_PORT = 9000
+LISTEN_PORT = 9876
 BAUD_RATE   = 115200
 
 # Atlas rover motor constants (mirrors atlas_controller.py)

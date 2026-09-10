@@ -28,6 +28,7 @@ import math
 import ssl
 import sys
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -98,6 +99,21 @@ FEEDBACK_TIMEOUT_S = 0.5
 ROVER_MAX_VEL_MM_S = 80
 ROVER_WATCHDOG_S = 0.3
 ROVER_GRIP_AUX_PCT = 50
+COMMAND_LOG_FILE = None
+
+
+def log_received_command(raw: str, addr) -> None:
+    if COMMAND_LOG_FILE is None:
+        return
+    entry = {
+        "received_at": datetime.now(timezone.utc).isoformat(),
+        "client": str(addr),
+        "raw": raw,
+    }
+    COMMAND_LOG_FILE.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    COMMAND_LOG_FILE.flush()
+
+
 def clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(value, hi))
 
@@ -512,15 +528,17 @@ def handle_spray_message(
 
     rover_state.last_spray_time = time.monotonic()
     aux_pct = ROVER_GRIP_AUX_PCT if active else 0
+    if rover_ctrl is None:
+        print("[!] spray_state received but --rover-serial is not configured")
+        return
     try:
-        if rover_ctrl is not None:
-            rover_ctrl.set_aux(aux_pct)
-            velocity, radius = _joy_to_drive(
-                rover_state.fwd,
-                rover_state.turn,
-                ROVER_MAX_VEL_MM_S,
-            )
-            rover_ctrl.drive_raw(velocity, radius)
+        rover_ctrl.set_aux(aux_pct)
+        velocity, radius = _joy_to_drive(
+            rover_state.fwd,
+            rover_state.turn,
+            ROVER_MAX_VEL_MM_S,
+        )
+        rover_ctrl.drive_raw(velocity, radius)
         if active != rover_state.spray_active:
             print(f"[rover] spray={'on' if active else 'off'} aux={aux_pct}%")
         rover_state.aux_pct = aux_pct
@@ -528,6 +546,31 @@ def handle_spray_message(
     except Exception as error:
         rover_state.spray_active = False
         print(f"[!] rover spray command failed: {error}")
+
+
+def handle_gripper_message(
+        payload: dict,
+        state: TeleopState,
+        ser: serial.Serial) -> None:
+    closed = payload.get("closed")
+    if not isinstance(closed, bool):
+        print(f"[!] invalid gripper state: {closed!r}")
+        return
+    if state.gripper_closed == closed:
+        return
+
+    command = gripper_command(closed)
+    try:
+        ser.write((command + "\n").encode())
+    except (OSError, serial.SerialException) as error:
+        print(f"[!] {state.arm_name} gripper command failed: {error}")
+        return
+
+    state.gripper_closed = closed
+    state.target.t = GRIPPER_CLOSED_RAD if closed else GRIPPER_OPEN_RAD
+    state.control_anchor_target.t = state.target.t
+    state.commands_sent += 1
+    print(f"[gripper] arm={state.arm_name} closed={closed} command={command}")
 
 
 def handle_rover_drive_message(
@@ -546,14 +589,17 @@ def handle_rover_drive_message(
     rover_state.fwd = fwd
     rover_state.turn = turn
 
+    if rover_ctrl is None:
+        print("[!] rover_drive received but --rover-serial is not configured")
+        return
+
     try:
         if fwd == 0 and turn == 0:
             stop_rover(rover_ctrl, rover_state, "release")
             return
 
         velocity, radius = _joy_to_drive(fwd, turn, ROVER_MAX_VEL_MM_S)
-        if rover_ctrl is not None:
-            rover_ctrl.drive_raw(velocity, radius)
+        rover_ctrl.drive_raw(velocity, radius)
         rover_state.active = True
         if VERBOSE_STREAM_LOGS:
             print(
@@ -653,6 +699,7 @@ def relay_command(
         states: dict[str, TeleopState],
         rover_ctrl: AtlasController | None,
         rover_state: RoverDriveState) -> None:
+    log_received_command(raw, addr)
     if VERBOSE_STREAM_LOGS:
         print(f"[>] data received from {addr}: {raw!r}")
     try:
@@ -676,7 +723,9 @@ def relay_command(
         print(f"[!] arm {arm_name!r} is not configured")
         return
 
-    if payload_type == "teleop_delta":
+    if payload_type == "gripper_state":
+        handle_gripper_message(payload, state, ser)
+    elif payload_type == "teleop_delta":
         handle_teleop_message(payload, state, ser)
     else:
         print(f"[!] unsupported payload type from {addr}: {payload_type!r}")
@@ -825,6 +874,7 @@ def initialize_arm(name: str, ser: serial.Serial) -> TeleopState:
 
 
 def main():
+    global COMMAND_LOG_FILE
     parser = argparse.ArgumentParser(description="RoArm teleop socket server")
     parser.add_argument("--socket-type", choices=["raw", "ws", "wss"], default="ws")
     parser.add_argument("--port", type=int, default=LISTEN_PORT)
@@ -849,9 +899,19 @@ def main():
         help="Atlas rover serial device; omit to disable rover driving",
     )
     parser.add_argument("--rover-baud", type=int, default=115200)
+    parser.add_argument(
+        "--command-log",
+        type=Path,
+        default=Path("logs/roarm_socket_commands.jsonl"),
+        help="append every received command to this JSONL file",
+    )
     parser.add_argument("--cert", type=str, default=None)
     parser.add_argument("--key", type=str, default=None)
     args = parser.parse_args()
+
+    args.command_log.parent.mkdir(parents=True, exist_ok=True)
+    COMMAND_LOG_FILE = args.command_log.open("a", encoding="utf-8")
+    print(f"Logging received commands to {args.command_log}")
 
     if args.socket_type == "wss":
         if not (args.cert and args.key):
@@ -934,6 +994,9 @@ def main():
             rover_context.__exit__(None, None, None)
         for ser in serial_ports.values():
             ser.close()
+        if COMMAND_LOG_FILE is not None:
+            COMMAND_LOG_FILE.close()
+            COMMAND_LOG_FILE = None
 
 
 if __name__ == "__main__":
