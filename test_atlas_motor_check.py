@@ -37,6 +37,8 @@ from atlas_controller import AtlasController
 
 log = logging.getLogger("test_atlas_motor_check")
 
+_SERIAL_REFRESH_S = 0.9
+
 
 def _pause(prompt: str) -> bool:
     """Wait for Enter; return False if the user typed 'q' to quit early."""
@@ -53,8 +55,15 @@ def _run_step(ctrl: AtlasController, label: str, L: int, R: int, duration_s: flo
     # than going through drive_raw()'s velocity/radius/deadband conversion —
     # the whole point of this script is to test the raw L/R %power the
     # STM32 actually receives, with nothing else in between.
-    ctrl._send_cmd(L, R)
-    time.sleep(duration_s)
+    deadline = time.monotonic() + duration_s
+    while True:
+        ctrl._send_cmd(L, R)
+        remaining_s = deadline - time.monotonic()
+        if remaining_s <= 0:
+            break
+        time.sleep(min(_SERIAL_REFRESH_S, remaining_s))
+        if time.monotonic() >= deadline:
+            break
     ctrl.stop()
     log.info("[%s] done — did it move as expected?", label)
 

@@ -98,6 +98,7 @@ FEEDBACK_COMMAND = {"T": 105}
 FEEDBACK_TIMEOUT_S = 0.5
 ROVER_MAX_VEL_MM_S = 80
 ROVER_WATCHDOG_S = 0.3
+ROVER_SERIAL_REFRESH_S = 0.9
 ROVER_GRIP_AUX_PCT = 50
 COMMAND_LOG_FILE = None
 
@@ -148,6 +149,7 @@ class RoverDriveState:
         self.aux_pct = 0
         self.spray_active = False
         self.last_spray_time = 0.0
+        self.last_serial_send_time = 0.0
 
 
 class TeleopState:
@@ -180,6 +182,7 @@ def stop_rover(
             rover_state.aux_pct = 0
         if (rover_state.active or source != "release") and rover_ctrl is not None:
             rover_ctrl.stop()
+            rover_state.last_serial_send_time = time.monotonic()
     except Exception as error:
         print(f"[!] rover stop failed source={source}: {error}")
     finally:
@@ -204,6 +207,7 @@ def stop_spray(
                 ROVER_MAX_VEL_MM_S,
             )
             rover_ctrl.drive_raw(velocity, radius)
+            rover_state.last_serial_send_time = time.monotonic()
     except Exception as error:
         print(f"[!] rover spray stop failed source={source}: {error}")
     finally:
@@ -527,6 +531,8 @@ def handle_spray_message(
         return
 
     rover_state.last_spray_time = time.monotonic()
+    if active == rover_state.spray_active:
+        return
     aux_pct = ROVER_GRIP_AUX_PCT if active else 0
     if rover_ctrl is None:
         print("[!] spray_state received but --rover-serial is not configured")
@@ -539,6 +545,7 @@ def handle_spray_message(
             ROVER_MAX_VEL_MM_S,
         )
         rover_ctrl.drive_raw(velocity, radius)
+        rover_state.last_serial_send_time = time.monotonic()
         if active != rover_state.spray_active:
             print(f"[rover] spray={'on' if active else 'off'} aux={aux_pct}%")
         rover_state.aux_pct = aux_pct
@@ -586,6 +593,7 @@ def handle_rover_drive_message(
 
     rover_state.commands_received += 1
     rover_state.last_command_time = time.monotonic()
+    command_changed = fwd != rover_state.fwd or turn != rover_state.turn
     rover_state.fwd = fwd
     rover_state.turn = turn
 
@@ -598,8 +606,12 @@ def handle_rover_drive_message(
             stop_rover(rover_ctrl, rover_state, "release")
             return
 
+        if rover_state.active and not command_changed:
+            return
+
         velocity, radius = _joy_to_drive(fwd, turn, ROVER_MAX_VEL_MM_S)
         rover_ctrl.drive_raw(velocity, radius)
+        rover_state.last_serial_send_time = time.monotonic()
         rover_state.active = True
         if VERBOSE_STREAM_LOGS:
             print(
@@ -843,6 +855,21 @@ async def rover_watchdog(
             time.monotonic() - rover_state.last_spray_time > ROVER_WATCHDOG_S
         ):
             stop_spray(rover_ctrl, rover_state, "watchdog")
+        elif (
+            rover_ctrl is not None and
+            (rover_state.active or rover_state.aux_pct != 0) and
+            time.monotonic() - rover_state.last_serial_send_time >= ROVER_SERIAL_REFRESH_S
+        ):
+            try:
+                velocity, radius = _joy_to_drive(
+                    rover_state.fwd,
+                    rover_state.turn,
+                    ROVER_MAX_VEL_MM_S,
+                )
+                rover_ctrl.drive_raw(velocity, radius)
+                rover_state.last_serial_send_time = time.monotonic()
+            except Exception as error:
+                print(f"[!] rover serial refresh failed: {error}")
 
 
 def initialize_arm(name: str, ser: serial.Serial) -> TeleopState:
