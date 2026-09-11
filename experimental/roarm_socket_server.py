@@ -443,6 +443,29 @@ def controller_moved(delta: dict) -> bool:
     return any(abs(float(delta.get(axis, 0.0))) >= INPUT_MOVE_EPS_M for axis in ("x", "y", "z"))
 
 
+def home_target_from_payload(payload: dict, hand_angle: float) -> EeTarget:
+    home = payload.get("home")
+    if not isinstance(home, dict):
+        return EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, hand_angle)
+
+    try:
+        values = [float(home[axis]) for axis in ("x", "y", "z")]
+    except (KeyError, TypeError, ValueError):
+        print(f"[!] invalid home target; using server default: {home!r}")
+        return EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, hand_angle)
+
+    if not all(math.isfinite(value) for value in values):
+        print(f"[!] non-finite home target; using server default: {home!r}")
+        return EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, hand_angle)
+
+    return EeTarget(
+        clamp(values[0], MIN_X_MM, MAX_X_MM),
+        clamp(values[1], MIN_Y_MM, MAX_Y_MM),
+        clamp(values[2], MIN_Z_MM, MAX_Z_MM),
+        hand_angle,
+    )
+
+
 def axis_bar(value: float, minimum: float, maximum: float, width: int = 24) -> str:
     if maximum <= minimum:
         return "-" * width
@@ -636,8 +659,13 @@ def handle_teleop_message(payload: dict, state: TeleopState, ser: serial.Serial)
 
     if payload.get("recenter"):
         current_hand_angle = state.target.t
-        state.target = EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, current_hand_angle)
-        state.control_anchor_target = EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, current_hand_angle)
+        state.target = home_target_from_payload(payload, current_hand_angle)
+        state.control_anchor_target = EeTarget(
+            state.target.x,
+            state.target.y,
+            state.target.z,
+            current_hand_angle,
+        )
         reset_delta_filter(state)
         try:
             command = joint_command(state.target)
