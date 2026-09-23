@@ -49,14 +49,14 @@ LISTEN_HOST = "0.0.0.0"
 LISTEN_PORT = 9876
 VERBOSE_STREAM_LOGS = False
 
-GRIPPER_OPEN_RAD = math.pi / 2.0
+GRIPPER_OPEN_RAD = 2.715
 GRIPPER_CLOSED_RAD = math.pi
 GRIPPER_SPD = 0
 GRIPPER_ACC = 10
 
-HOME_X_MM = 250.0
+HOME_X_MM = 40.0
 HOME_Y_MM = 0.0
-HOME_Z_MM = 0.0
+HOME_Z_MM = 150.0
 HOME_T_RAD = GRIPPER_OPEN_RAD
 MM_PER_METER = 1500.0
 MOTION_SCALE = 0.4
@@ -86,7 +86,7 @@ MIN_Y_MM = -490.0
 MAX_Y_MM = 490.0
 MIN_Z_MM = -490.0
 MAX_Z_MM = 490.0
-MIN_RADIAL_MM = 80.0
+MIN_RADIAL_MM = 40.0
 
 INPUT_MOVE_EPS_M = 1e-4
 TARGET_EPS_MM = 0.5
@@ -658,7 +658,7 @@ def handle_teleop_message(payload: dict, state: TeleopState, ser: serial.Serial)
     }
 
     if payload.get("recenter"):
-        current_hand_angle = state.target.t
+        current_hand_angle = HOME_T_RAD
         state.target = home_target_from_payload(payload, current_hand_angle)
         state.control_anchor_target = EeTarget(
             state.target.x,
@@ -674,6 +674,7 @@ def handle_teleop_message(payload: dict, state: TeleopState, ser: serial.Serial)
             return
         ser.write((command + "\n").encode())
         state.commands_sent += 1
+        state.gripper_closed = False
         if VERBOSE_STREAM_LOGS:
             print(f"[arm] recenter sent seq={payload.get('seq')} target={state.target.__dict__}")
         append_history(state)
@@ -916,13 +917,13 @@ def initialize_arm(name: str, ser: serial.Serial) -> TeleopState:
         print(f"[init] {name} arm feedback target={state.target.__dict__}")
     else:
         print(f"[init] {name} arm feedback unavailable; using configured target={state.target.__dict__}")
-    command = gripper_command(True)
+    command = gripper_command(False)
     ser.write((command + "\n").encode())
-    state.gripper_closed = True
-    state.target.t = GRIPPER_CLOSED_RAD
-    state.control_anchor_target.t = GRIPPER_CLOSED_RAD
+    state.gripper_closed = False
+    state.target.t = GRIPPER_OPEN_RAD
+    state.control_anchor_target.t = GRIPPER_OPEN_RAD
     state.commands_sent += 1
-    print(f"[init] {name} arm EOAT closed command={command}")
+    print(f"[init] {name} arm EOAT open command={command}")
     append_history(state)
     render_dashboard(state)
     return state
