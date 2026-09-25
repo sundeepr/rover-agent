@@ -1031,8 +1031,11 @@ def initialize_arm(name: str, ser: serial.Serial) -> TeleopState:
     send_json(ser, command)
     state.commands_sent += 1
     deadline = time.monotonic() + HOME_FEEDBACK_TIMEOUT_S
+    last_feedback = None
     while time.monotonic() < deadline:
         feedback_target = extract_target_from_feedback(request_feedback(ser))
+        if feedback_target is not None:
+            last_feedback = feedback_target
         if feedback_target is not None and all(
                 abs(getattr(feedback_target, axis) - getattr(state.target, axis)) <= 3.0
                 for axis in ("x", "y", "z")):
@@ -1042,7 +1045,20 @@ def initialize_arm(name: str, ser: serial.Serial) -> TeleopState:
             render_dashboard(state)
             return state
         time.sleep(0.05)
-    raise RuntimeError(f"{name} arm did not confirm configured home within {HOME_FEEDBACK_TIMEOUT_S}s")
+    requested_home = state.target
+    if last_feedback is not None:
+        state.target = last_feedback
+        state.control_anchor_target = EeTarget(**last_feedback.__dict__)
+        print(f"[init] {name} home not confirmed within {HOME_FEEDBACK_TIMEOUT_S}s; "
+              f"requested={requested_home.__dict__} feedback={last_feedback.__dict__}; "
+              "keeping arm connected and anchoring control to feedback")
+    else:
+        print(f"[init] {name} home feedback unavailable after {HOME_FEEDBACK_TIMEOUT_S}s; "
+              f"keeping arm connected with unconfirmed target={requested_home.__dict__}")
+    state.gripper_closed = False
+    append_history(state)
+    render_dashboard(state)
+    return state
 
 
 def main():

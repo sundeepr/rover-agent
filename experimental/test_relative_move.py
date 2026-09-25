@@ -45,11 +45,23 @@ class StartupHomeTest(unittest.TestCase):
         self.assertEqual(state.control_anchor_target, ns['EeTarget'](40, 0, 150, 2.715))
         self.assertFalse(state.gripper_closed)
 
-    def test_unconfirmed_home_does_not_enable_arm(self):
+    def test_missing_feedback_keeps_arm_connected_at_commanded_target(self):
         ns = load_server(Path(__file__).with_name('roarm_socket_server.py'))
         ns['HOME_FEEDBACK_TIMEOUT_S'] = 0
-        with self.assertRaisesRegex(RuntimeError, 'did not confirm configured home'):
-            ns['initialize_arm']('right', Serial())
+        ser = Serial()
+        state = ns['initialize_arm']('right', ser)
+        self.assertEqual(state.target, ns['EeTarget'](40, 0, 150, 2.715))
+        self.assertFalse(state.gripper_closed)
+        self.assertEqual(len(ser.commands), 1)
+
+    def test_off_target_feedback_becomes_control_anchor(self):
+        ns = load_server(Path(__file__).with_name('roarm_socket_server.py'))
+        clock = iter([0, 0, 10])
+        ns['time'] = types.SimpleNamespace(monotonic=lambda: next(clock), sleep=lambda _: None)
+        ns['request_feedback'] = lambda ser: {'x': 44, 'y': 1, 'z': 155, 't': 2.715}
+        state = ns['initialize_arm']('left', Serial())
+        self.assertEqual(state.target, ns['EeTarget'](44, 1, 155, 2.715))
+        self.assertEqual(state.control_anchor_target, state.target)
 
 
 class RelativeMoveTest(unittest.IsolatedAsyncioTestCase):
