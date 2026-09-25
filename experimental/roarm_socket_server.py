@@ -91,6 +91,7 @@ MIN_RADIAL_MM = 40.0
 INPUT_MOVE_EPS_M = 1e-4
 TARGET_EPS_MM = 0.5
 RECLUTCH_HOLDOFF_S = 0.30
+MOVE_FEEDBACK_TIMEOUT_S = 2.0
 EMA_ALPHA = 1.0
 
 INIT_COMMAND = {"T": 100}
@@ -159,6 +160,11 @@ class TeleopState:
         self.control_anchor_target = EeTarget(HOME_X_MM, HOME_Y_MM, HOME_Z_MM, HOME_T_RAD)
         self.control_active = False
         self.gripper_closed = None
+        self.move_task = None
+        self.move_failed = False
+        self.move_request_id = None
+        self.move_reply = None
+        self.move_result = None
         self.control_resume_time = 0.0
         self.mode = "xyz"
         self.last_delta = {"x": 0.0, "y": 0.0, "z": 0.0}
@@ -603,6 +609,103 @@ def handle_gripper_message(
     print(f"[gripper] arm={state.arm_name} closed={closed} command={command}")
 
 
+def finish_relative_move(state: TeleopState) -> None:
+    state.move_task = None
+    state.control_active = False
+    state.control_anchor_target = EeTarget(**state.target.__dict__)
+    reset_delta_filter(state)
+
+
+def move_reply(state: TeleopState, status: str, reason: str = "") -> None:
+    result = {"type": "arm_move_result", "arm": state.arm_name,
+              "request_id": state.move_request_id, "status": status, "reason": reason}
+    state.move_result = result
+    if state.move_reply is not None:
+        try:
+            state.move_reply(result)
+        except (OSError, RuntimeError) as error:
+            print(f"[relative_move] reply unavailable: {error}")
+
+
+def cancel_relative_move(state: TeleopState) -> None:
+    if state.move_task is not None:
+        state.move_task.cancel()
+        move_reply(state, "cancelled")
+        finish_relative_move(state)
+
+
+async def execute_relative_move(state: TeleopState, ser: serial.Serial,
+                                path: list[EeTarget], duration: float) -> None:
+    try:
+        for target in path:
+            ser.write((joint_command(target) + "\n").encode())
+            state.target = target
+            state.commands_sent += 1
+            await asyncio.sleep(duration / len(path))
+        deadline = time.monotonic() + MOVE_FEEDBACK_TIMEOUT_S
+        while time.monotonic() < deadline:
+            actual = extract_target_from_feedback(request_feedback(ser))
+            if actual is not None and all(
+                    abs(getattr(actual, axis) - getattr(state.target, axis)) <= 3.0
+                    for axis in ("x", "y", "z")):
+                move_reply(state, "completed")
+                return
+            await asyncio.sleep(0.05)
+        state.move_failed = True
+        move_reply(state, "failed", "feedback timeout")
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        state.move_failed = True
+        move_reply(state, "failed", str(error))
+    finally:
+        if state.move_task is asyncio.current_task():
+            finish_relative_move(state)
+
+
+def handle_relative_move(payload: dict, state: TeleopState, ser: serial.Serial, reply=None) -> None:
+    request_id = payload.get("request_id")
+    def reject(reason):
+        if reply is not None:
+            reply({"type": "arm_move_result", "arm": state.arm_name,
+                   "request_id": request_id, "status": "rejected", "reason": reason})
+    if not isinstance(request_id, str) or not request_id or len(request_id) > 100:
+        reject("request_id required")
+        return
+    if request_id == state.move_request_id:
+        if reply is not None and state.move_result is not None:
+            reply(state.move_result)
+        return
+    if state.move_task is not None or state.move_failed:
+        reject("arm busy or awaiting control release")
+        return
+    try:
+        delta = payload["delta_mm"]
+        values = [float(delta[axis]) for axis in ("x", "y", "z")]
+        duration = float(payload.get("duration_ms", 300)) / 1000
+        if not all(math.isfinite(v) for v in values + [duration]) or not 0.1 <= duration <= 5:
+            raise ValueError("invalid delta or duration")
+        if math.sqrt(sum(v*v for v in values)) > 100:
+            raise ValueError("relative move exceeds 100 mm")
+        start = state.target
+        path = [EeTarget(start.x + values[0]*i/15, start.y + values[1]*i/15,
+                         start.z + values[2]*i/15, start.t) for i in range(1, 16)]
+        for target in path:
+            if not (MIN_X_MM <= target.x <= MAX_X_MM and
+                    MIN_Y_MM <= target.y <= MAX_Y_MM and
+                    MIN_Z_MM <= target.z <= MAX_Z_MM and
+                    math.hypot(target.x, target.y) >= MIN_RADIAL_MM):
+                raise ValueError("move exceeds workspace")
+            solve_ik(target)
+    except (KeyError, TypeError, ValueError) as error:
+        reject(str(error))
+        return
+    state.move_request_id = request_id
+    state.move_reply = reply
+    move_reply(state, "accepted")
+    state.move_task = asyncio.create_task(execute_relative_move(state, ser, path, duration))
+
+
 def handle_rover_drive_message(
         payload: dict,
         rover_ctrl: AtlasController | None,
@@ -647,6 +750,12 @@ def handle_rover_drive_message(
 
 def handle_teleop_message(payload: dict, state: TeleopState, ser: serial.Serial) -> None:
     state.messages_received += 1
+    if state.move_task is not None:
+        return
+    if state.move_failed:
+        if payload.get("control_active", False):
+            return
+        state.move_failed = False
     delta = payload.get("delta", {})
     moved = controller_moved(delta)
     state.last_seq = int(payload.get("seq", state.last_seq))
@@ -739,7 +848,8 @@ def relay_command(
         serial_ports: dict[str, serial.Serial],
         states: dict[str, TeleopState],
         rover_ctrl: AtlasController | None,
-        rover_state: RoverDriveState) -> None:
+        rover_state: RoverDriveState,
+        reply=None) -> None:
     log_received_command(raw, addr)
     if VERBOSE_STREAM_LOGS:
         print(f"[>] data received from {addr}: {raw!r}")
@@ -764,7 +874,12 @@ def relay_command(
         print(f"[!] arm {arm_name!r} is not configured")
         return
 
-    if payload_type == "gripper_state":
+    if payload_type == "arm_move_relative":
+        handle_relative_move(payload, state, ser, reply)
+    elif payload_type == "arm_move_cancel":
+        if payload.get("request_id") == state.move_request_id:
+            cancel_relative_move(state)
+    elif payload_type == "gripper_state":
         handle_gripper_message(payload, state, ser)
     elif payload_type == "teleop_delta":
         handle_teleop_message(payload, state, ser)
@@ -793,10 +908,13 @@ async def handle_raw_client(
                 states,
                 rover_ctrl,
                 rover_state,
+                lambda result: writer.write((json.dumps(result) + "\n").encode()),
             )
     except (ConnectionResetError, asyncio.IncompleteReadError):
         pass
     finally:
+        for state in states.values():
+            cancel_relative_move(state)
         if rover_state.active or rover_state.spray_active or rover_state.aux_pct != 0:
             stop_rover(rover_ctrl, rover_state, "disconnect")
         writer.close()
@@ -835,11 +953,14 @@ async def handle_ws_client(
     try:
         async for message in ws:
             relay_command(
-                message, addr, serial_ports, states, rover_ctrl, rover_state
+                message, addr, serial_ports, states, rover_ctrl, rover_state,
+                lambda result: asyncio.create_task(ws.send(json.dumps(result)))
             )
     except websockets.ConnectionClosed:
         pass
     finally:
+        for state in states.values():
+            cancel_relative_move(state)
         if rover_state.active or rover_state.spray_active or rover_state.aux_pct != 0:
             stop_rover(rover_ctrl, rover_state, "disconnect")
         print(f"[-] disconnected {addr}")
