@@ -32,6 +32,26 @@ class Serial:
         self.commands.append(json.loads(data))
 
 
+class StartupHomeTest(unittest.TestCase):
+    def test_startup_commands_configured_home_instead_of_firmware_home(self):
+        ns = load_server(Path(__file__).with_name('roarm_socket_server.py'))
+        ser = Serial()
+        feedback = iter([{'x': 250, 'y': 0, 'z': 0}, {'x': 40, 'y': 0, 'z': 150}])
+        ns['request_feedback'] = lambda port: next(feedback)
+        state = ns['initialize_arm']('right', ser)
+        expected = json.loads(ns['joint_command'](ns['EeTarget'](40, 0, 150, 2.715)))
+        expected['spd'] = ns['HOME_JOINT_SPEED']
+        self.assertEqual(ser.commands, [expected])
+        self.assertEqual(state.control_anchor_target, ns['EeTarget'](40, 0, 150, 2.715))
+        self.assertFalse(state.gripper_closed)
+
+    def test_unconfirmed_home_does_not_enable_arm(self):
+        ns = load_server(Path(__file__).with_name('roarm_socket_server.py'))
+        ns['HOME_FEEDBACK_TIMEOUT_S'] = 0
+        with self.assertRaisesRegex(RuntimeError, 'did not confirm configured home'):
+            ns['initialize_arm']('right', Serial())
+
+
 class RelativeMoveTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.ns = load_server(Path(__file__).with_name('roarm_socket_server.py'))

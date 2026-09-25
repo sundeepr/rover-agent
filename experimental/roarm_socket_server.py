@@ -94,7 +94,8 @@ RECLUTCH_HOLDOFF_S = 0.30
 MOVE_FEEDBACK_TIMEOUT_S = 2.0
 EMA_ALPHA = 1.0
 
-INIT_COMMAND = {"T": 100}
+HOME_JOINT_SPEED = 600
+HOME_FEEDBACK_TIMEOUT_S = 8.0
 FEEDBACK_COMMAND = {"T": 105}
 FEEDBACK_TIMEOUT_S = 0.5
 ROVER_MAX_VEL_MM_S = 80
@@ -1024,30 +1025,24 @@ async def rover_watchdog(
 
 def initialize_arm(name: str, ser: serial.Serial) -> TeleopState:
     state = TeleopState(name)
-    send_json(ser, INIT_COMMAND)
-    feedback = request_feedback(ser)
-    feedback_target = extract_target_from_feedback(feedback)
-    if feedback_target is not None:
-        state.target = feedback_target
-        state.control_anchor_target = EeTarget(
-            feedback_target.x,
-            feedback_target.y,
-            feedback_target.z,
-            feedback_target.t,
-        )
-        print(f"[init] {name} arm feedback target={state.target.__dict__}")
-    else:
-        print(f"[init] {name} arm feedback unavailable; using configured target={state.target.__dict__}")
-    command = gripper_command(False)
-    ser.write((command + "\n").encode())
-    state.gripper_closed = False
-    state.target.t = GRIPPER_OPEN_RAD
-    state.control_anchor_target.t = GRIPPER_OPEN_RAD
+    # T:100 uses the firmware's fixed joint home, not our configured XYZ home.
+    command = json.loads(joint_command(state.target))
+    command["spd"] = HOME_JOINT_SPEED
+    send_json(ser, command)
     state.commands_sent += 1
-    print(f"[init] {name} arm EOAT open command={command}")
-    append_history(state)
-    render_dashboard(state)
-    return state
+    deadline = time.monotonic() + HOME_FEEDBACK_TIMEOUT_S
+    while time.monotonic() < deadline:
+        feedback_target = extract_target_from_feedback(request_feedback(ser))
+        if feedback_target is not None and all(
+                abs(getattr(feedback_target, axis) - getattr(state.target, axis)) <= 3.0
+                for axis in ("x", "y", "z")):
+            state.gripper_closed = False
+            print(f"[init] {name} arm home reached target={state.target.__dict__}")
+            append_history(state)
+            render_dashboard(state)
+            return state
+        time.sleep(0.05)
+    raise RuntimeError(f"{name} arm did not confirm configured home within {HOME_FEEDBACK_TIMEOUT_S}s")
 
 
 def main():
