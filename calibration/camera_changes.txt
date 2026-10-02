@@ -1,0 +1,59 @@
+TASK: Apply video + time settings to CP Plus IP cameras (Dahua-based web UI, firmware v3.2)
+TARGETS: https://10.0.1.102 and https://10.0.1.103 (one at a time)
+REFERENCE: 10.0.1.101 already has these settings.
+
+PRECONDITIONS
+- Cameras use a self-signed HTTPS cert; the human accepts the browser warning.
+- The human signs in to each camera themselves. Do not enter credentials.
+- Change ONLY the fields listed below. Leave everything else untouched.
+
+STEP 1 — Setting > Camera > Video > "Video" tab
+
+  Main Stream:
+    Encode Mode ........ H.264B
+    Instastream ........ Off (unchanged)
+    Resolution ......... 1280*720(720P) (unchanged)
+    Frame Rate(FPS) .... 25 (unchanged)
+    Bit Rate Type ...... CBR
+    Bit Rate ........... Customized -> type 3072 in the box that appears below it
+    I Frame Interval ... 25 (unchanged)
+    Watermark .......... unchecked (unchanged)
+    Stream Smooth ...... 50 (unchanged)
+
+  Sub Stream (Enable = checked, Sub Stream 1 selected):
+    Encode Mode ........ H.264B
+    Resolution ......... 640*480(VGA) (unchanged)
+    Frame Rate(FPS) .... 25 (unchanged)
+    Bit Rate Type ...... CBR
+    Bit Rate ........... 1024
+    I Frame Interval ... 25 (unchanged)
+    Stream Smooth ...... 50 (unchanged)
+
+  Click Save. Expect the "Save Succeeded!" message.
+  GOTCHA: choosing "Customized" adds a text box, which pushes the Save button
+  down about 25 px. Re-locate Save before clicking.
+  VERIFY: click Refresh and confirm the values above reloaded. If they
+  reverted to H.265/VBR, the save didn't happen; redo the step.
+
+STEP 2 — Setting > System > General > "Date&Time" tab
+    Time Zone .......... (UTC+05:30) Chennai, Kolkata, Mumbai, New Delhi (unchanged)
+    DST ................ unchecked (unchanged)
+    NTP ................ checked
+    Server ............. 10.0.1.100
+    Port ............... 123 (unchanged)
+    Interval ........... 1 (minutes)
+
+  Click Save. A prompt asks to enable NTP sync; click OK.
+  VERIFY: leave the page and come back; NTP should still be checked with server 10.0.1.100.
+
+STEP 3 — Setting > Camera > Video > "Overlay" tab (check only, no changes expected)
+    Privacy Masking .... Disable
+    Time Title ......... Disable
+  If either is enabled, report it. Don't change it without asking.
+
+DONE WHEN: both steps verified on each camera. Report the before/after values per camera.
+
+
+
+sudo chronyc clients   # camera IP listed
+ffprobe -rtsp_transport udp "rtsp://admin:<password>@10.0.1.10X:554/cam/realmonitor?channel=1&subtype=0"   # h264 Constrained Baseline, 1280x720, 25 fps
