@@ -36,6 +36,12 @@ Robustness
   - GPS sentences with no fix (gps_qual == 0) or that fail to parse are
     skipped.
 
+Camera credentials
+──────────────────
+RTSP username/password are read from the RTSP_USER / RTSP_PASSWORD env vars
+(not hardcoded) — set them in a local, gitignored .env or export them before
+running. See .env.example. Camera hosts/paths are not secret and stay below.
+
 Usage
 ─────
     python record_mcap.py
@@ -65,12 +71,26 @@ from mcap.writer import Writer
 
 log = logging.getLogger("rover.record_mcap")
 
-# ── Hardcoded camera sources (same as record_all_cameras.py) ───────────────
-CAMERA_SOURCES = {
-    "cam_10_0_1_101": "rtsp://admin:Cam3ra_1234@10.0.1.101:554/video/live?channel=1&subtype=1",
-    "cam_10_0_1_102": "rtsp://admin:Cam3ra_1234@10.0.1.102:554/video/live?channel=1&subtype=1",
-    "cam_10_0_1_103": "rtsp://admin:Cam3ra_1234@10.0.1.103:554/video/live?channel=1&subtype=1",
-}
+# ── Camera sources ───────────────────────────────────────────────────────────
+# Same 3 camera hosts as record_all_cameras.py. Credentials come from the
+# environment (RTSP_USER / RTSP_PASSWORD) rather than being hardcoded here —
+# built lazily in main() so --no-cameras can skip the requirement.
+_CAMERA_HOSTS = ["10.0.1.101", "10.0.1.102", "10.0.1.103"]
+
+
+def _build_camera_sources() -> dict:
+    user = os.environ.get("RTSP_USER", "admin")
+    password = os.environ.get("RTSP_PASSWORD")
+    if not password:
+        raise SystemExit(
+            "RTSP_PASSWORD is not set. Export RTSP_USER/RTSP_PASSWORD (see "
+            ".env.example) before running, or pass --no-cameras to skip camera capture."
+        )
+    return {
+        f"cam_{host.replace('.', '_')}":
+            f"rtsp://{user}:{password}@{host}:554/video/live?channel=1&subtype=1"
+        for host in _CAMERA_HOSTS
+    }
 
 # Low-latency RTSP capture flags (same as sensors/rtsp_cam.py)
 _FFMPEG_OPTS = (
@@ -446,7 +466,7 @@ def main() -> None:
     threads = []
 
     if not args.no_cameras:
-        for name, url in CAMERA_SOURCES.items():
+        for name, url in _build_camera_sources().items():
             t = threading.Thread(target=_camera_loop, args=(name, url, recorder, running),
                                  daemon=True, name=name)
             threads.append(t)

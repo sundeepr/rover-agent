@@ -7,7 +7,8 @@ writes each to its own MJPG .avi file (MJPG chosen to match session_recorder.py'
 existing convention — each frame is independently decodable, so a crash or
 Ctrl-C mid-recording doesn't corrupt the whole file the way some codecs can).
 
-Everything is hardcoded per the ask — edit SOURCES below to change cameras.
+Camera hosts are hardcoded below (edit _CAMERA_HOSTS to change); RTSP
+credentials come from RTSP_USER / RTSP_PASSWORD env vars — see .env.example.
 
 Usage
 ─────
@@ -20,6 +21,7 @@ Output
 """
 
 import logging
+import os
 import threading
 import time
 from datetime import datetime
@@ -29,13 +31,27 @@ import cv2
 
 log = logging.getLogger("record_all_cameras")
 
-# ── Hardcoded camera sources ─────────────────────────────────────────────────
-SOURCES = {
-    "cam_10_0_1_101": "rtsp://admin:Cam3ra_1234@10.0.1.101:554/video/live?channel=1&subtype=1",
-    "cam_10_0_1_102": "rtsp://admin:Cam3ra_1234@10.0.1.102:554/video/live?channel=1&subtype=1",
-    "cam_10_0_1_103": "rtsp://admin:Cam3ra_1234@10.0.1.103:554/video/live?channel=1&subtype=1",
-    "usb_video0":     0,   # /dev/video0
-}
+# ── Camera sources ───────────────────────────────────────────────────────────
+# RTSP credentials come from RTSP_USER / RTSP_PASSWORD (not hardcoded) — set
+# them in a local, gitignored .env or export before running. See .env.example.
+_CAMERA_HOSTS = ["10.0.1.101", "10.0.1.102", "10.0.1.103"]
+
+
+def _build_sources() -> dict:
+    user = os.environ.get("RTSP_USER", "admin")
+    password = os.environ.get("RTSP_PASSWORD")
+    if not password:
+        raise SystemExit(
+            "RTSP_PASSWORD is not set. Export RTSP_USER/RTSP_PASSWORD "
+            "(see .env.example) before running."
+        )
+    sources = {
+        f"cam_{host.replace('.', '_')}":
+            f"rtsp://{user}:{password}@{host}:554/video/live?channel=1&subtype=1"
+        for host in _CAMERA_HOSTS
+    }
+    sources["usb_video0"] = 0  # /dev/video0
+    return sources
 
 OUTPUT_ROOT   = Path("recordings")
 FALLBACK_FPS  = 15.0     # used when the source doesn't report a usable FPS
@@ -101,7 +117,7 @@ def main():
     running.set()
 
     threads = []
-    for name, source in SOURCES.items():
+    for name, source in _build_sources().items():
         out_path = session_dir / f"{name}.avi"
         t = threading.Thread(target=_record_camera, args=(name, source, out_path, running),
                              daemon=True, name=name)
