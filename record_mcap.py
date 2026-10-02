@@ -89,7 +89,6 @@ _DEFAULT_GPS_BAUD  = 9600
 
 _RECONNECT_S  = 3.0
 _JPEG_QUALITY = 85
-_CAM_FPS      = 15
 
 _TLM_RE = re.compile(
     r"^TLM,t=(?P<t>-?\d+),armed=(?P<armed>[01]),autonomy=(?P<autonomy>[01]),"
@@ -250,25 +249,36 @@ class McapRecorder:
 
 # ── Camera capture ───────────────────────────────────────────────────────────
 
+_FAIL_STREAK_LIMIT = 20  # consecutive failed reads tolerated before reconnecting (matches sensors/rtsp_cam.py)
+
+
 def _open_rtsp_capture(url: str) -> "cv2.VideoCapture | None":
     os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = _FFMPEG_OPTS
     cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
     if not cap.isOpened():
         return None
+    try:
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # best-effort; not all backends honor this
+    except Exception:
+        pass
     for _ in range(3):
         cap.read()
     return cap
 
 
 def _camera_loop(name: str, url: str, recorder: McapRecorder, running: threading.Event) -> None:
+    # No artificial fps throttle here: read as fast as the source delivers.  A
+    # sleep-then-read loop lets each camera's own network/ffmpeg buffer build
+    # up a backlog while we sleep, and cap.read() hands back the OLDEST
+    # buffered frame first — how much backlog accumulates differs per camera
+    # (bitrate, RTT, encoder latency), which is what made 101/102/103 drift
+    # out of sync even though every frame is stamped on arrival.
     encode_params = [cv2.IMWRITE_JPEG_QUALITY, _JPEG_QUALITY]
-    interval = 1.0 / _CAM_FPS
     safe_url = url.split("@")[-1] if "@" in url else url
     cap = None
+    fail_streak = 0
 
     while running.is_set():
-        t0 = time.monotonic()
-
         if cap is None:
             log.info("[%s] connecting to %s …", name, safe_url)
             cap = _open_rtsp_capture(url)
@@ -277,23 +287,25 @@ def _camera_loop(name: str, url: str, recorder: McapRecorder, running: threading
                 time.sleep(_RECONNECT_S)
                 continue
             log.info("[%s] connected", name)
+            fail_streak = 0
 
         ret, frame = cap.read()
         if not ret or frame is None:
-            log.warning("[%s] read failed — reconnecting", name)
-            cap.release()
-            cap = None
-            time.sleep(_RECONNECT_S)
+            fail_streak += 1
+            if fail_streak > _FAIL_STREAK_LIMIT:
+                # Sustained failure, not a one-off hiccup -- actually reconnect.
+                log.warning("[%s] %d consecutive read failures — reconnecting",
+                            name, fail_streak)
+                cap.release()
+                cap = None
+                time.sleep(_RECONNECT_S)
+                fail_streak = 0
             continue
+        fail_streak = 0
 
         ok, buf = cv2.imencode(".jpg", frame, encode_params)
         if ok:
             recorder.publish_image(name, time.time_ns(), buf.tobytes())
-
-        elapsed = time.monotonic() - t0
-        wait = interval - elapsed
-        if wait > 0:
-            time.sleep(wait)
 
     if cap is not None:
         cap.release()
